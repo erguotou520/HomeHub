@@ -1,0 +1,46 @@
+[package]
+name = "home-nas-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["Home NAS Team"]
+description = "A cross-platform NAS management server"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart", "macros"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace", "set-header"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "migrate", "macros"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+jsonwebtoken = "9"
+bcrypt = "0.15"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+regex-lite = "0.1"
+
+# Media processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+lofty = "0.22"
+quick-xml = "0.37"
+
+# File handling
+mime_guess = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+axum-test = "15"
+tokio = { version = "1", features = ["full", "test-util"] }

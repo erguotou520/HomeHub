@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Rust
+server/target/
+server/.env
+
+# Node / admin
+node_modules/
+dist/
+*.log
+
+# Android
+mobile/.gradle/
+mobile/.idea/
+mobile/.kotlin/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+mobile/.omc/
+mobile/.claude/
+
+# 环境与密钥
+*.env
+config.yaml.bak

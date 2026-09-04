@@ -1,0 +1,23 @@
+global:
+  web-url: http://localhost:8485
+  jwt-secret: dev-secret-key-change-in-production
+
+apps:
+  album:
+    - photos:/tmp/nas-test/photos
+    
+  videos:
+    - movies:/tmp/nas-test/videos
+    
+  music:
+    - library:/tmp/nas-test/music
+    
+  documents:
+    - docs:/tmp/nas-test/documents
+
+database:
+  host: localhost
+  port: 5433
+  name: home_nas
+  user: dba
+  password: 'Ohpo[X3a'

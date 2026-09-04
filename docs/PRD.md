@@ -1,9 +1,11 @@
 # HomeHub 需求文档（PRD）
 
-- **版本**: v0.1（草案）
+- **版本**: v0.2（草案，已吸收 2026-09-04 评审反馈）
 - **日期**: 2026-09-04
 - **状态**: 待评审
 - **来源**: 由 `home-nas`（Rust NAS 服务端）与 `my_nvr_app`（Android WireGuard/NVR 客户端）合并整合而来
+
+**v0.2 变更摘要**: 数据库由 PostgreSQL 改为 **SQLite**；NAS 库模型改为「统一目录管理 + 归属标记」；新增 **WireGuard 身份审计日志**；缩略图定为单档 256px；YOLO 增加**风景/人脸**检测能力；分享功能整体移除；明确不考虑 HEIC、不迁移旧 RN 客户端；任务队列补充资源占用控制策略。
 
 ---
 
@@ -15,23 +17,25 @@
 
 | 项目 | 定位 | 技术栈 | 现状 |
 |------|------|--------|------|
-| home-nas | 家用 NAS 服务端 + RN 客户端 | Rust + Axum 0.7 / PostgreSQL / SQLx；React Native (Expo) | 已具备文件管理、缩略图、分享、用户体系 |
+| home-nas | 家用 NAS 服务端 + RN 客户端 | Rust + Axum 0.7 / PostgreSQL / SQLx；React Native (Expo) | 已具备文件管理、缩略图、用户体系 |
 | my_nvr_app | 手机端 NVR 客户端 | Android 原生 Kotlin + Compose，minSdk 30 | 已具备 WireGuard 隧道连接 + X5 WebView 加载 Frigate |
 
-两个项目各自维护，功能重叠不足、体验割裂：NAS 客户端没有组网能力（离开家庭网络不可用），NVR 客户端没有相册/文件能力。本项目的目标是将两者合并为**一个独立项目 HomeHub**，以 WireGuard 为统一组网与准入手段，提供「相册 + NAS 文件 + 监控」三位一体的自托管家庭服务。
+两个项目各自维护，功能重叠不足、体验割裂。本项目的目标是将两者合并为**一个独立项目 HomeHub**，以 WireGuard 为统一组网与准入手段，提供「相册 + NAS 文件 + 监控（预留）」三位一体的自托管家庭服务。
 
 ### 1.2 核心目标
 
-1. **组网即准入**：家庭网络连接由 WireGuard 完成，服务端不再做用户体系（用户由 WG 控制），手机端连上隧道即可使用全部功能。
+1. **组网即准入**：家庭网络连接由 WireGuard 完成，服务端不做用户体系（用户由 WG 控制），手机端连上隧道即可使用全部功能；服务端记录 WG 身份用于审计。
 2. **一套服务端**：基于 `home-nas/backend`（Rust + Axum）重构为统一后台，提供管理后台页面（Web）。
 3. **一个手机 App**：基于 `my_nvr_app` 的 Android 工程重构，包含相册、NAS 文件、监控（预留）三大模块。
-4. **智能照片管理**：对标 immich / mtphoto 的核心能力——YOLO 识别打标、缩略图、无损压缩、多维度浏览（时间轴/目录树/分类/地理位置）。
+4. **智能照片管理**：对标 immich / mtphoto 的核心能力——YOLO 物体/风景/人脸识别打标、缩略图、无损压缩、多维度浏览（时间轴/目录树/分类/地理位置）。
 
-### 1.3 非目标（本轮明确不做）
+### 1.3 非目标（本期明确不做）
 
-- 不做多用户/多租户（由 WG 网络层天然隔离设备与家庭）。
-- 监控模块本期仅预留入口与配置页骨架，不实现播放（后续对接 Frigate 或自研录像）。
-- 不做 iOS 端（沿用 Android 原生路线）。
+- 不做多用户/多租户（由 WG 网络层隔离；WG 身份仅用于日志审计，不做权限区分）。
+- **不做分享功能**（现有 shares 能力移除；未来如需公网分享另行立项，含安全设计）。
+- 监控模块本期仅保留入口与配置页骨架，不实现播放（后续对接 Frigate 或自研录像）。
+- 不做 iOS 端；**旧 home-nas RN 客户端废弃，不迁入本仓库**。
+- 不支持 HEIC（如后续有 iPhone 照片需求，二期再评估 libheif 转码）。
 - 不做公网穿透本身（WG Endpoint 由用户自行准备，如家庭宽带的 DDNS + 端口转发）。
 
 ---
@@ -43,12 +47,13 @@
 | 资产 | 位置 | 复用方式 |
 |------|------|----------|
 | Axum 服务骨架、路由组织 | `server/src/main.rs` | 直接沿用 |
-| 虚拟路径→本地路径解析（`<子库>/<相对路径>`） | `server/src/config/mod.rs` | 沿用并扩展（增加忽略目录配置） |
+| 虚拟路径→本地路径解析（`<子库>/<相对路径>`） | `server/src/config/mod.rs` | 沿用并改造（统一目录 + 归属标记 + 忽略目录） |
 | 文件服务（列目录/增删/复制/移动） | `server/src/services/file_service.rs` | 沿用 |
-| 缩略图服务（image crate，300px JPEG，`.thumbnails/`） | `server/src/services/thumbnail_service.rs` | 沿用并纳入任务队列 |
+| 缩略图服务（image crate，`.thumbnails/`） | `server/src/services/thumbnail_service.rs` | 沿用，规格改为单档 256px |
 | 视频/音乐元数据识别 | `server/src/utils/video_detector.rs`、`music_parser.rs` | 沿用 |
-| PostgreSQL + SQLx 迁移（users/shares 表） | `server/migrations/` | users 表废弃，shares 视需要保留 |
-| Dockerfile / docker-compose | `server/Dockerfile`、`deploy/docker-compose.yml` | 沿用并调整 |
+| Dockerfile / docker-compose | `server/Dockerfile`、`deploy/docker-compose.yml` | 沿用并调整（去掉 postgres 容器） |
+
+**废弃**：`users` 表与 `/api/auth/*`、`/api/users` 全部认证代码；`shares` 表与分享 API；PostgreSQL 依赖（改 SQLite）。
 
 ### 2.2 来自 my_nvr_app（已迁移至 `mobile/`）
 
@@ -59,10 +64,10 @@
 | VPN 权限申请流程（`VpnService.prepare()` + ActivityResult） | `mobile/.../MainActivity.kt` | 抽取为独立组件 |
 | Compose 工程骨架、主题、生物识别门禁（BiometricPrompt） | `mobile/app/` | 沿用 |
 
-**必须废弃/重构的遗留问题**（现状盘点时发现的安全与工程问题）：
+**必须废弃/重构的遗留问题**（现状盘点发现的安全与工程问题）：
 
-- `PreferencesManager.kt` 使用明文 SharedPreferences 存私钥与密码 → 迁移到 EncryptedSharedPreferences/DataStore。
-- 网络层全局信任所有证书（`sslBypassContext`）、WebView 忽略 SSL 错误、`usesCleartextTraffic=true` → 重写为 OkHttp/Retrofit + 可配置的自签证书信任（CertificatePinner / 自定义 TrustManager，仅信任服务端证书）。
+- `PreferencesManager.kt` 明文 SharedPreferences 存私钥与密码 → 迁移到 EncryptedSharedPreferences/DataStore。
+- 网络层全局信任所有证书、WebView 忽略 SSL 错误、`usesCleartextTraffic=true` → 重写为 OkHttp/Retrofit + 可配置的自签证书信任（仅信任服务端证书）。
 - `MainActivity.kt` 1366 行单文件承载全部 UI → 拆分为多 Screen + Navigation Compose。
 - Frigate 登录 JS 注入 hack → 本期监控空置，不迁移。
 
@@ -75,17 +80,19 @@
 ```
 ┌──────────────────────────── 家庭网络 (WireGuard) ────────────────────────────┐
 │                                                                              │
-│  ┌─────────────┐   wg0 隧道    ┌──────────────────────────────────────────┐  │
-│  │  手机 App    │◄────────────►│  HomeHub Server (Rust + Axum, :8485)     │  │
-│  │  (Android)  │              │  ├── 文件服务 (photo/nas 文件读写)         │  │
-│  │  · 相册      │              │  ├── 照片服务 (EXIF/GPS/方向/旋转)         │  │
-│  │  · NAS 文件  │              │  ├── 任务系统 (缩略图/YOLO/压缩/索引)      │  │
-│  │  · 监控(预留)│              │  ├── 配置服务 (库/路径/忽略目录)           │  │
-│  └─────────────┘              │  └── Admin API ──► 管理后台 (React Web)  │  │
-│       │                       │            PostgreSQL │ 磁盘卷(NAS 路径)  │  │
-│       │  WG 内可直接访问        └──────────────────────────────────────────┘  │
-│       └────────────────────────────►  Frigate NVR (监控，预留对接)            │
-│                                                                              │
+│  ┌─────────────┐   wg0 隧道   ┌───────────────────────────────────────────┐  │
+│  │  手机 App    │◄───────────►│  HomeHub Server (Rust + Axum, :8485)      │  │
+│  │  (Android)  │  来源IP=身份 │  ├── 文件服务 (统一目录树读写)              │  │
+│  │  · 相册      │  (审计日志)  │  ├── 照片服务 (EXIF/GPS/方向/旋转)          │  │
+│  │  · NAS 文件  │             │  ├── 任务系统 (缩略图/识别/压缩, 资源受限)   │  │
+│  │  · 监控(预留)│             │  ├── 配置服务 (目录/归属标记/忽略规则)       │  │
+│  └─────────────┘             │  ├── 身份审计 (WG peer ↔ 隧道IP 映射+日志)  │  │
+│                              │  └── Admin API ──► 管理后台 (React Web)   │  │
+│  ┌─────────────┐             │        SQLite(单文件) │ 磁盘卷(NAS 路径)    │  │
+│  │  PC 浏览器   │◄───────────►└───────────────────────────────────────────┘  │
+│  │ 管理后台+相册 │                        WG 网关 (wg show / peer 表)          │
+│  └─────────────┘                                                             │
+│        WG 内可直接访问 ─────────────►  Frigate NVR (监控，预留对接)             │
 └────────────────────── Endpoint: 家庭宽带 DDNS:port (UDP) ─────────────────────┘
 ```
 
@@ -93,11 +100,11 @@
 
 ```
 homehub/
-├── docs/            # PRD、架构决策记录（ADR）
-├── server/          # Rust + Axum 后端（源自 home-nas/backend，本轮已迁入）
-├── admin/           # 管理后台前端（待用 /Users/erguotou/.agents/skills/fe-init 初始化，
+├── docs/            # PRD、架构决策记录（ADR）、API 文档
+├── server/          # Rust + Axum 后端（源自 home-nas/backend，已迁入）
+├── admin/           # 管理后台 + PC 相册前端（待用 /Users/erguotou/.agents/skills/fe-init 初始化，
 │                    #   页面设计用 Ardot (ardot-design-core) 做视觉优化）
-├── mobile/          # Android 客户端（源自 my_nvr_app，本轮已迁入）
+├── mobile/          # Android 客户端（源自 my_nvr_app，已迁入）
 ├── deploy/          # docker-compose.yml、config.yaml、部署脚本
 └── README.md
 ```
@@ -107,153 +114,192 @@ homehub/
 | 层 | 选型 | 说明 |
 |----|------|------|
 | 服务端 | Rust 1.83 + Axum 0.7 + Tokio + SQLx | 沿用 home-nas |
-| 数据库 | PostgreSQL 16 | docker-compose 部署 |
-| 对象识别 | `ort` crate（ONNX Runtime）+ YOLOv8n/YOLO11n 检测模型（.onnx） | 标签 = 检测类别 + 置信度阈值过滤；模型文件放 `server/models/`，可在后台配置路径 |
+| 数据库 | **SQLite**（SQLx sqlite，单文件 `homehub.db`，WAL 模式） | 轻量易备份；元数据量级（百万行内）完全够用；随 docker 卷挂载持久化 |
+| 对象识别 | `ort` crate（ONNX Runtime）+ **三套模型**：YOLOv8n 物体检测、场景分类（风景/室内/食物等，可用 MobileNet 或 CLIP 轻量版）、人脸检测（YOLOv8-face 或 RetinaFace 轻量版） | 人脸本期做到「检测 + 聚类分组」（同脸归组，由用户命名），不做 1:N 比对识别身份 |
 | EXIF/方向 | `kamadak-exif` | 读取 EXIF Orientation 与 GPS |
-| 图片压缩 | 无损：`oxipng`（PNG）、JPEG 无损变换（`jpegtran` 逻辑或 mozjpeg 绑定）；压缩率无收益时保留原文件 | 目标：视觉无损 |
-| 缩略图 | 现有 `image` crate 方案，扩展多尺寸（256/1024） | 存放于各库目录 `.thumbnails/` |
-| 管理后台 | React + TypeScript（fe-init 初始化，含检测包管理器流程） | 视觉设计通过 Ardot 画布产出并落地 |
-| 手机端 | Kotlin + Jetpack Compose + Navigation Compose；OkHttp/Retrofit；Coil（图片加载）；Compose 自研 zoomable（双击/捏合放大） | minSdk 30 |
+| 图片压缩 | 无损：`oxipng`（PNG）、JPEG 无损变换（mozjpeg/jpegtran 逻辑）；节省率无收益时保留原文件 | 视觉无损，原图保护机制见 §10 建议 A |
+| 缩略图 | `image` crate，**单档：最大长/宽 256px** JPEG，存各目录 `.thumbnails/` | 列表流加载 256 档，查看器加载原图 |
+| 后台前端 | React + TypeScript（fe-init 初始化，含包管理器检测流程） | 视觉设计通过 Ardot 画布产出并落地 |
+| 手机端 | Kotlin + Jetpack Compose + Navigation Compose；OkHttp/Retrofit；Coil | minSdk 30 |
+| 手机端地图 | **Android 端用 Android SDK 生态**（osmdroid 或高德 SDK，实施时确认网络可用性） | 服务端只出聚合数据，地图渲染归客户端 |
+| PC 端地图 | **Web 端用 Web SDK**（Leaflet + OSM/高德瓦片） | 同上，两端各自选型 |
 | 组网 | wireguard-android tunnel 库（GoBackend），沿用 wg0 单隧道 | 密钥本地生成或导入 |
 
 ---
 
 ## 4. 功能需求
 
-### 4.1 服务端 — 管理后台（Web）
+### 4.1 服务端 — 目录与库模型（重构核心）
 
-管理后台面向**家庭管理员**，通过浏览器访问（WG 内网或本机）。认证方式：**单一管理员密码**（config.yaml 配置，登录后签发 JWT），不设多用户。
+**统一目录管理**：所有 NAS 目录在管理后台统一登记，形成一张「目录注册表」。每个目录（库）包含：
 
-#### 4.1.1 NAS 配置管理（对应现 config.yaml 的 `apps` 段，可视化）
+| 字段 | 说明 |
+|------|------|
+| 名称 | 展示名，唯一 |
+| 本地路径 | 磁盘上的真实路径 |
+| **归属标记** | 多选：`album`（相册）/ `video`（视频）/ `music` / `document` / `none`（仅文件管理可见）。一个目录可同时带多个标记（如既是相册又可被文件管理浏览） |
+| 忽略目录列表 | 相对路径模式（如 `@eaDir`、`.thumbnails`、`#recycle`、`.stfolder`），命中目录不参与扫描/识别/压缩/相册展示 |
+| 启用状态 | 停用的目录不参与任何任务 |
 
-- 管理多个「库」（Library），每个库含：名称、类型（`album` / `files` / 预留 `videos` `music` `documents`）、本地路径（磁盘目录）、启用状态。
-- 每个库可配置**忽略目录列表**（如 `@eaDir`、`.thumbnails`、`#recycle` 等）：这些目录不参与自动整理（不扫描、不打标、不压缩、不出现在相册中），但文件浏览中仍可见（可配置是否隐藏）。
-- 配置读写落盘 `config.yaml`（保持与现格式兼容，平滑迁移），修改后热生效（无需重启）。
-- 展示各库的统计信息：文件数、已生成缩略图数、已识别数、压缩节省空间。
+- **App/PC 查相册 = 查询所有带 `album` 标记的目录的集合**（跨目录聚合时间轴/分类等视图）。
+- NAS 文件浏览 = 所有登记目录的并集（按目录树呈现），与归属标记无关。
+- 配置落盘 `config.yaml`（格式升级为目录注册表，首次启动自动从旧格式迁移），支持热生效。
+- 所有数据面请求按 `<目录名>/<相对路径>` 寻址，沿用现有 `resolve_path()` 机制。
 
-#### 4.1.2 监控配置（预留）
+### 4.2 服务端 — WireGuard 身份审计（无用户体系的替代）
 
-- 页面骨架：Frigate 地址、凭据占位、摄像头列表占位。本期只读展示，不做实际连接。
+- 服务端维护 **WG Peer 注册表**：`wg_peers(public_key, name, tunnel_ip, first_seen, last_seen, enabled)`，来源两种方式：
+  1. 服务端与 WG 网关同机时，直接解析 `wg show wg0 dump` 自动同步；
+  2. 不同机时，由管理后台手工登记「隧道 IP ↔ 设备名」映射。
+- **每个数据面请求**根据来源 IP 反查 peer 身份，写入审计日志 `audit_logs(id, peer_id, method, path, status, bytes, created_at)`（异步批量写入，避免拖慢请求）。
+- 管理后台可查看：设备列表、每个设备的访问日志与流量统计。
+- 审计日志保留策略可配置（默认 90 天），定期清理任务自动执行。
 
-#### 4.1.3 任务中心
+### 4.3 服务端 — 照片/相册服务
 
-- 展示后台任务队列状态：待处理/处理中/失败数量，按类型（缩略图、YOLO 识别、压缩、索引）过滤。
-- 支持手动触发全量重扫、重试失败任务。
-- 展示 YOLO 模型加载状态与路径配置。
+#### 4.3.1 照片入库与元数据
 
-#### 4.1.4 系统信息
+- 扫描所有 `album` 标记目录（跳过忽略目录），图片文件（jpg/jpeg/png/webp/gif）登记为照片资产（`photo_assets`）。
+- 读取 EXIF：拍摄时间、GPS、方向（Orientation）、尺寸、相机型号。
+- **自动方向调整**：按 EXIF Orientation 自动纠正；提供**手动旋转接口**（见 5.2），旋转写回文件（无损 90° 变换优先）并同步重建缩略图。
 
-- 服务版本、磁盘用量（各库路径的容量）、WG 接口状态（若服务端部署在 WG 网关上，只读展示）。
+#### 4.3.2 YOLO 识别与标签归类
 
-### 4.2 服务端 — 照片/相册服务
+- 新照片入库进入识别队列，产出三类标签：
+  1. **物体标签**（YOLO 检测：person/dog/car/food...，含置信度）；
+  2. **场景标签**（场景分类模型：风景/山/海/日落/室内/夜景...）——用户明确要求支持「风景」归类；
+  3. **人脸**（人脸检测产出人脸框 → 感知哈希/嵌入聚类 → `person_groups` 分组；App 端「人物」视图展示各分组，用户可命名分组）。
+- 后台可配置：模型路径、各类置信度阈值、最小图片尺寸、排除标签、各模型开关。
+- 支持模型升级后全量重跑。
 
-#### 4.2.1 照片入库与元数据
-
-- 对 `album` 类型库进行目录扫描，发现图片文件（jpg/jpeg/png/heic/webp/gif）即登记为「照片资产」（数据库表 `photo_assets`）。
-- 读取并存储 EXIF：拍摄时间、GPS 经纬度（反解出地理位置名，可后续接反向地理编码）、方向（Orientation）、尺寸、相机型号。
-- **自动方向调整**：根据 EXIF Orientation 在服务端生成时自动纠正；同时提供**手动旋转接口**供 App 调用（见 5.2 API），旋转结果写入图片文件并同步更新缩略图（无损 90° 变换优先，有损仅当格式不支持时兜底）。
-
-#### 4.2.2 YOLO 识别与标签归类
-
-- 新照片入库后进入识别队列，YOLO 推理产出标签（如 person, dog, car, food...），连同置信度写入 `photo_tags`。
-- 每个「分类」= 标签；App 端按标签聚合浏览。
-- 后台可配置：模型路径、置信度阈值、最小图片尺寸（过小的跳过）、排除标签。
-- 同一目录内识别结果支持重新识别（模型升级后全量重跑）。
-
-#### 4.2.3 浏览视图（服务端提供聚合查询接口）
+#### 4.3.3 浏览视图（服务端聚合查询接口）
 
 | 视图 | 逻辑 |
 |------|------|
-| 时间轴 | 按拍摄时间（无 EXIF 则文件 mtime）分年/月分组，返回分组 + 封面 |
-| 目录树 | 按库内目录层级聚合（与文件浏览一致） |
-| 分类 | 按标签聚合，返回标签 + 数量 + 代表封面 |
-| 地理位置 | 按照片 GPS 聚合（粗糙网格聚类，如保留 2 位小数经纬度分组），地图上展示数量点 |
+| 时间轴 | 按拍摄时间（无 EXIF 则 mtime）分年/月分组，跨 album 目录聚合 |
+| 目录树 | 按目录层级聚合（限单目录范围内） |
+| 分类 | 按标签聚合（物体+场景混合展示，标签云/列表 + 封面） |
+| 人物 | 按人脸分组聚合 |
+| 地理位置 | 按 GPS 聚合（经纬度网格聚类）；地图渲染由 Android/PC 各自 SDK 完成，服务端只出聚合点数据 |
 
-#### 4.2.4 缩略图与无损压缩（定期任务）
+#### 4.3.4 任务系统与资源控制（重点）
 
-- **缩略图**：入库/上传后生成 256px（列表用）与 1024px（查看用）两档，存放 `.thumbnails/`；定期任务兜底补齐缺失缩略图。
-- **内容识别**：YOLO 队列消费（见 4.2.2）。
-- **无损压缩**：定期任务扫描可优化文件——PNG 走 oxipng 重压缩、JPEG 走无损重压缩/优化 Huffman 表；**仅当体积有实质节省（默认 ≥3%）且像素数据不变时替换原文件**，否则跳过；替换前写临时文件原子替换。目的对标 mtphoto：省空间但完全不影响画质。
-- 任务系统实现：进程内 tokio 队列 + `tasks` 表持久化（重启可恢复），并发度可配置（默认 2）。
+NAS 文件量级大（十万级+），任务系统设计约束：
 
-### 4.3 服务端 — 文件服务（NAS）
+- **持久化队列**：SQLite `tasks` 表，重启自动恢复；任务类型：`scan`（目录扫描）、`thumb`（缩略图）、`detect_object`、`detect_scene`、`detect_face`、`compress`、`geo`。
+- **增量优先**：目录扫描记录 mtime/size 指纹，未变化的文件不重复入队；配合文件系统事件监听（`notify` crate，inotify）实时感知新增/修改，避免全量轮询；全量重扫仅手动触发或定时兜底（可配，默认每周一次低峰执行）。
+- **资源控制（全部可配）**：
+  - 并发度：CPU 密集任务（识别）默认并发 1，IO 密集任务（缩略图/压缩）默认并发 2；
+  - 限流：每秒处理文件数上限、单文件超时；推理用 ONNX Runtime 线程数限制（避免吃满 CPU）；
+  - **空闲调度**：可配置工作时段（如仅 02:00–08:00 全速跑重任务），白天只处理「用户刚上传的」高优先级任务，保证上传体验；
+  - IO 优先级：磁盘操作用低优先级（容器内以并发+限流近似实现）。
+- **进度可见**：管理后台任务中心展示各队列深度、速率、失败重试；App 端上传后可看到「处理中 N 张」。
 
-- 沿用现有 `/api/files/:module/*path` 能力：列目录、上传、下载、删除、重命名、复制、移动、新建目录。
-- **移除用户体系**：`/api/auth/*`、`/api/users` 下线；管理员密码仅用于管理后台登录，数据面 API 信任 WG 内网（部署建议：服务端仅监听 WG 网段地址或由防火墙限制来源）。
-- 文件列表接口返回：名称、类型、大小、修改时间、是否目录；**排序规则由客户端控制（目录在前、名称字母序）**，服务端按需支持 `sort=name|mtime|size` 参数。
+#### 4.3.5 缩略图与无损压缩
 
-### 4.4 手机端（Android App）
+- **缩略图**：单档 256px（最大长/宽 256），入 `.thumbnails/`，命名含原图指纹（mtime+size）避免失效。
+- **无损压缩**：PNG 走 oxipng、JPEG 走无损重压缩；**仅当节省 ≥3% 且像素不变时原子替换**，否则跳过。
+- 服务端定期（可配）兜底补齐缺失缩略图、清理孤儿任务。
 
-#### 4.4.1 组网连接（参考 my_nvr_app）
+### 4.4 服务端 — 文件服务（NAS）
 
-- 首次进入引导：生成/导入 WG 密钥对 → 填写或导入隧道配置（Address/DNS/Peer/Endpoint/AllowedIPs/Keepalive）→ 申请 VPN 权限 → 连接测试（对服务端 HTTP 探活）。
-- 复用 `WireGuardTunnelManager`（wg0，GoBackend），状态以 Compose State 暴露。
-- 支持配置导入/导出（JSON，SAF），支持多 Profile 预留（本期单隧道）。
-- 安全整改：配置与凭据存 EncryptedSharedPreferences；App 进入支持生物识别门禁（沿用现有 BiometricPrompt）。
+- 沿用 `/api/files/:module/*path`：列目录、上传、下载、删除、重命名、复制、移动、新建目录。
+- 文件列表返回：名称、类型、大小、修改时间、是否目录；**排序由客户端控制（目录在前、名称字母序）**，服务端支持 `sort=name|mtime|size`。
+- 移除用户体系与分享相关代码；数据面信任 WG 内网（建议服务端仅绑定 WG 网段地址或由防火墙限制来源）。
 
-#### 4.4.2 相册模块（功能丰富的核心模块）
+### 4.5 管理后台（Web，React）
 
-- **浏览视图**（对应服务端 4.2.3）：
-  - 时间轴：年/月分组瀑布流，悬停快速滚动定位；
-  - 目录树：文件夹维度浏览库内照片；
-  - 分类：标签云/标签列表 → 点进查看该标签照片；
-  - 地理位置：地图（可用 WebView + 简单地图源或 osmdroid）按聚合点浏览。
-- **查看器**：全屏查看，支持双击/捏合缩放、左右滑动切换、旋转查看（临时角度）、查看 EXIF 信息面板（时间/地点/相机/大小）。
-- **图片旋转调整**：在查看器/详情中可将照片旋转 90° 并「保存」，调用服务端旋转接口，保存后刷新缩略图。
-- **上传**：
-  - 从系统相册/文件选择器多选本机照片 → 选择目标库与目标目录（目录选择器，可新建目录）→ 可勾选「上传完成后删除本地文件」→ 后台上传（WorkManager，进度通知）。
-  - 上传完成（服务端 2xx）后按勾选删除本地。
-- **上传后自动化**：服务端文件落盘扫描发现新照片 → 自动进入缩略图 + YOLO 识别 + 压缩流水线（App 端无需触发，只需展示任务进度可选）。
+认证：单一管理员密码（config.yaml 配置，登录签发 JWT）。页面规划：
 
-#### 4.4.3 NAS 文件模块
+| 页面 | 内容 |
+|------|------|
+| 目录管理 | 目录注册表增删改（名称/路径/归属标记/忽略目录/启停）、各目录统计（文件数/已识别数/压缩节省） |
+| 任务中心 | 队列状态（深度/速率/失败）、手动全量重扫、重试失败、资源控制参数（并发/时段/限流） |
+| 身份审计 | WG 设备列表、按设备查看访问日志与流量 |
+| 相册浏览（PC 端） | 管理后台兼作 PC 相册客户端：时间轴/目录树/分类/人物/地理位置（Leaflet），图片查看与旋转保存，体验对齐 App 端 |
+| 监控（预留） | Frigate 地址配置骨架，只读展示 |
+| 系统信息 | 版本、磁盘用量、SQLite 大小、任务健康度 |
 
-- 目录树展示：**目录在上，文件按名称字母序排列**（升降序可切换）；面包屑导航。
-- 常见操作：新建目录、上传文件（任意类型）、下载到本机、重命名、移动、复制、删除（删除需二次确认）、多选批量操作。
-- 文件预览：图片直接预览、文本简易预览；视频/音乐暂用系统 Intent 打开（后续迭代内置播放器）。
+### 4.6 手机端（Android App）
 
-#### 4.4.4 监控模块（空置）
+#### 4.6.1 组网连接（参考 my_nvr_app）
 
-- 底部 Tab 保留「监控」入口，页内展示「功能建设中」占位 + Frigate 地址配置项（保存但不连接）。
+- 首次引导：生成/导入 WG 密钥对 → 填写/导入隧道配置 → VPN 权限 → 连接测试（服务端探活）。
+- 复用 `WireGuardTunnelManager`（wg0，GoBackend）；支持配置导入/导出（JSON，SAF）。
+- 安全整改：凭据 EncryptedSharedPreferences；生物识别门禁（沿用 BiometricPrompt）。
+
+#### 4.6.2 相册模块（核心）
+
+- **浏览视图**：时间轴（年/月分组瀑布流 + 快速滚动定位）、目录树、分类（标签）、人物（人脸分组）、地理位置（Android 端地图 SDK 渲染聚合点）。
+- **查看器**：全屏、双击/捏合缩放、滑动切换、EXIF 信息面板（时间/地点/相机/大小）。
+- **图片旋转调整**：查看器内旋转 90° 并保存，调用服务端旋转接口，完成后刷新。
+- **上传**：系统相册/文件选择器多选 → 选目标目录（目录选择器，可新建）→ 可勾选「上传完成后删除本地」→ WorkManager 后台分片上传（断点续传，进度通知）→ 服务端落盘自动进入识别/缩略图流水线。
+
+#### 4.6.3 NAS 文件模块
+
+- 目录树展示：**目录在上，文件按名称字母序**（可切换升降序）；面包屑导航。
+- 操作：新建目录、上传任意文件、下载、重命名、移动、复制、删除（二次确认）、多选批量操作。
+- 预览：图片直接预览、文本简易预览；音视频暂用系统 Intent 打开。
+
+#### 4.6.4 监控模块（空置）
+
+- 底部 Tab 保留「监控」入口，占位「建设中」+ Frigate 地址配置项（保存不连接）。
 
 ---
 
 ## 5. 接口设计（概要）
 
-> 详细 OpenAPI 文档在 M1 阶段输出到 `docs/api.md`。以下为关键接口清单。
+> 详细 OpenAPI 文档在 M1 阶段输出到 `docs/api.md`。
 
 ### 5.1 管理后台 API（`/api/admin/*`，需管理员 JWT）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/admin/login` | 管理员密码登录 |
-| GET/PUT | `/api/admin/config` | 读写 NAS 配置（库列表、路径、忽略目录、任务参数、YOLO 参数） |
-| GET | `/api/admin/tasks` | 任务队列状态；`POST /api/admin/tasks/rescan` 触发重扫 |
-| GET | `/api/admin/stats` | 各库统计与磁盘用量 |
+| GET/POST/PUT/DELETE | `/api/admin/dirs` | 目录注册表 CRUD（含归属标记、忽略目录） |
+| GET | `/api/admin/peers` | WG 设备列表；`GET /api/admin/peers/:id/logs` 访问日志 |
+| GET | `/api/admin/tasks` | 任务队列状态；`POST /api/admin/tasks/rescan` 全量重扫 |
+| PUT | `/api/admin/settings` | 任务资源参数、YOLO 参数、审计保留期 |
+| GET | `/api/admin/stats` | 各目录统计与磁盘用量 |
 
 ### 5.2 数据面 API（WG 内网，无用户认证）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/photos/:module/timeline` | 时间轴分组（`?group=month`） |
-| GET | `/api/photos/:module/tree` | 目录树聚合 |
-| GET | `/api/photos/:module/tags` | 分类聚合 |
-| GET | `/api/photos/:module/geo` | 地理聚合 |
-| GET | `/api/photos/:module/list` | 按条件列照片（目录/标签/时间段/分页） |
-| GET | `/api/media/:module/photo/:id` | 原图 / `?size=thumb\|preview` 缩略图 |
-| POST | `/api/photos/:module/:id/rotate` | **图片旋转调整接口（App 用）**，body: `{angle: 90\|180\|270}` |
+| GET | `/api/photos/timeline` | 时间轴分组（跨 album 目录聚合，`?group=month`） |
+| GET | `/api/photos/tree` | 目录树聚合 |
+| GET | `/api/photos/tags` | 分类聚合 |
+| GET | `/api/photos/people` | 人物（人脸分组）聚合 |
+| GET | `/api/photos/geo` | 地理聚合点 |
+| GET | `/api/photos/list` | 按条件列照片（目录/标签/人物/时间段/分页） |
+| GET | `/api/media/:module/photo/:id` | 原图 / `?size=thumb`（256 缩略图） |
+| POST | `/api/photos/:module/:id/rotate` | **图片旋转调整接口（App/PC 用）**，body: `{angle: 90\|180\|270}` |
 | GET | `/api/files/:module/*path` | 列目录/下载（沿用） |
-| POST | `/api/files/:module/*path` | 上传（multipart） |
+| POST | `/api/files/:module/*path` | 上传（multipart，支持分片续传） |
 | PATCH/DELETE | `/api/files/:module/*path` | 重命名/移动/复制/删除 |
 | POST | `/api/mkdir/:module` | 新建目录（沿用） |
 
-### 5.3 数据模型（核心表迁移）
+### 5.3 数据模型（SQLite，核心表）
 
-- 删除：`users`。
-- 保留：`shares`（可选）。
-- 新增：
-  - `photo_assets(id, module, rel_path, size, mtime, taken_at, width, height, orientation, gps_lat, gps_lng, status)`；
-  - `photo_tags(photo_id, tag, confidence)`（索引 tag）；
-  - `tasks(id, kind, payload, status, error, created_at, updated_at)`。
+```sql
+-- 目录注册表（config.yaml 为准，SQLite 镜像加速查询）
+dirs(id, name, path, marks, ignore_rules, enabled)
+-- 照片资产
+photo_assets(id, dir_id, rel_path, fingerprint, size, mtime, taken_at,
+             width, height, orientation, gps_lat, gps_lng, status)
+-- 标签（物体 + 场景）
+photo_tags(photo_id, tag, kind, confidence)      -- kind: object | scene
+-- 人脸
+faces(id, photo_id, box_x, box_y, box_w, box_h, group_id)
+person_groups(id, name, representative_face_id)  -- 用户可命名
+-- 任务
+tasks(id, kind, payload, priority, status, error, created_at, updated_at)
+-- 身份审计
+wg_peers(id, public_key, name, tunnel_ip, first_seen, last_seen, enabled)
+audit_logs(id, peer_id, method, path, status, bytes, created_at)
+```
+
+- **废弃**：`users`、`shares` 表及全部关联代码。
 
 ---
 
@@ -261,11 +307,11 @@ homehub/
 
 | 项 | 要求 |
 |----|------|
-| 安全 | 私钥/凭据 Android 端加密存储；服务端数据面仅暴露于 WG 内网；后台 HTTPS（自签可配）；删除操作 App 端二次确认 |
-| 性能 | 缩略图列表页首屏 < 1s（局域网）；万级照片库时间轴滚动流畅（分页 + 缩略图缓存）；任务并发可配置，磁盘 IO 限速可配 |
-| 可靠 | 上传支持断点续传（分片或重试）；任务队列持久化，服务重启自动恢复；文件替换原子操作 |
-| 部署 | docker-compose 一键部署（postgres + server）；`config.yaml` 兼容旧格式并自动迁移；模型文件目录挂载 |
-| 兼容 | Android 11+（minSdk 30）；现有 home-nas 的数据目录结构不破坏（`.thumbnails/` 沿用） |
+| 安全 | 私钥/凭据 Android 端加密存储；数据面仅暴露于 WG 内网；后台 HTTPS（自签可配）；删除操作 App 端二次确认；审计日志可追溯每个 WG 设备的访问 |
+| 性能 | 缩略图列表页首屏 < 1s（局域网）；万级照片时间轴流畅（分页 + 256px 缩略图 + 端侧缓存）；任务并发/限流可配，白天不影响上传体验 |
+| 可靠 | 上传分片断点续传；任务队列持久化、重启恢复；文件替换原子操作；SQLite WAL 模式 + 定期备份 `homehub.db` |
+| 部署 | docker-compose 单容器（server）+ 数据卷；config.yaml 兼容旧格式自动迁移；模型文件目录挂载 |
+| 兼容 | Android 11+（minSdk 30）；现有数据目录结构不破坏（`.thumbnails/` 沿用） |
 
 ---
 
@@ -273,20 +319,57 @@ homehub/
 
 | 阶段 | 内容 | 交付物 |
 |------|------|--------|
-| **M0 仓库整合**（本轮） | 新建 homehub 仓库，迁入 server/mobile 代码，输出 PRD | 本文档 + 可编译基线 |
-| **M1 服务端核心** | 移除用户体系；库/忽略目录配置模型；照片扫描 + EXIF；任务系统骨架；新 API（5.2 全量） | server 可跑通相册/文件 API |
-| **M2 管理后台** | fe-init 初始化 admin 工程；Ardot 设计 NAS 配置/任务中心页面并落地；对接 admin API | 可用管理后台 |
-| **M3 手机端基础** | 重构 WG 模块为独立组件；网络层换 OkHttp/Retrofit；导航框架；相册时间轴/目录树 + 查看器；NAS 文件浏览 | App 可连、可看 |
-| **M4 智能流水线** | YOLO 推理集成（ort）；分类/地理视图；旋转保存接口；上传流程（选目录/删本地/WorkManager）；无损压缩任务 | 对标 immich/mtphoto 核心体验 |
+| **M0 仓库整合**（已完成） | 新建 homehub 仓库，迁入 server/mobile 代码，输出 PRD | 本文档 + 可编译基线 |
+| **M1 服务端核心** | 移除用户/分享代码；SQLite 接入；目录注册表（归属标记/忽略目录）；照片扫描 + EXIF；任务系统（含资源控制）；数据面 API | server 跑通相册/文件 API |
+| **M2 管理后台** | fe-init 初始化 admin；Ardot 设计目录管理/任务中心/身份审计/PC 相册页并落地 | 可用管理后台（含 PC 相册） |
+| **M3 手机端基础** | WG 模块组件化；OkHttp/Retrofit 网络层；导航框架；相册时间轴/目录树 + 查看器；NAS 文件浏览 | App 可连、可看 |
+| **M4 智能流水线** | YOLO 物体 + 场景 + 人脸检测聚类；分类/人物/地理视图；旋转接口；上传流程（选目录/删本地/断点续传）；无损压缩任务 | 对标 immich/mtphoto 核心体验 |
 | **M5 打磨与监控预留** | 生物识别门禁、监控占位页、部署文档、性能调优 | v1.0 |
 
 ---
 
-## 8. 待确认问题（Open Questions）
+## 8. 已确认决策记录
 
-1. **YOLO 模型选择**：默认 YOLOv8n 检测模型是否满足预期标签粒度？是否需要额外的人脸识别/场景分类（CLIP）作为二期？
-2. **HEIC 支持**：iPhone 照片导入的 HEIC 是否需要服务端转码为 JPEG？（影响解码库选择 `libheif`）
-3. **地图源**：地理位置视图的地图瓦片来源（高德/OSM/osmdroid 离线）需要确认网络环境可用性。
-4. **旧 home-nas RN 客户端**：确认废弃，不再迁入本仓库。
-5. **分享功能**：home-nas 现有公开分享链接能力是否保留？
-6. **监控最终方案**：后续是继续 WebView 套 Frigate，还是拉流自研（影响 M5 之后规划）。
+| 问题 | 决策（2026-09-04） |
+|------|--------------------|
+| 数据库 | SQLite（WAL），不用 PostgreSQL |
+| 缩略图 | 单档 256px |
+| 分享 | 本期不做，代码移除 |
+| HEIC | 不支持 |
+| 旧 RN 客户端 | 废弃 |
+| 监控 | 保留入口，后续再定方案 |
+| WG 身份 | 存库作审计日志，不做权限 |
+| 目录模型 | 统一目录管理 + 归属标记，相册 = album 标记目录集合 |
+| YOLO | 物体 + 风景（场景分类）+ 人脸（检测聚类） |
+| 地图 | Android 与 PC 各用各自 SDK |
+
+---
+
+## 9. 待确认问题（Open Questions）
+
+1. **地图 SDK 具体选型**：Android 端 osmdroid（离线友好）还是高德 SDK（国内体验好、需 Key）？Web 端 Leaflet + 何种瓦片源？取决于家中网络环境。
+2. **人脸聚类实现深度**：先「检测 + 感知哈希聚类」轻量方案，效果不满意再引入 ArcFace 嵌入聚类？建议 M4 先做轻量版。
+3. **服务端与 WG 网关是否同机部署**：决定 WG 身份是自动同步（`wg show dump`）还是手工登记映射。
+4. **任务工作时段默认值**：低峰全速时段默认定在 02:00–08:00 是否合适？
+
+---
+
+## 10. 补充建议（待评审的功能池）
+
+以下为设计过程中发现的增值点，按建议优先级排序，供决策是否纳入范围：
+
+**建议纳入 v1（成本低、价值高）：**
+
+- **A. 原图保护机制**：即使当前是无损压缩，也建议把「被修改过的原图」备份到 `.originals/`（可配置开关 + 定期清理），防止压缩/旋转逻辑 bug 不可逆损坏用户照片。照片数据无价，保险成本很低。
+- **B. 回收站/软删除**：App 与后台的删除先移入统一回收站目录，保留 N 天（默认 30）后任务自动清理。误删保护对家庭用户极其重要。
+- **C. 全局搜索**：按文件名、标签、时间范围过滤（SQLite FTS5 即可）。数据量大后没有搜索很难用。
+- **D. 上传去重**：上传前用内容哈希查重，提示「已存在」可跳过——避免手机相册反复同步产生重复。
+- **E. 系统健康告警**：磁盘水位、任务连续失败、SQLite 异常等事件通过 ntfy/Telegram/邮件推送（自托管最怕悄悄坏掉没人知道）。
+
+**建议二期（有价值但不阻塞 v1）：**
+
+- **F. 精选/回忆**：基于时间（「去年今日」「每周精选」）与标签组合的推荐卡片。
+- **G. 照片去重清理**：感知哈希（pHash）找出重复/相似照片，用户确认后批量清理（配合回收站）。
+- **H. 数据备份策略**：重要目录定期 rclone/restic 到外部存储，后台配置 + 任务化。
+- **I. WebDAV 协议层**：让电视、电脑直接挂载访问 NAS 文件（只读起步）。
+- **J. 视频转码预览**：`video` 标记目录 ffmpeg 抽帧缩略图 + HLS 转码流播（immich 式体验），工作量大，单独排期。

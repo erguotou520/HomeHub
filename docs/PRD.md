@@ -1,11 +1,13 @@
 # HomeHub 需求文档（PRD）
 
-- **版本**: v0.2（草案，已吸收 2026-09-04 评审反馈）
+- **版本**: v0.3（草案，已吸收 2026-09-04 两轮评审反馈）
 - **日期**: 2026-09-04
 - **状态**: 待评审
 - **来源**: 由 `home-nas`（Rust NAS 服务端）与 `my_nvr_app`（Android WireGuard/NVR 客户端）合并整合而来
 
 **v0.2 变更摘要**: 数据库由 PostgreSQL 改为 **SQLite**；NAS 库模型改为「统一目录管理 + 归属标记」；新增 **WireGuard 身份审计日志**；缩略图定为单档 256px；YOLO 增加**风景/人脸**检测能力；分享功能整体移除；明确不考虑 HEIC、不迁移旧 RN 客户端；任务队列补充资源占用控制策略。
+
+**v0.3 变更摘要**: §10 功能池中 5 项高价值建议确认纳入 v1：**原图保护**（收窄触发面：仅破坏性操作，无损压缩不留原图）、**回收站/软删除**、**全局搜索**（FTS5）、**全局去重**（双指纹：file_hash + pixel_hash，以源文件为查重对象）、**健康告警**（ntfy/Telegram）；新增二期功能池条目「AI 语义搜索」（自然语言查图，PC + Android）。
 
 ---
 
@@ -186,7 +188,7 @@ homehub/
 
 NAS 文件量级大（十万级+），任务系统设计约束：
 
-- **持久化队列**：SQLite `tasks` 表，重启自动恢复；任务类型：`scan`（目录扫描）、`thumb`（缩略图）、`detect_object`、`detect_scene`、`detect_face`、`compress`、`geo`。
+- **持久化队列**：SQLite `tasks` 表，重启自动恢复；任务类型：`scan`（目录扫描）、`thumb`（缩略图）、`detect_object`、`detect_scene`、`detect_face`、`compress`、`geo`、`dedup_scan`（全库去重）、`clean_trash`（回收站/原图保留期清理）、`audit_retention`（审计日志清理）。
 - **增量优先**：目录扫描记录 mtime/size 指纹，未变化的文件不重复入队；配合文件系统事件监听（`notify` crate，inotify）实时感知新增/修改，避免全量轮询；全量重扫仅手动触发或定时兜底（可配，默认每周一次低峰执行）。
 - **资源控制（全部可配）**：
   - 并发度：CPU 密集任务（识别）默认并发 1，IO 密集任务（缩略图/压缩）默认并发 2；
@@ -198,12 +200,39 @@ NAS 文件量级大（十万级+），任务系统设计约束：
 #### 4.3.5 缩略图与无损压缩
 
 - **缩略图**：单档 256px（最大长/宽 256），入 `.thumbnails/`，命名含原图指纹（mtime+size）避免失效。
-- **无损压缩**：PNG 走 oxipng、JPEG 走无损重压缩；**仅当节省 ≥3% 且像素不变时原子替换**，否则跳过。
+- **无损压缩**：PNG 走 oxipng、JPEG 走无损重压缩；**仅当节省 ≥3% 且像素不变时原子替换**，否则跳过。**无损压缩不保留原图副本**（像素未变，无回滚价值——这是控制 `.originals/` 体积的关键约束）。
 - 服务端定期（可配）兜底补齐缺失缩略图、清理孤儿任务。
+
+#### 4.3.6 数据安全：原图保护 / 回收站 / 去重（v1 确认项）
+
+**原图保护（`.originals/`）**
+
+- **触发面收窄**：仅「破坏性操作」触发——手动旋转写回、未来可能的有损功能。无损压缩不触发。
+- 被修改文件的原像素副本存同目录 `.originals/`（副本本身也做无损优化，省 20–30%）。
+- **保留期自动清理**（默认 30 天，可配）；管理后台展示 `.originals/` 占用统计；磁盘水位超阈值时暂停保护写入并告警。总开关可配（默认开）。
+
+**回收站/软删除**
+
+- App 与后台的删除操作先把文件移入统一回收站目录（如 `<数据卷>/trash/`，保留原目录结构信息），SQLite 记录 `trashed_at` 与来源路径。
+- 回收站支持浏览、还原、彻底删除；默认 30 天后由清理任务自动彻底删除；占用统计在后台可见。
+- 相册/文件列表查询默认排除回收站内容。
+
+**去重（双指纹，全局）**
+
+- `file_hash`（字节级 SHA-256）：上传时对**刚上传的源文件**计算并查重（此刻文件尚未被服务端处理），用于精确去重与任务幂等。
+- `pixel_hash`（解码后像素哈希）：对无损压缩等字节变化不敏感——已被服务端处理过的照片再次上传时，靠它仍能识别重复。
+- 命中重复时提示「已存在（路径）」，用户可选择跳过或仍保留副本。
+- **全库去重扫描**：定期任务用 pHash 找跨目录重复/相似照片，产出清单由用户确认后批量移入回收站。
+
+**健康告警**
+
+- 触发条件（可配阈值）：磁盘水位（默认 85%）、任务连续失败（默认 5 次）、SQLite 写入异常、`.originals/`/回收站超限。
+- 通知渠道：ntfy（首选，自托管友好）/ Telegram / SMTP 邮件，可多选。
+- 告警事件同时记录 SQLite，后台「系统信息」页可查历史。
 
 ### 4.4 服务端 — 文件服务（NAS）
 
-- 沿用 `/api/files/:module/*path`：列目录、上传、下载、删除、重命名、复制、移动、新建目录。
+- 沿用 `/api/files/:module/*path`：列目录、上传、下载、删除（**软删除，进回收站**）、重命名、复制、移动、新建目录。
 - 文件列表返回：名称、类型、大小、修改时间、是否目录；**排序由客户端控制（目录在前、名称字母序）**，服务端支持 `sort=name|mtime|size`。
 - 移除用户体系与分享相关代码；数据面信任 WG 内网（建议服务端仅绑定 WG 网段地址或由防火墙限制来源）。
 
@@ -217,8 +246,10 @@ NAS 文件量级大（十万级+），任务系统设计约束：
 | 任务中心 | 队列状态（深度/速率/失败）、手动全量重扫、重试失败、资源控制参数（并发/时段/限流） |
 | 身份审计 | WG 设备列表、按设备查看访问日志与流量 |
 | 相册浏览（PC 端） | 管理后台兼作 PC 相册客户端：时间轴/目录树/分类/人物/地理位置（Leaflet），图片查看与旋转保存，体验对齐 App 端 |
+| 全局搜索 | 文件名/标签/时间范围组合搜索（FTS5），覆盖文件与照片 |
+| 回收站 | 浏览、还原、彻底删除、占用统计与保留期设置 |
 | 监控（预留） | Frigate 地址配置骨架，只读展示 |
-| 系统信息 | 版本、磁盘用量、SQLite 大小、任务健康度 |
+| 系统信息 | 版本、磁盘用量、SQLite 大小、任务健康度、告警历史与通知渠道配置 |
 
 ### 4.6 手机端（Android App）
 
@@ -272,8 +303,10 @@ NAS 文件量级大（十万级+），任务系统设计约束：
 | GET | `/api/photos/people` | 人物（人脸分组）聚合 |
 | GET | `/api/photos/geo` | 地理聚合点 |
 | GET | `/api/photos/list` | 按条件列照片（目录/标签/人物/时间段/分页） |
+| GET | `/api/search?q=&type=&from=&to=` | **全局搜索**（文件名 FTS5 / 标签 / 时间范围，覆盖文件与照片） |
 | GET | `/api/media/:module/photo/:id` | 原图 / `?size=thumb`（256 缩略图） |
 | POST | `/api/photos/:module/:id/rotate` | **图片旋转调整接口（App/PC 用）**，body: `{angle: 90\|180\|270}` |
+| GET | `/api/trash` | 回收站列表；`POST /api/trash/:id/restore` 还原；`DELETE /api/trash/:id` 彻底删除 |
 | GET | `/api/files/:module/*path` | 列目录/下载（沿用） |
 | POST | `/api/files/:module/*path` | 上传（multipart，支持分片续传） |
 | PATCH/DELETE | `/api/files/:module/*path` | 重命名/移动/复制/删除 |
@@ -284,9 +317,10 @@ NAS 文件量级大（十万级+），任务系统设计约束：
 ```sql
 -- 目录注册表（config.yaml 为准，SQLite 镜像加速查询）
 dirs(id, name, path, marks, ignore_rules, enabled)
--- 照片资产
-photo_assets(id, dir_id, rel_path, fingerprint, size, mtime, taken_at,
+-- 照片资产（file_hash: 字节级 SHA-256，上传时对源文件计算；pixel_hash: 解码像素哈希，对无损压缩不敏感）
+photo_assets(id, dir_id, rel_path, fingerprint, file_hash, pixel_hash, size, mtime, taken_at,
              width, height, orientation, gps_lat, gps_lng, status)
+             -- status: ok | trashed | processing
 -- 标签（物体 + 场景）
 photo_tags(photo_id, tag, kind, confidence)      -- kind: object | scene
 -- 人脸
@@ -294,9 +328,13 @@ faces(id, photo_id, box_x, box_y, box_w, box_h, group_id)
 person_groups(id, name, representative_face_id)  -- 用户可命名
 -- 任务
 tasks(id, kind, payload, priority, status, error, created_at, updated_at)
+-- 回收站
+trash_entries(id, dir_id, rel_path, trash_path, trashed_at, purged_due)
 -- 身份审计
 wg_peers(id, public_key, name, tunnel_ip, first_seen, last_seen, enabled)
 audit_logs(id, peer_id, method, path, status, bytes, created_at)
+-- 告警
+alerts(id, level, kind, message, created_at, resolved_at)
 ```
 
 - **废弃**：`users`、`shares` 表及全部关联代码。
@@ -320,10 +358,10 @@ audit_logs(id, peer_id, method, path, status, bytes, created_at)
 | 阶段 | 内容 | 交付物 |
 |------|------|--------|
 | **M0 仓库整合**（已完成） | 新建 homehub 仓库，迁入 server/mobile 代码，输出 PRD | 本文档 + 可编译基线 |
-| **M1 服务端核心** | 移除用户/分享代码；SQLite 接入；目录注册表（归属标记/忽略目录）；照片扫描 + EXIF；任务系统（含资源控制）；数据面 API | server 跑通相册/文件 API |
+| **M1 服务端核心** | 移除用户/分享代码；SQLite 接入；目录注册表（归属标记/忽略目录）；照片扫描 + EXIF；任务系统（含资源控制）；回收站/去重（双指纹）基础；数据面 API | server 跑通相册/文件 API |
 | **M2 管理后台** | fe-init 初始化 admin；Ardot 设计目录管理/任务中心/身份审计/PC 相册页并落地 | 可用管理后台（含 PC 相册） |
 | **M3 手机端基础** | WG 模块组件化；OkHttp/Retrofit 网络层；导航框架；相册时间轴/目录树 + 查看器；NAS 文件浏览 | App 可连、可看 |
-| **M4 智能流水线** | YOLO 物体 + 场景 + 人脸检测聚类；分类/人物/地理视图；旋转接口；上传流程（选目录/删本地/断点续传）；无损压缩任务 | 对标 immich/mtphoto 核心体验 |
+| **M4 智能流水线** | YOLO 物体 + 场景 + 人脸检测聚类；分类/人物/地理视图；旋转接口（含 .originals/ 原图保护）；上传流程（选目录/删本地/断点续传/去重提示）；无损压缩任务；FTS5 搜索；健康告警 | 对标 immich/mtphoto 核心体验 |
 | **M5 打磨与监控预留** | 生物识别门禁、监控占位页、部署文档、性能调优 | v1.0 |
 
 ---
@@ -342,6 +380,12 @@ audit_logs(id, peer_id, method, path, status, bytes, created_at)
 | 目录模型 | 统一目录管理 + 归属标记，相册 = album 标记目录集合 |
 | YOLO | 物体 + 风景（场景分类）+ 人脸（检测聚类） |
 | 地图 | Android 与 PC 各用各自 SDK |
+| 原图保护 | 纳入 v1；仅破坏性操作（旋转/未来有损）触发，无损压缩不留原图；保留期 30 天可配 |
+| 回收站 | 纳入 v1；软删除 + 30 天自动清理 |
+| 搜索 | 纳入 v1（FTS5 文件名/标签/时间）；AI 语义搜索列二期 |
+| 去重 | 纳入 v1；全局去重，双指纹（file_hash 对源文件、pixel_hash 对已处理文件）+ pHash 全库扫描 |
+| 健康告警 | 纳入 v1；ntfy/Telegram/邮件，含磁盘水位/任务失败/SQLite 异常 |
+| 其余建议（回忆/备份/WebDAV/视频转码） | 二期再加 |
 
 ---
 
@@ -351,25 +395,15 @@ audit_logs(id, peer_id, method, path, status, bytes, created_at)
 2. **人脸聚类实现深度**：先「检测 + 感知哈希聚类」轻量方案，效果不满意再引入 ArcFace 嵌入聚类？建议 M4 先做轻量版。
 3. **服务端与 WG 网关是否同机部署**：决定 WG 身份是自动同步（`wg show dump`）还是手工登记映射。
 4. **任务工作时段默认值**：低峰全速时段默认定在 02:00–08:00 是否合适？
+5. **AI 语义搜索的技术预研时机**：CLIP 向量化 + SQLite vec0 向量扩展的可行性，建议二期启动前做一次 spike（不影响 v1）。
 
 ---
 
-## 10. 补充建议（待评审的功能池）
+## 10. 二期功能池（v1 不做，后续排期）
 
-以下为设计过程中发现的增值点，按建议优先级排序，供决策是否纳入范围：
-
-**建议纳入 v1（成本低、价值高）：**
-
-- **A. 原图保护机制**：即使当前是无损压缩，也建议把「被修改过的原图」备份到 `.originals/`（可配置开关 + 定期清理），防止压缩/旋转逻辑 bug 不可逆损坏用户照片。照片数据无价，保险成本很低。
-- **B. 回收站/软删除**：App 与后台的删除先移入统一回收站目录，保留 N 天（默认 30）后任务自动清理。误删保护对家庭用户极其重要。
-- **C. 全局搜索**：按文件名、标签、时间范围过滤（SQLite FTS5 即可）。数据量大后没有搜索很难用。
-- **D. 上传去重**：上传前用内容哈希查重，提示「已存在」可跳过——避免手机相册反复同步产生重复。
-- **E. 系统健康告警**：磁盘水位、任务连续失败、SQLite 异常等事件通过 ntfy/Telegram/邮件推送（自托管最怕悄悄坏掉没人知道）。
-
-**建议二期（有价值但不阻塞 v1）：**
-
-- **F. 精选/回忆**：基于时间（「去年今日」「每周精选」）与标签组合的推荐卡片。
-- **G. 照片去重清理**：感知哈希（pHash）找出重复/相似照片，用户确认后批量清理（配合回收站）。
-- **H. 数据备份策略**：重要目录定期 rclone/restic 到外部存储，后台配置 + 任务化。
-- **I. WebDAV 协议层**：让电视、电脑直接挂载访问 NAS 文件（只读起步）。
-- **J. 视频转码预览**：`video` 标记目录 ffmpeg 抽帧缩略图 + HLS 转码流播（immich 式体验），工作量大，单独排期。
+- **A. AI 语义搜索**：自然语言查图（如「海边的日落」），基于 CLIP 式图文嵌入 + 向量检索（SQLite vec0 / Qdrant 待定），PC 端与 Android 端同一套 API。
+- **B. 精选/回忆**：基于时间（「去年今日」「每周精选」）与标签组合的推荐卡片。
+- **C. 照片去重清理增强**：pHash 相似（非完全重复）照片的聚类展示与批量清理建议。
+- **D. 数据备份策略**：重要目录定期 rclone/restic 到外部存储，后台配置 + 任务化。
+- **E. WebDAV 协议层**：让电视、电脑直接挂载访问 NAS 文件（只读起步）。
+- **F. 视频转码预览**：`video` 标记目录 ffmpeg 抽帧缩略图 + HLS 转码流播（immich 式体验），工作量大，单独排期。

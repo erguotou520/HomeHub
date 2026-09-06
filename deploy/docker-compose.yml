@@ -1,41 +1,31 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: home-nas-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: home_nas
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  backend:
+  homehub:
     build:
-      context: ./backend
+      context: ../server
       dockerfile: Dockerfile
-    container_name: home-nas-server
+    image: homehub/server:latest
+    container_name: homehub
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/home_nas
-      RUST_LOG: info
-      BIND_ADDR: 0.0.0.0:8485
       CONFIG_PATH: /app/config.yaml
+      BIND_ADDR: 0.0.0.0:8485
+      RUST_LOG: info
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      # Mount your NAS directories here
-      # - /path/to/nas/media:/mnt/media:ro
-      # - /path/to/nas/documents:/mnt/documents:ro
+      # Server configuration (directory registry, admin password, ...)
+      - ./config.yaml:/app/config.yaml
+      # Persistent state: homehub.db, trash/, originals/
+      - homehub_data:/data
+      # Optional: ONNX models for the `onnx` ML backend
+      # - ./models:/models:ro
+      #
+      # Mount your NAS directories here, matching `dirs:` in config.yaml
+      - /mnt/nas/photos:/mnt/nas/photos
+      - /mnt/nas/videos:/mnt/nas/videos
+      - /mnt/nas/documents:/mnt/nas/documents
     ports:
+      # Only expose on the WireGuard interface in production, e.g.
+      # "10.0.0.1:8485:8485"
       - "8485:8485"
-    depends_on:
-      postgres:
-        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  postgres_data:
+  homehub_data:

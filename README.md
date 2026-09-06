@@ -8,23 +8,81 @@
 
 ```
 homehub/
-├── docs/     # 需求文档（PRD）、架构决策记录
-├── server/   # Rust + Axum 后端（源自 home-nas/backend）
-├── admin/    # 管理后台前端（React + TS，待初始化）
-├── mobile/   # Android 客户端 Kotlin + Compose（源自 my_nvr_app）
-└── deploy/   # docker-compose.yml、config.yaml 等部署配置
+├── docs/     # 需求文档 PRD、API 文档
+├── server/   # Rust + Axum + SQLite 服务端（源自 home-nas/backend）
+├── admin/    # 管理后台 + PC 相册前端（React + TS + Vite）
+├── mobile/   # Android 客户端（Kotlin + Compose，源自 my_nvr_app）
+└── deploy/   # docker-compose.yml、config.yaml
 ```
 
-## 快速开始（现状基线）
+## 设计要点
+
+- **组网即准入**：服务端无用户体系，连上 WireGuard 即可使用；每个请求按来源 IP 归属到 WG peer 并写入审计日志。
+- **统一目录管理 + 归属标记**：目录注册表登记所有 NAS 路径，标记 `album/video/music/document` 决定它出现在哪些模块；相册 = 所有 `album` 目录的聚合。
+- **任务化**：扫描、缩略图、识别、压缩都走持久化队列，支持并发/限流/工作时段控制，白天不影响上传体验。
+- **数据安全**：软删除进回收站、破坏性操作归档 `.originals/`、上传双指纹去重。
+
+## 快速开始
+
+### 服务端
 
 ```bash
-# 后端（依赖 PostgreSQL，见 deploy/docker-compose.yml）
-cd server && cargo run
-
-# Android 客户端
-# 用 Android Studio 打开 mobile/
+cp deploy/config.yaml server/config.yaml   # 按实际路径修改 dirs
+cd server && cargo run --release           # 监听 0.0.0.0:8485
 ```
+
+或使用容器（含持久化数据卷）：
+
+```bash
+cd deploy && docker compose up -d
+```
+
+> **启用 YOLO 物体/场景/人脸识别**：默认构建使用 `stub` 后端（无真实推理）。要启用真实推理：
+>
+> 1. 准备 YOLOv8 格式的 `.onnx` 模型（物体检测 / 场景分类 / 人脸检测）与标签文件；
+> 2. 构建时开启特性：`cargo build --release --features onnx`（需要 `libssl-dev`，首次会下载 ONNX Runtime 预编译库）；
+> 3. 把模型路径填到 `config.yaml` 的 `runtime.ml.*.model`（`backend: onnx`），或挂载到 `/models` 并取消 `deploy/docker-compose.yml` 里的模型卷注释。
+>
+> 当前默认 Dockerfile 构建的是不含 `onnx` 特性的镜像（stub 后端）。
+
+### 管理后台
+
+```bash
+cd admin && npm install && npm run dev     # http://localhost:5173
+npm run build                              # 产物由服务端通过 ADMIN_DIST 托管
+```
+
+### Android 客户端
+
+用 Android Studio 打开 `mobile/`，或命令行：
+
+```bash
+cd mobile && ./gradlew :app:assembleDebug
+```
+
+首次启动会进入引导：生成/导入 WireGuard 密钥 → 填写隧道与服务器信息 → 授权 VPN → 连接测试。
 
 ## 文档
 
 - [需求文档 PRD](docs/PRD.md)
+- [API 文档](docs/api.md)
+- [服务端说明](server/README.md)
+- [管理后台说明](admin/README.md)
+- [Android 客户端说明](mobile/README.md)
+
+## 版本状态
+
+PRD 中的 M1（服务端核心）、M2（管理后台）、M3（手机端基础）、M4（智能流水线）、M5（打磨与监控预留）已落地：
+
+| 能力 | 状态 |
+|------|------|
+| SQLite、目录注册表、照片扫描 + EXIF、任务系统、回收站、去重、FTS5 搜索、WG 审计、健康告警、**SQLite 定期备份** | 完成 |
+| 管理后台（目录/任务/审计/相册/搜索/回收站/监控/系统） | 完成 |
+| Android：WG 引导、Compose 导航、相册时间轴/目录/分类/人物/地点、查看器 + 旋转、NAS 文件、后台上传 | 完成 |
+| 断点续传上传（分片） | 完成 |
+| YOLO 物体/场景/人脸 | 后端可插拔（默认 stub；`--features onnx` + 模型文件启用真实推理） |
+| 监控播放 | 预留入口，不实现 |
+| 地图渲染（Android / PC） | Android 用高德 SDK、PC 用 Leaflet + 高德瓦片；两端各自把 WGS-84 转 GCJ-02 |
+
+地图需要**高德 Key**：Android 在 App「设置 → 地图」填写（存加密存储，运行时注入 SDK）；
+PC 端直接取高德公开瓦片，无需 Key。详见 [mobile/README.md](mobile/README.md#地图高德)。

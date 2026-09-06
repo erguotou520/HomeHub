@@ -1,5 +1,5 @@
-pub mod auth;
+pub mod admin;
 pub mod files;
-pub mod media;
-pub mod share;
-pub mod users;
+pub mod photos;
+pub mod trash;
+pub mod upload;

@@ -1,23 +1,140 @@
+# HomeHub server configuration
+#
+# `dirs` is the directory registry: every NAS location known to the server.
+# `mark` decides which module a directory shows up in
+#   album | video | music | document | none
+# A directory may carry several marks at once.
+
 global:
   web-url: http://localhost:8485
-  jwt-secret: dev-secret-key-change-in-production
+  jwt-secret: change-me-in-production
+  bind: 0.0.0.0:8485
+  data-dir: /data
+  # db-path: /data/homehub.db
+  # originals-dir: /data/originals
 
-apps:
-  album:
-    - photos:/tmp/nas-test/photos
-    
-  videos:
-    - movies:/tmp/nas-test/videos
-    
-  music:
-    - library:/tmp/nas-test/music
-    
-  documents:
-    - docs:/tmp/nas-test/documents
+admin:
+  # Plain text password for the single administrator.
+  password: admin123
+  # Or a SHA-256 hash of the password (takes precedence):
+  # password-hash: 240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9
 
-database:
-  host: localhost
-  port: 5433
-  name: home_nas
-  user: dba
-  password: 'Ohpo[X3a'
+dirs:
+  - name: photos
+    path: /mnt/nas/photos
+    marks: [album]
+    ignore: ["@eaDir", ".thumbnails", "#recycle", ".stfolder", ".originals"]
+    enabled: true
+
+  - name: videos
+    path: /mnt/nas/videos
+    marks: [video]
+    ignore: ["@eaDir", ".thumbnails", "#recycle", ".stfolder"]
+    enabled: true
+
+  - name: documents
+    path: /mnt/nas/documents
+    marks: [document, none]
+    ignore: ["@eaDir", ".thumbnails", "#recycle", ".stfolder"]
+    enabled: true
+
+# WireGuard identity audit. `auto-sync` only works when the server runs on the
+# same host as the WireGuard gateway (it parses `wg show <iface> dump`).
+wireguard:
+  interface: wg0
+  auto-sync: false
+  sync-interval-secs: 300
+  peers:
+    # - name: phone
+    #   tunnel-ip: 10.0.0.2
+    #   public-key: <base64 public key>
+
+runtime:
+  tasks:
+    concurrency:
+      cpu: 1      # detection / dedup
+      io: 2       # thumbnails / compression
+    rate-limit-per-sec: 20
+    file-timeout-secs: 120
+    max-attempts: 3
+    max-workers: 6
+    work-window:
+      enabled: true
+      start: "02:00"
+      end: "08:00"
+    full-rescan: weekly      # off | daily | weekly
+    full-rescan-hour: 3
+
+  ml:
+    # `stub` needs no model; `onnx` requires a build with `--features onnx`
+    # plus the model files below.
+    backend: stub
+    enabled: true
+    object:
+      enabled: true
+      model: /models/yolov8n.onnx
+      threshold: 0.35
+      labels: /models/coco-labels.txt
+    scene:
+      enabled: true
+      model: /models/scene.onnx
+      labels: /models/scene-labels.txt
+      threshold: 0.30
+    face:
+      enabled: true
+      model: /models/yolov8n-face.onnx
+      threshold: 0.50
+      cluster-threshold: 48
+    min-image-size: 160
+    exclude-tags: []
+    onnx-threads: 2
+
+  compression:
+    enabled: true
+    min-saving-percent: 3
+    png-level: 2
+    jpegtran-path: jpegtran
+
+  originals:
+    enabled: true
+    retention-days: 30
+    max-usage-percent: 10
+
+  trash:
+    retention-days: 30
+
+  audit:
+    retention-days: 90
+    batch-size: 256
+    flush-interval-secs: 5
+
+  # Periodic `VACUUM INTO` snapshots of homehub.db into <data-dir>/backups.
+  backup:
+    enabled: true
+    interval-hours: 24
+    keep: 7
+    # dir: /data/backups
+
+  alerts:
+    enabled: true
+    disk-usage-percent: 85
+    task-failure-threshold: 5
+    cooldown-secs: 3600
+    ntfy:
+      enabled: false
+      url: https://ntfy.sh
+      topic: homehub
+      token: ""
+    telegram:
+      enabled: false
+      bot-token: ""
+      chat-id: ""
+    smtp:
+      enabled: false
+      host: ""
+      port: 587
+      username: ""
+      password: ""
+      from: ""
+      to: ""
+      starttls: true

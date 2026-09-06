@@ -5,6 +5,10 @@
 server/target/
 server/.env
 
+# Server runtime state
+server/data/
+server/config.yaml
+
 # Node / admin
 node_modules/
 dist/
@@ -17,9 +21,19 @@ mobile/.kotlin/
 mobile/build/
 mobile/app/build/
 mobile/local.properties
-mobile/.omc/
-mobile/.claude/
+*.apk
+*.aab
 
 # 环境与密钥
 *.env
 config.yaml.bak
+
+# 本地测试产物
+.smoke/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc

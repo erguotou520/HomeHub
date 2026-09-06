@@ -1,46 +1,80 @@
 [package]
-name = "home-nas-server"
+name = "homehub-server"
 version = "0.1.0"
 edition = "2021"
-authors = ["Home NAS Team"]
-description = "A cross-platform NAS management server"
+authors = ["HomeHub Team"]
+description = "HomeHub - self-hosted home hub server: photo album, NAS files, monitoring (WIP)"
+
+[features]
+default = []
+# Optional ONNX Runtime backend for real YOLO / scene / face models.
+# Not enabled by default: it downloads a large prebuilt ONNX Runtime at build time.
+onnx = ["ort"]
 
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["multipart", "macros"] }
 tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors", "fs", "trace", "set-header"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Database
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "migrate", "macros"] }
+# Database (SQLite, bundled so FTS5 is always available)
+sqlx = { version = "0.8", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio-rustls",
+    "chrono",
+    "migrate",
+    "macros",
+] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 jsonwebtoken = "9"
-bcrypt = "0.15"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
+thiserror = "2"
 regex-lite = "0.1"
+
+# Hashing / encoding
+sha2 = "0.10"
+hex = "0.4"
 
 # Media processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+kamadak-exif = "0.6"
+oxipng = "9"
 lofty = "0.22"
 quick-xml = "0.37"
+
+# Filesystem watching
+notify = "8"
+
+# Notifications
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "rustls-tls",
+    "hostname",
+] }
 
 # File handling
 mime_guess = "2"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
+walkdir = "2"
+filetime = "0.2"
+libc = "0.2"
+
+# Optional ONNX Runtime backend (see `onnx` feature)
+ort = { version = "2.0.0-rc", optional = true }
 
 [dev-dependencies]
-axum-test = "15"
 tokio = { version = "1", features = ["full", "test-util"] }

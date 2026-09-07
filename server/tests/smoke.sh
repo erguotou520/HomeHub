@@ -104,7 +104,7 @@ THUMB_OK=0
 for THUMB in $(curl -s "$BASE/api/photos/list?limit=10" |
   python3 -c "import sys,json;d=json.load(sys.stdin);print('\\n'.join(i['thumb_url'] for i in d.get('items',[])))"); do
   CODE=$(curl -s -o "$SMOKE_DIR/.thumb.jpg" -w '%{http_code}' "$BASE$THUMB")
-  SIZE=$(stat -c%s "$SMOKE_DIR/.thumb.jpg" 2>/dev/null || echo 0)
+  SIZE=$(stat -f%z "$SMOKE_DIR/.thumb.jpg" 2>/dev/null || stat -c%s "$SMOKE_DIR/.thumb.jpg" 2>/dev/null || echo 0)
   if [ "$CODE" = "200" ] && [ "$SIZE" -gt 100 ]; then echo "  ok   thumbnail (${SIZE} B)"; THUMB_OK=1; break; fi
 done
 [ "$THUMB_OK" = "1" ] || { echo "  FAIL thumbnail"; FAILURES=$((FAILURES + 1)); }

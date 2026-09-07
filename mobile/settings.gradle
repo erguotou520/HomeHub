@@ -1,5 +1,8 @@
 pluginManagement {
     repositories {
+        // 国内镜像优先：dl.google.com 对部分 JVM 请求链路不稳定（curl 可达但 Gradle 拿到 404）
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -14,6 +17,8 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
         google()
         mavenCentral()
         // 高德地图 Android SDK (com.amap.api) is not on Maven Central.

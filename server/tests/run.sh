@@ -34,8 +34,10 @@ echo "== start server =="
 CONFIG_PATH="$SMOKE_DIR/config.yaml" \
 RUST_LOG=info \
 ADMIN_DIST="$ROOT/admin/dist" \
-setsid nohup "$SERVER_DIR/target/debug/homehub-server" > "$SMOKE_DIR/server.log" 2>&1 < /dev/null &
+nohup "$SERVER_DIR/target/debug/homehub-server" > "$SMOKE_DIR/server.log" 2>&1 < /dev/null &
 SERVER_PID=$!
+# macOS 没有 setsid，用 disown 脱离作业表即可（cleanup 仍按 PID 清理）
+disown "$SERVER_PID" 2>/dev/null || true
 
 cleanup() {
   if [ "$KEEP" != "1" ]; then

@@ -1,0 +1,11 @@
+[build]
+rustc-wrapper = "sccache"
+
+[env]
+SCCACHE_BUCKET = "erguotou"
+SCCACHE_ENDPOINT = "http://192.168.211.103:9000"
+SCCACHE_S3_KEY_PREFIX = "HomeHub/target"
+AWS_ACCESS_KEY_ID = "KVIpkXPRdMgVk7BpNX2H"
+AWS_SECRET_ACCESS_KEY = "WdgT8OpETOkTtuyp76iYUR7zmRFUwvgUI0BqucMi"
+SCCACHE_REGION = "us-east-1"
+SCCACHE_S3_USE_SSL = "false"

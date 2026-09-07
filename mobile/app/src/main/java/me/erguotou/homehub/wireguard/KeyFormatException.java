@@ -1,4 +1,4 @@
-package me.erguotou.nvr.wireguard;
+package me.erguotou.homehub.wireguard;
 
 /**
  * An exception thrown when attempting to parse an invalid key.

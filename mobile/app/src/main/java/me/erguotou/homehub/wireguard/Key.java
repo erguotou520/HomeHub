@@ -1,4 +1,4 @@
-package me.erguotou.nvr.wireguard;
+package me.erguotou.homehub.wireguard;
 
 import java.security.MessageDigest;
 import java.security.SecureRandom;

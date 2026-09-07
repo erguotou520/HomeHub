@@ -10,8 +10,6 @@ import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
 import com.wireguard.config.Interface
 import com.wireguard.config.Peer
-import me.erguotou.nvr.wireguard.Key
-import me.erguotou.nvr.wireguard.KeyPair
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

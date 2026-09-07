@@ -1,4 +1,4 @@
-package me.erguotou.nvr.wireguard;
+package me.erguotou.homehub.wireguard;
 
 /**
  * Represents a Curve25519 key pair as used by WireGuard.

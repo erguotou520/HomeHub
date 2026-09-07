@@ -182,25 +182,28 @@ async fn stream_file(full: &std::path::Path) -> Result<Response, AppError> {
 /// Upload into the root of a registered directory.
 pub async fn upload_root(
     State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     Path(dir): Path<String>,
     multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    upload_into(&state, &dir, "", multipart).await
+    upload_into(&state, &dir, "", params, multipart).await
 }
 
 /// Upload into `<dir>/<path>`.
 pub async fn upload_path(
     State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     Path((dir, path)): Path<(String, String)>,
     multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    upload_into(&state, &dir, &path, multipart).await
+    upload_into(&state, &dir, &path, params, multipart).await
 }
 
 async fn upload_into(
     state: &AppState,
     dir: &str,
     rel: &str,
+    params: std::collections::HashMap<String, String>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let record = state
@@ -208,6 +211,8 @@ async fn upload_into(
         .by_name(dir)
         .ok_or_else(|| AppError::NotFound(format!("directory '{}' not found", dir)))?;
     let config = state.config.get();
+    let policy =
+        crate::services::files::OnDuplicate::from_query(params.get("on-duplicate").or_else(|| params.get("on_duplicate")));
     let mut outcomes: Vec<UploadOutcome> = Vec::new();
 
     while let Some(field) = multipart
@@ -223,7 +228,7 @@ async fn upload_into(
             .bytes()
             .await
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        let outcome = crate::services::files::save_upload_bytes(
+        let outcome = crate::services::files::save_upload_bytes_with_policy(
             &state.db,
             &config,
             &state.registry,
@@ -232,6 +237,7 @@ async fn upload_into(
             rel,
             &name,
             &data,
+            policy,
         )
         .await?;
         outcomes.push(outcome);

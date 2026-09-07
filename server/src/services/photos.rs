@@ -579,7 +579,8 @@ pub async fn rotate(
 
     // 2) lossless rotate + reset orientation to 1
     let full_clone = full.clone();
-    tokio::task::spawn_blocking(move || rotate_file(&full_clone, angle)).await??;
+    let jpegtran_path = config.runtime.compression.jpegtran_path.clone();
+    tokio::task::spawn_blocking(move || rotate_file(&full_clone, angle, &jpegtran_path)).await??;
 
     // 3) refresh metadata, drop the stale thumbnail
     let metadata = std::fs::metadata(&full)?;
@@ -620,7 +621,32 @@ pub async fn rotate(
     Ok(to_item(db, PhotoRow::from_asset(item, dir.name)).await?)
 }
 
-fn rotate_file(path: &Path, angle: i32) -> Result<()> {
+fn rotate_file(path: &Path, angle: i32, jpegtran_path: &str) -> Result<()> {
+    let tmp = path.with_extension("rotate.tmp");
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase();
+    let is_jpeg = matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "jfif");
+
+    // JPEG: prefer a truly lossless rotation via jpegtran (Huffman-safe,
+    // no re-quantisation) plus an EXIF Orientation reset so viewers don't
+    // rotate the already-rotated pixels a second time.
+    if is_jpeg
+        && lossless_rotate_jpeg(path, &tmp, angle, jpegtran_path)
+        && lossless_rotate_ok(path, &tmp, angle)
+        && crate::services::exif::reset_jpeg_orientation(&tmp, 1).is_ok()
+        && lossless_rotate_ok(path, &tmp, angle)
+    {
+        std::fs::rename(&tmp, path).context("atomic replace")?;
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&tmp);
+
+    // Fallback (non-JPEG, jpegtran missing, or any lossless-path failure):
+    // decode → rotate → re-encode. JPEG gets quality 95 as the least-bad
+    // option; the untouched pixels were archived to `.originals/` first.
     let img = image::open(path)?;
     let rotated = match angle {
         90 => img.rotate90(),
@@ -628,12 +654,6 @@ fn rotate_file(path: &Path, angle: i32) -> Result<()> {
         270 => img.rotate270(),
         _ => img,
     };
-    let tmp = path.with_extension("rotate.tmp");
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("jpg")
-        .to_lowercase();
     let format = match ext.as_str() {
         "png" => image::ImageFormat::Png,
         "webp" => image::ImageFormat::WebP,
@@ -642,7 +662,6 @@ fn rotate_file(path: &Path, angle: i32) -> Result<()> {
         _ => image::ImageFormat::Jpeg,
     };
     if format == image::ImageFormat::Jpeg {
-        // Keep visual quality high; the source bytes are archived.
         let mut out = std::fs::File::create(&tmp)?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
         enc.encode_image(&rotated)?;
@@ -653,6 +672,49 @@ fn rotate_file(path: &Path, angle: i32) -> Result<()> {
     }
     std::fs::rename(&tmp, path).context("atomic replace")?;
     Ok(())
+}
+
+/// Rotate JPEG pixels losslessly with jpegtran. Returns true on success.
+fn lossless_rotate_jpeg(path: &Path, out: &Path, angle: i32, jpegtran_path: &str) -> bool {
+    let result = std::process::Command::new(jpegtran_path)
+        .arg("-copy")
+        .arg("all")
+        .arg("-rotate")
+        .arg(angle.to_string())
+        .arg("-outfile")
+        .arg(out)
+        .arg(path)
+        .output();
+    match result {
+        Ok(o) if o.status.success() && out.exists() => true,
+        Ok(o) => {
+            tracing::debug!(
+                "jpegtran rotate failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!("cannot run {}: {}", jpegtran_path, e);
+            false
+        }
+    }
+}
+
+/// Sanity-check the lossless result: the file must decode and the pixel
+/// dimensions must match the expected post-rotation size.
+fn lossless_rotate_ok(original: &Path, rotated: &Path, angle: i32) -> bool {
+    let (Some(orig), Some(rot)) = (
+        image::image_dimensions(original).ok(),
+        image::image_dimensions(rotated).ok(),
+    ) else {
+        return false;
+    };
+    match angle {
+        90 | 270 => orig.0 == rot.1 && orig.1 == rot.0,
+        _ => orig == rot,
+    }
 }
 
 // ───────────────────────────────── helpers ─────────────────────────────────

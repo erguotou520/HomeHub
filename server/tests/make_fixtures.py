@@ -177,7 +177,7 @@ def main() -> None:
         sys.exit(1)
     root = os.path.abspath(sys.argv[1])
     bind = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1:8485"
-    password = sys.argv[3] if len(sys.argv) > 3 else "admin123"
+    password = sys.argv[3] if len(sys.argv) > 3 else "smoke-pass-9137"
 
     for sub in ("photos/2024/05", "photos/2025/01", "docs", "data"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)

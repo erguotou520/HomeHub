@@ -51,8 +51,13 @@ fn load_session(path: &str, enabled: bool, threads: usize) -> Result<Option<ort:
     if !enabled || path.is_empty() {
         return Ok(None);
     }
-    if !Path::new(path).exists() {
-        anyhow::bail!("model not found: {}", path);
+    let resolved = resolve_model_path(path);
+    if !resolved.exists() {
+        anyhow::bail!(
+            "model not found: {} — place the ONNX file there (relative paths resolve \
+             against DATA_DIR), or set the model path / disable the detector in config.yaml",
+            resolved.display()
+        );
     }
     // `Session::builder()` and friends return `ort::Error` with a recover
     // payload that is not `Send`/`Sync`, so we cannot use `?` directly into
@@ -63,9 +68,21 @@ fn load_session(path: &str, enabled: bool, threads: usize) -> Result<Option<ort:
         .with_intra_threads(threads.max(1))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let session = builder
-        .commit_from_file(path)
+        .commit_from_file(&resolved)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(Some(session))
+}
+
+/// Resolve a configured model path: absolute paths are used as-is, relative
+/// paths are resolved against `DATA_DIR` (default `./data`).
+fn resolve_model_path(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let base = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
+        std::path::Path::new(&base).join(p)
+    }
 }
 
 fn load_labels(path: &str) -> Option<Vec<String>> {

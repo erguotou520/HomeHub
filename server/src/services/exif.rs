@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::Result;
-use exif::{In, Reader, Tag, Value};
+use anyhow::{Context, Result};
+use exif::{Field, In, Reader, Tag, Value};
 
 /// Everything we can learn about a photo without decoding the pixels.
 #[derive(Debug, Clone, Default)]
@@ -185,4 +185,125 @@ mod tests {
         assert_eq!(orientation_degrees(3), 180);
         assert_eq!(orientation_degrees(8), 270);
     }
+}
+
+// ───────────────────── EXIF rewriting (JPEG APP1 splice) ─────────────────────
+
+/// Rewrite the JPEG's EXIF APP1 segment so that `Orientation` becomes `1`,
+/// preserving every other tag (GPS, date, camera…).
+///
+/// Returns `Ok(false)` when the file has no EXIF segment (nothing to do) and
+/// `Err` on any structural problem — callers should fall back to a full
+/// re-encode in that case.
+pub fn reset_jpeg_orientation(path: &Path, orientation: u32) -> Result<bool> {
+    let jpeg = std::fs::read(path)?;
+    if !is_jpeg(&jpeg) {
+        anyhow::bail!("not a jpeg");
+    }
+
+    // Existing EXIF (raw TIFF block). No EXIF → nothing to reset.
+    let tiff = match exif::get_exif_attr_from_jpeg(&mut std::io::Cursor::new(&jpeg)) {
+        Ok(t) if !t.is_empty() => t,
+        Ok(_) => return Ok(false),
+        Err(e) => anyhow::bail!("unreadable exif: {e}"),
+    };
+    let parsed = Reader::new()
+        .read_raw(tiff)
+        .map_err(|e| anyhow::anyhow!("exif parse: {e}"))?;
+
+    // Rebuild the TIFF block with every field except a stale Orientation,
+    // then push the requested orientation as a fresh primary-IFD field.
+    let mut fields: Vec<Field> = parsed
+        .fields()
+        .filter(|f| !(f.tag == Tag::Orientation && f.ifd_num == In::PRIMARY))
+        .cloned()
+        .collect();
+    fields.push(Field {
+        tag: Tag::Orientation,
+        ifd_num: In::PRIMARY,
+        value: Value::Short(vec![orientation as u16]),
+    });
+    let mut writer = exif::experimental::Writer::new();
+    for f in &fields {
+        writer.push_field(f);
+    }
+    let mut new_tiff = std::io::Cursor::new(Vec::new());
+    writer.write(&mut new_tiff, true) // little endian
+        .map_err(|e| anyhow::anyhow!("exif write: {e}"))?;
+    let new_tiff = new_tiff.into_inner();
+
+    let patched = splice_app1(&jpeg, &new_tiff)?;
+    if !is_jpeg(&patched) {
+        anyhow::bail!("splice produced invalid jpeg");
+    }
+    // Atomic replace.
+    let tmp = path.with_extension("exif.tmp");
+    std::fs::write(&tmp, &patched)?;
+    std::fs::rename(&tmp, path).context("atomic replace")?;
+    Ok(true)
+}
+
+/// SOI + first marker is the whole extent of JPEG detection we need here.
+fn is_jpeg(buf: &[u8]) -> bool {
+    buf.len() >= 4 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF
+}
+
+/// Replace the EXIF APP1 segment of a JPEG with the given TIFF payload.
+///
+/// The new segment is inserted right after SOI (the EXIF-spec position); any
+/// pre-existing EXIF APP1 segment is dropped, all other segments are kept.
+fn splice_app1(jpeg: &[u8], tiff: &[u8]) -> Result<Vec<u8>> {
+    if jpeg.len() < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+        anyhow::bail!("missing SOI");
+    }
+    let payload_len = tiff.len() + 6; // "Exif\0\0" + tiff
+    if payload_len + 2 > u16::MAX as usize {
+        anyhow::bail!("exif segment too large");
+    }
+    let mut seg = Vec::with_capacity(payload_len + 4);
+    seg.extend_from_slice(&[0xFF, 0xE1]);
+    seg.extend_from_slice(&((payload_len + 2) as u16).to_be_bytes());
+    seg.extend_from_slice(b"Exif\0\0");
+    seg.extend_from_slice(tiff);
+
+    let mut out = Vec::with_capacity(jpeg.len() + seg.len());
+    out.extend_from_slice(&jpeg[0..2]); // SOI
+    out.extend_from_slice(&seg); // EXIF first, per spec
+
+    let mut i = 2usize;
+    while i < jpeg.len() {
+        if jpeg[i] != 0xFF {
+            anyhow::bail!("lost marker sync at {i}");
+        }
+        let marker = jpeg[i + 1];
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            // standalone markers, no length field
+            out.extend_from_slice(&jpeg[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        if i + 4 > jpeg.len() {
+            anyhow::bail!("truncated segment header");
+        }
+        let seglen = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        let end = i + 2 + seglen;
+        if end > jpeg.len() {
+            anyhow::bail!("segment overruns buffer");
+        }
+        let is_exif_app1 = marker == 0xE1
+            && jpeg.len() >= i + 10
+            && &jpeg[i + 4..i + 10] == b"Exif\0\0";
+        if is_exif_app1 {
+            // drop the old EXIF segment (replaced by the new one)
+        } else {
+            out.extend_from_slice(&jpeg[i..end]);
+        }
+        if marker == 0xDA {
+            // SOS: everything after is entropy-coded data, copy verbatim
+            out.extend_from_slice(&jpeg[end..]);
+            break;
+        }
+        i = end;
+    }
+    Ok(out)
 }

@@ -8,13 +8,13 @@
 #
 # Environment:
 #   BASE       server base URL            (default http://127.0.0.1:8485)
-#   PASS       admin password             (default admin123)
+#   PASS       admin password             (default smoke-pass-9137)
 #   SMOKE_DIR  fixture working directory  (default /tmp/homehub-smoke)
 
 set -uo pipefail
 
 BASE=${BASE:-http://127.0.0.1:8485}
-PASS=${PASS:-admin123}
+PASS=${PASS:-smoke-pass-9137}
 SMOKE_DIR=${SMOKE_DIR:-/tmp/homehub-smoke}
 FAILURES=0
 
@@ -129,6 +129,10 @@ echo "== upload (multipart) =="
 R=$(curl -s -X POST "$BASE/api/files/photos/2024/05" -F "file=@$SMOKE_DIR/photos/2024/05/a.png" | short)
 check "upload returns payload" "uploaded" "$R"
 echo "$R" | grep -q "duplicate_of" && echo "  ok   dedup field present"
+
+echo "== upload duplicate skip =="
+R=$(curl -s -X POST "$BASE/api/files/photos/2024/05?on-duplicate=skip" -F "file=@$SMOKE_DIR/photos/2024/05/a.png")
+echo "$R" | grep -q '"skipped":true' && echo "  ok   duplicate skipped" || { echo "  FAIL duplicate skip: $R"; FAILURES=$((FAILURES + 1)); }
 
 echo "== resumable chunked upload =="
 python3 - "$BASE" "$SMOKE_DIR" <<'PY'

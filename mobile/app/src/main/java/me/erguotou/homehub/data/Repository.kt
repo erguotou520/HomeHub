@@ -174,9 +174,9 @@ class Repository(private val context: Context) {
         Unit
     }
 
-    suspend fun uploadComplete(dir: String, path: String, fileName: String, total: Long) =
+    suspend fun uploadComplete(dir: String, path: String, fileName: String, total: Long, onDuplicate: String = "keep") =
         runCatching {
-            api().uploadComplete(UploadCompleteRequest(dir, path, fileName, total))
+            api().uploadComplete(UploadCompleteRequest(dir, path, fileName, total, onDuplicate))
         }
 
     // ──────────────────────────── trash ────────────────────────────

@@ -51,6 +51,9 @@ pub struct CompleteBody {
     pub path: String,
     pub name: String,
     pub total: Option<u64>,
+    /// "skip" discards the upload when a duplicate already exists.
+    #[serde(default, alias = "on_duplicate")]
+    pub on_duplicate: Option<String>,
 }
 
 fn sanitize(name: &str) -> String {
@@ -147,7 +150,8 @@ pub async fn complete(
     // Read the assembled bytes so we can hash the *source* file for dedup.
     let data = tokio::fs::read(&part).await?;
     let config = state.config.get();
-    let outcome: UploadOutcome = crate::services::files::save_upload_bytes(
+    let policy = crate::services::files::OnDuplicate::from_query(body.on_duplicate.as_ref());
+    let outcome: UploadOutcome = crate::services::files::save_upload_bytes_with_policy(
         &state.db,
         &config,
         &state.registry,
@@ -156,6 +160,7 @@ pub async fn complete(
         &body.path,
         &sanitize(&body.name),
         &data,
+        policy,
     )
     .await?;
     tokio::fs::remove_file(&part).await.ok();

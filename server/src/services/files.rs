@@ -144,7 +144,30 @@ pub struct UploadOutcome {
     pub name: String,
     pub size: u64,
     pub duplicate_of: Option<String>,
+    /// true when the server discarded the upload because a duplicate exists
+    /// and the caller asked for `on-duplicate=skip`.
+    #[serde(rename = "skipped", skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     pub queued: bool,
+}
+
+/// What to do when an upload is byte-identical (or pixel-identical) to an
+/// already-stored file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDuplicate {
+    /// Discard the new upload and report where the existing copy lives.
+    Skip,
+    /// Keep both (current behaviour).
+    Keep,
+}
+
+impl OnDuplicate {
+    pub fn from_query(v: Option<&String>) -> Self {
+        match v.map(|s| s.as_str()) {
+            Some("skip") => OnDuplicate::Skip,
+            _ => OnDuplicate::Keep,
+        }
+    }
 }
 
 /// Persist an uploaded file, run the dedup check and enqueue the pipeline.
@@ -158,6 +181,21 @@ pub async fn save_upload_bytes(
     rel_path: &str,
     file_name: &str,
     data: &[u8],
+) -> Result<UploadOutcome> {
+    save_upload_bytes_with_policy(db, config, registry, queue, dir, rel_path, file_name, data, OnDuplicate::Keep).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn save_upload_bytes_with_policy(
+    db: &Db,
+    config: &Config,
+    registry: &DirRegistry,
+    queue: &crate::services::tasks::TaskQueue,
+    dir: &DirRecord,
+    rel_path: &str,
+    file_name: &str,
+    data: &[u8],
+    on_duplicate: OnDuplicate,
 ) -> Result<UploadOutcome> {
     let target_dir = safe_join(Path::new(&dir.path), rel_path).context("invalid path")?;
     tokio::fs::create_dir_all(&target_dir).await?;
@@ -182,13 +220,12 @@ pub async fn save_upload_bytes(
     // Stream to a temp file first so a partial upload never shows up as a photo.
     let tmp = final_path.with_extension("upload.tmp");
     tokio::fs::write(&tmp, data).await?;
-    tokio::fs::rename(&tmp, &final_path).await?;
 
     // Dedup: compute the hashes of the *source* bytes before any processing.
     let file_hash = crate::services::hash::bytes_sha256(data);
     let ext = ext_of(&safe_name);
     let pixel_hash = if is_image(&ext) {
-        crate::services::hash::pixel_hash(&final_path, 1)
+        crate::services::hash::pixel_hash(&tmp, 1)
     } else {
         None
     };
@@ -199,9 +236,28 @@ pub async fn save_upload_bytes(
             crate::services::dedup::find_duplicate(db, registry, &file_hash, pixel_hash.as_deref())
                 .await
         {
-            duplicate_of = Some(format!("{}/{}", existing.dir_name, existing.rel_path));
+            let location = format!("{}/{}", existing.dir_name, existing.rel_path);
+            if on_duplicate == OnDuplicate::Skip {
+                // Discard the upload entirely — the bytes already live at `location`.
+                tokio::fs::remove_file(&tmp).await?;
+                tracing::info!(
+                    "upload skipped as duplicate of {} ({} bytes)",
+                    location,
+                    data.len()
+                );
+                return Ok(UploadOutcome {
+                    name: safe_name,
+                    size: data.len() as u64,
+                    duplicate_of: Some(location),
+                    skipped: true,
+                    queued: false,
+                });
+            }
+            duplicate_of = Some(location);
         }
     }
+
+    tokio::fs::rename(&tmp, &final_path).await?;
 
     let rel = relative_of(dir, &final_path);
     let metadata = std::fs::metadata(&final_path)?;
@@ -266,6 +322,7 @@ pub async fn save_upload_bytes(
         name: safe_name,
         size,
         duplicate_of,
+        skipped: false,
         queued,
     })
 }

@@ -7,7 +7,8 @@
 
 global:
   web-url: http://localhost:8485
-  jwt-secret: change-me-in-production
+  # Leave as-is and the server generates a random secret on first boot.
+  # jwt-secret: change-me-in-production
   bind: 0.0.0.0:8485
   data-dir: /data
   # db-path: /data/homehub.db
@@ -15,7 +16,9 @@ global:
 
 admin:
   # Plain text password for the single administrator.
-  password: admin123
+  # Leave unset (or set to admin123) and the server generates a strong random
+  # password on first boot, logs it and stores it back into this file.
+  # password: admin123
   # Or a SHA-256 hash of the password (takes precedence):
   # password-hash: 240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9
 
@@ -66,23 +69,29 @@ runtime:
     full-rescan-hour: 3
 
   ml:
-    # `stub` needs no model; `onnx` requires a build with `--features onnx`
-    # plus the model files below.
-    backend: stub
+    # `onnx` is the real detector (Docker image builds with --features onnx);
+    # `stub` disables recognition entirely.
+    # Relative model paths resolve against DATA_DIR (default /data in Docker):
+    # drop the files into /data/models/ and restart the container.
+    # Download (Ultralytics export):
+    #   object: yolov8n.onnx   – https://github.com/ultralytics/ultralytics
+    #   scene:  any ImageNet classifier exported to ONNX (labels file optional)
+    #   face:   yolov8n-face.onnx – e.g. github.com/danielsyahputra/yolov8-face
+    backend: onnx
     enabled: true
     object:
       enabled: true
-      model: /models/yolov8n.onnx
+      model: models/yolov8n.onnx
       threshold: 0.35
-      labels: /models/coco-labels.txt
+      labels: ""
     scene:
       enabled: true
-      model: /models/scene.onnx
-      labels: /models/scene-labels.txt
+      model: models/scene-classification.onnx
+      labels: ""
       threshold: 0.30
     face:
       enabled: true
-      model: /models/yolov8n-face.onnx
+      model: models/yolov8n-face.onnx
       threshold: 0.50
       cluster-threshold: 48
     min-image-size: 160

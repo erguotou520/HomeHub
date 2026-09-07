@@ -37,13 +37,15 @@ cd server && cargo run --release           # 监听 0.0.0.0:8485
 cd deploy && docker compose up -d
 ```
 
-> **启用 YOLO 物体/场景/人脸识别**：默认构建使用 `stub` 后端（无真实推理）。要启用真实推理：
+> **YOLO 物体/场景/人脸识别**：Docker 镜像已内置 ONNX Runtime（`--features onnx`），把三个模型文件放到数据卷的 `models/` 目录（相对路径基于 `DATA_DIR` 解析）后重启即可：
 >
-> 1. 准备 YOLOv8 格式的 `.onnx` 模型（物体检测 / 场景分类 / 人脸检测）与标签文件；
-> 2. 构建时开启特性：`cargo build --release --features onnx`（需要 `libssl-dev`，首次会下载 ONNX Runtime 预编译库）；
-> 3. 把模型路径填到 `config.yaml` 的 `runtime.ml.*.model`（`backend: onnx`），或挂载到 `/models` 并取消 `deploy/docker-compose.yml` 里的模型卷注释。
+> 1. `models/yolov8n.onnx` — 物体检测（[ultralytics 导出](https://docs.ultralytics.com/integrations/onnx/)，COCO 80 类）；
+> 2. `models/scene-classification.onnx` — 场景/风景分类（任意 ImageNet 分类器导出 ONNX，标签文件可选）；
+> 3. `models/yolov8n-face.onnx` — 人脸检测（如 [yolov8-face](https://github.com/danielsyahputra/yolov8-face)）。
 >
-> 当前默认 Dockerfile 构建的是不含 `onnx` 特性的镜像（stub 后端）。
+> 路径与阈值在 `config.yaml` 的 `runtime.ml.*` 配置；模型缺失时服务端回落 stub 并在日志给出具体路径提示。本地源码构建请加 `--features onnx`（需要 `libssl-dev`，首次会下载 ONNX Runtime 预编译库）。
+
+> **管理员凭据**：`config.yaml` 不设密码（或留旧默认值）时，服务端首次启动会自动生成强随机密码并回写配置文件，同时在日志中以 WARN 级别打印——请从日志获取初始密码。
 
 ### 管理后台
 
@@ -80,7 +82,7 @@ PRD 中的 M1（服务端核心）、M2（管理后台）、M3（手机端基础
 | 管理后台（目录/任务/审计/相册/搜索/回收站/监控/系统） | 完成 |
 | Android：WG 引导、Compose 导航、相册时间轴/目录/分类/人物/地点、查看器 + 旋转、NAS 文件、后台上传 | 完成 |
 | 断点续传上传（分片） | 完成 |
-| YOLO 物体/场景/人脸 | 后端可插拔（默认 stub；`--features onnx` + 模型文件启用真实推理） |
+| YOLO 物体/场景/人脸 | Docker 镜像内置 ONNX；模型文件放 `models/` 即启用，缺失时回落 stub |
 | 监控播放 | 预留入口，不实现 |
 | 地图渲染（Android / PC） | Android 用高德 SDK、PC 用 Leaflet + 高德瓦片；两端各自把 WGS-84 转 GCJ-02 |
 

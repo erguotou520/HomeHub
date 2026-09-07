@@ -85,11 +85,25 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
             if (lastError != null) {
                 failures++
             } else {
-                val response = repository.uploadComplete(dir, path, fileName, bytes.size.toLong())
-                val dup = response.getOrNull()?.uploaded?.firstOrNull()?.duplicateOf
-                if (dup != null) duplicates++
-                uploaded++
-                if (deleteLocal) deleteLocal(uri)
+                val policy = prefs.duplicatePolicy.ifBlank { "keep" }
+                val response = repository.uploadComplete(dir, path, fileName, bytes.size.toLong(), policy)
+                val outcome = response.getOrNull()?.uploaded?.firstOrNull()
+                when {
+                    outcome?.skipped == true -> {
+                        // Server discarded the duplicate upload; keep the local file.
+                        duplicates++
+                    }
+                    outcome?.duplicateOf != null -> {
+                        duplicates++
+                        uploaded++
+                        if (deleteLocal) deleteLocal(uri)
+                    }
+                    outcome != null -> {
+                        uploaded++
+                        if (deleteLocal) deleteLocal(uri)
+                    }
+                    else -> failures++
+                }
             }
         }
 

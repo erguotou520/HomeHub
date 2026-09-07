@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -51,6 +52,7 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
     var useHttps by remember { mutableStateOf(prefs.useHttps) }
     var biometric by remember { mutableStateOf(prefs.biometricLock) }
     var deleteAfterUpload by remember { mutableStateOf(prefs.deleteAfterUpload) }
+    var duplicatePolicy by remember { mutableStateOf(prefs.duplicatePolicy) }
     var amapKey by remember { mutableStateOf(prefs.amapKey) }
     var status by remember { mutableStateOf<String?>(null) }
 
@@ -98,12 +100,26 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
                     ToggleRow("使用 HTTPS", useHttps) { useHttps = it }
                     ToggleRow("生物识别门禁", biometric) { biometric = it }
                     ToggleRow("上传后删除本地副本", deleteAfterUpload) { deleteAfterUpload = it }
+                    Text("上传重复时", style = MaterialTheme.typography.bodyMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = duplicatePolicy == "keep",
+                            onClick = { duplicatePolicy = "keep" },
+                            label = { Text("保留副本") }
+                        )
+                        FilterChip(
+                            selected = duplicatePolicy == "skip",
+                            onClick = { duplicatePolicy = "skip" },
+                            label = { Text("跳过") }
+                        )
+                    }
                     Button(onClick = {
                         prefs.serverAddress = serverAddress
                         prefs.serverPort = serverPort.toIntOrNull() ?: 8485
                         prefs.useHttps = useHttps
                         prefs.biometricLock = biometric
                         prefs.deleteAfterUpload = deleteAfterUpload
+                        prefs.duplicatePolicy = duplicatePolicy
                         repository.invalidate()
                         status = null
                         scope.launch {

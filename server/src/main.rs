@@ -70,7 +70,16 @@ async fn main() -> anyhow::Result<()> {
     let runtime = load_runtime_settings(&pool, &config).await?;
     let mut config = config;
     config.runtime = runtime;
+
+    // Refuse to run with known default credentials; generate + persist strong ones.
+    let hardened = crate::config::harden_credentials(&mut config);
+    if hardened {
+        tracing::warn!("credential defaults replaced; config.yaml rewritten");
+    }
     let store = Arc::new(ConfigStore::new(config.clone(), std::path::PathBuf::from(&config_path)));
+    if hardened && store.update(config.clone()).is_err() {
+        tracing::error!("failed to persist hardened credentials to {}", config_path);
+    }
 
     let registry = DirRegistry::bootstrap(pool.clone(), &config).await?;
     tracing::info!("registered {} directories", registry.all().len());

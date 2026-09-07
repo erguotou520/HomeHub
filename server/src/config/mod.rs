@@ -396,7 +396,16 @@ pub struct MlConfig {
 }
 
 fn default_ml_backend() -> String {
-    "stub".into()
+    "onnx".into()
+}
+fn default_object_model() -> String {
+    "models/yolov8n.onnx".into()
+}
+fn default_scene_model() -> String {
+    "models/scene-classification.onnx".into()
+}
+fn default_face_model() -> String {
+    "models/yolov8n-face.onnx".into()
 }
 fn default_min_image_size() -> u32 {
     160
@@ -409,7 +418,9 @@ fn default_onnx_threads() -> usize {
 pub struct MlModelConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    /// Path to the ONNX file. Relative paths are resolved against DATA_DIR
+    /// (default `./data`).
+    #[serde(default = "default_object_model")]
     pub model: String,
     #[serde(default = "default_object_threshold")]
     pub threshold: f32,
@@ -426,7 +437,7 @@ impl Default for MlModelConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: String::new(),
+            model: default_object_model(),
             threshold: default_object_threshold(),
             labels: String::new(),
         }
@@ -437,7 +448,8 @@ impl Default for MlModelConfig {
 pub struct MlSceneConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    /// Path to the ONNX file. Relative paths are resolved against DATA_DIR.
+    #[serde(default = "default_scene_model")]
     pub model: String,
     #[serde(default)]
     pub labels: String,
@@ -453,7 +465,7 @@ impl Default for MlSceneConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: String::new(),
+            model: default_scene_model(),
             labels: String::new(),
             threshold: default_scene_threshold(),
         }
@@ -464,7 +476,8 @@ impl Default for MlSceneConfig {
 pub struct MlFaceConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    /// Path to the ONNX file. Relative paths are resolved against DATA_DIR.
+    #[serde(default = "default_face_model")]
     pub model: String,
     #[serde(default = "default_face_threshold")]
     pub threshold: f32,
@@ -484,7 +497,7 @@ impl Default for MlFaceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: String::new(),
+            model: default_face_model(),
             threshold: default_face_threshold(),
             cluster_threshold: default_cluster_threshold(),
         }
@@ -880,8 +893,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             global: GlobalConfig::default(),
+            // No built-in default password: `main` generates a strong random
+            // one on first boot and logs it, so a fresh instance is never
+            // reachable with a publicly-known credential.
             admin: AdminConfig {
-                password: Some("admin123".into()),
+                password: None,
                 password_hash: None,
             },
             dirs: Vec::new(),
@@ -890,6 +906,47 @@ impl Default for Config {
             apps: None,
         }
     }
+}
+
+/// Cryptographically-random lowercase alphanumeric string.
+pub fn generate_secret(n: usize) -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    (0..n).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+}
+
+/// Never run with publicly-known default credentials.
+///
+/// * missing admin password (fresh config) → generate one, log it, persist it
+/// * legacy default password (`admin123`) → same treatment
+/// * default JWT secret (`change-me-in-production`) → random secret
+///
+/// Returns true when the config was changed (and needs persisting).
+pub fn harden_credentials(config: &mut Config) -> bool {
+    let mut changed = false;
+    let need_password = config.admin.password_hash.is_none()
+        && match &config.admin.password {
+            None => true,
+            Some(p) => p.is_empty() || p == "admin123",
+        };
+    if need_password {
+        let generated = generate_secret(16);
+        tracing::warn!(
+            "no usable admin password configured; generated one: {} \
+             (stored in config.yaml — change it from the admin UI if desired)",
+            generated
+        );
+        config.admin.password = Some(generated);
+        changed = true;
+    }
+    if config.global.jwt_secret == default_jwt_secret() || config.global.jwt_secret.is_empty() {
+        let secret = generate_secret(48);
+        tracing::warn!("jwt-secret is the well-known default; generated a random one");
+        config.global.jwt_secret = secret;
+        changed = true;
+    }
+    changed
 }
 
 /// Shared, reloadable view of the config: the directory registry can be mutated

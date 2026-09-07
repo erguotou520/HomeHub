@@ -65,6 +65,14 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean(KEY_DELETE_AFTER_UPLOAD, false)
         set(value) = prefs.edit().putBoolean(KEY_DELETE_AFTER_UPLOAD, value).apply()
 
+    /**
+     * What to do when the server reports the uploaded photo already exists.
+     * "skip" discards the duplicate, "keep" stores both copies.
+     */
+    var duplicatePolicy: String
+        get() = prefs.getString(KEY_DUPLICATE_POLICY, "keep") ?: "keep"
+        set(value) = prefs.edit().putString(KEY_DUPLICATE_POLICY, value).apply()
+
     var lastUploadDir: String
         get() = prefs.getString(KEY_LAST_UPLOAD_DIR, "") ?: ""
         set(value) = prefs.edit().putString(KEY_LAST_UPLOAD_DIR, value).apply()
@@ -199,6 +207,7 @@ class Prefs(context: Context) {
         private const val KEY_TRUST_CUSTOM = "trust_custom_cert"
         private const val KEY_BIOMETRIC = "biometric_lock"
         private const val KEY_DELETE_AFTER_UPLOAD = "delete_after_upload"
+        private const val KEY_DUPLICATE_POLICY = "duplicate_policy"
         private const val KEY_LAST_UPLOAD_DIR = "last_upload_dir"
         private const val KEY_FRIGATE_URL = "frigate_url"
         private const val KEY_AMAP_KEY = "amap_key"

@@ -15,15 +15,16 @@ COPY Cargo.toml Cargo.lock* ./
 # Create dummy main.rs for dependency caching
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
-# Build dependencies only
-RUN cargo build --release && rm -rf src
+# Build dependencies only (with the same feature set as the final build)
+RUN cargo build --release --features onnx && rm -rf src
 
 # Copy actual source code
 COPY src ./src
 COPY migrations ./migrations
 
-# Build for release
-RUN touch src/main.rs && cargo build --release
+# Build for release — with the ONNX runtime so YOLO/scene/face detection works
+# out of the box (drop model files under /data/models, see README).
+RUN touch src/main.rs && cargo build --release --features onnx
 
 # Runtime stage
 FROM debian:bookworm-slim

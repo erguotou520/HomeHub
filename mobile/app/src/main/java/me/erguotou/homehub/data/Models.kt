@@ -118,6 +118,7 @@ data class UploadedFile(
     val name: String,
     val size: Long,
     @SerializedName("duplicate_of") val duplicateOf: String? = null,
+    @SerializedName("skipped") val skipped: Boolean = false,
     val queued: Boolean = false
 )
 
@@ -209,5 +210,7 @@ data class UploadCompleteRequest(
     val dir: String,
     val path: String = "",
     val name: String,
-    val total: Long? = null
+    val total: Long? = null,
+    /** "skip" = discard when a duplicate exists, "keep" = store both copies. */
+    @SerializedName("onDuplicate") val onDuplicate: String = "keep"
 )

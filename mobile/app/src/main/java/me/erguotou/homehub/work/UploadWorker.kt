@@ -157,7 +157,18 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
             .setOnlyAlertOnce(true)
             .setProgress(total, current, false)
             .build()
-        return ForegroundInfo(NOTIFICATION_ID, notification)
+        // targetSdk 34+: WorkManager requires an explicit FGS type, otherwise
+        // setForeground throws MissingForegroundServiceTypeException and the
+        // app crashes the moment an upload starts.
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            ForegroundInfo(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun notifyDone(uploaded: Int, duplicates: Int, failures: Int) {

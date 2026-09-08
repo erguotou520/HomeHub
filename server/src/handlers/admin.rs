@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/login", post(login))
         .route("/api/admin/me", get(me))
+        .route("/api/admin/fs", get(browse_fs))
         .route("/api/admin/dirs", get(list_dirs))
         .route("/api/admin/dirs", post(create_dir))
         .route("/api/admin/dirs/:id", put(update_dir))
@@ -85,6 +86,72 @@ pub async fn login(
 
 pub async fn me(claims: Claims) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "sub": claims.sub, "role": claims.role }))
+}
+
+// ───────────────────────────── filesystem browsing ─────────────────────────
+
+#[derive(Deserialize)]
+pub struct FsQuery {
+    /// Directory to list; empty means the server home directory.
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+}
+
+/// List subdirectories of `path` for the admin directory picker.
+/// Only directories are returned; dotfiles/dotdirs are skipped so the
+/// picker stays readable (the path input remains free-form for edge cases).
+pub async fn browse_fs(
+    _claims: Claims,
+    Query(q): Query<FsQuery>,
+) -> Result<Json<serde_json::Value>, crate::models::AppError> {
+    use std::path::PathBuf;
+
+    let path: PathBuf = match q.path.as_deref() {
+        None | Some("") => std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/")),
+        Some(p) => PathBuf::from(p),
+    };
+    if !path.is_dir() {
+        return Err(crate::models::AppError::BadRequest(format!(
+            "'{}' is not a directory",
+            path.display()
+        )));
+    }
+
+    let mut rd = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| crate::models::AppError::BadRequest(format!("cannot read {}: {e}", path.display())))?;
+    let mut entries: Vec<FsEntry> = Vec::new();
+    while let Some(e) = rd.next_entry().await.map_err(|e| crate::models::AppError::Internal(e.to_string()))? {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if !e.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        entries.push(FsEntry {
+            name,
+            path: e.path().to_string_lossy().to_string(),
+        });
+    }
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string());
+    Ok(Json(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "parent": parent,
+        "entries": entries,
+    })))
 }
 
 // ─────────────────────────────── directory registry ────────────────────────

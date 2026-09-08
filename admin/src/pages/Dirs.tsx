@@ -13,10 +13,102 @@ const empty: DirInput = {
   enabled: true,
 }
 
+type FsListing = {
+  path: string
+  parent: string | null
+  entries: { name: string; path: string }[]
+}
+
+function FsPicker({
+  onPick,
+  onClose,
+}: {
+  onPick: (path: string) => void
+  onClose: () => void
+}) {
+  const [listing, setListing] = useState<FsListing | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function load(path?: string) {
+    setError(null)
+    try {
+      const q = path ? `?path=${encodeURIComponent(path)}` : ''
+      setListing(await api.get<FsListing>(`/api/admin/fs${q}`))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '浏览失败')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 100,
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{ width: 520, maxHeight: '70vh', overflow: 'auto', margin: 0 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2>选择服务器目录</h2>
+        {error && <div className="error">{error}</div>}
+        {listing && (
+          <>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <code style={{ flex: 1 }}>{listing.path}</code>
+              <button
+                className="ghost small"
+                disabled={!listing.parent}
+                onClick={() => load(listing.parent ?? undefined)}
+              >
+                上一级
+              </button>
+              <button className="small" onClick={() => onPick(listing.path)}>
+                选这个目录
+              </button>
+            </div>
+            <table>
+              <tbody>
+                {listing.entries.map((e) => (
+                  <tr key={e.path} style={{ cursor: 'pointer' }} onClick={() => load(e.path)}>
+                    <td>{e.name}</td>
+                  </tr>
+                ))}
+                {listing.entries.length === 0 && (
+                  <tr>
+                    <td className="empty">没有子目录</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </>
+        )}
+        <div className="row">
+          <button className="ghost" onClick={onClose}>
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Dirs() {
   const [dirs, setDirs] = useState<DirStat[]>([])
   const [form, setForm] = useState<DirInput>(empty)
   const [editing, setEditing] = useState<number | null>(null)
+  const [picking, setPicking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -75,6 +167,15 @@ export default function Dirs() {
   return (
     <div>
       {error && <div className="error">{error}</div>}
+      {picking && (
+        <FsPicker
+          onPick={(p) => {
+            setForm((f) => ({ ...f, path: p }))
+            setPicking(false)
+          }}
+          onClose={() => setPicking(false)}
+        />
+      )}
 
       <div className="card">
         <h2>{editing ? `编辑目录 #${editing}` : '登记新目录'}</h2>
@@ -86,7 +187,22 @@ export default function Dirs() {
             </div>
             <div className="field" style={{ flex: 1, marginBottom: 0 }}>
               <label>本地路径</label>
-              <input value={form.path} onChange={(e) => setForm({ ...form, path: e.target.value })} required />
+              <div className="row" style={{ gap: 6 }}>
+                <input
+                  value={form.path}
+                  onChange={(e) => setForm({ ...form, path: e.target.value })}
+                  placeholder="点「浏览」选择，或直接输入"
+                  required
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ flex: '0 0 auto' }}
+                  onClick={() => setPicking(true)}
+                >
+                  浏览…
+                </button>
+              </div>
             </div>
             <div className="field" style={{ flex: 1, marginBottom: 0 }}>
               <label>忽略目录（逗号分隔）</label>

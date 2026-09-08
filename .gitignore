@@ -37,3 +37,4 @@ config.yaml.bak
 # Python
 __pycache__/
 *.pyc
+local/

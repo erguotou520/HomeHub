@@ -23,6 +23,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -178,13 +180,21 @@ fun AlbumScreen(vm: AlbumViewModel = viewModel()) {
 
     viewerPhoto?.let { photo ->
         val index = viewerList.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
-        PhotoViewerScreen(
-            photos = viewerList,
-            initialIndex = index,
-            urlResolver = vm::url,
-            onRotate = { p, angle, done -> vm.rotate(p, angle, done) },
-            onDismiss = { viewerPhoto = null }
-        )
+        Dialog(
+            onDismissRequest = { viewerPhoto = null },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            PhotoViewerScreen(
+                photos = viewerList,
+                initialIndex = index,
+                urlResolver = vm::url,
+                onRotate = { p, angle, done -> vm.rotate(p, angle, done) },
+                onDismiss = { viewerPhoto = null }
+            )
+        }
     }
 
     if (showUpload) {

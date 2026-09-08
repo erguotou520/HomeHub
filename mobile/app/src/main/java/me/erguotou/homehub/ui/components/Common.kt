@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -101,6 +102,47 @@ fun ErrorText(message: String, modifier: Modifier = Modifier, onRetry: (() -> Un
             { Button(onClick = retry) { Text("重试") } }
         }
     )
+}
+
+/** Titled card used by the settings screen: icon chip + heading + body. */
+@Composable
+fun SettingsSection(
+    title: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    description: String? = null,
+    content: @Composable () -> Unit
+) {
+    ElevatedCard(modifier = modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                ) {
+                    Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(start = 10.dp)
+                )
+            }
+            if (!description.isNullOrBlank()) {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            content()
+        }
+    }
 }
 
 /** Sticky day / section header used by the timeline grid. */

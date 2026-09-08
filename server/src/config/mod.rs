@@ -212,6 +212,8 @@ pub struct RuntimeSettings {
     #[serde(default)]
     pub compression: CompressionConfig,
     #[serde(default)]
+    pub video: VideoConfig,
+    #[serde(default)]
     pub originals: OriginalsConfig,
     #[serde(default)]
     pub trash: TrashConfig,
@@ -229,6 +231,7 @@ impl Default for RuntimeSettings {
             tasks: TaskConfig::default(),
             ml: MlConfig::default(),
             compression: CompressionConfig::default(),
+            video: VideoConfig::default(),
             originals: OriginalsConfig::default(),
             trash: TrashConfig::default(),
             audit: AuditConfig::default(),
@@ -550,6 +553,32 @@ impl Default for CompressionConfig {
             min_saving_percent: default_min_saving(),
             png_level: default_png_level(),
             jpegtran_path: default_jpegtran(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VideoConfig {
+    /// Path to `ffprobe` used for duration/resolution/capture-time extraction.
+    #[serde(rename = "ffprobe-path", default = "default_ffprobe")]
+    pub ffprobe_path: String,
+    /// Path to `ffmpeg` used for video poster (first frame) extraction.
+    #[serde(rename = "ffmpeg-path", default = "default_ffmpeg")]
+    pub ffmpeg_path: String,
+}
+
+fn default_ffprobe() -> String {
+    "ffprobe".into()
+}
+fn default_ffmpeg() -> String {
+    "ffmpeg".into()
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            ffprobe_path: default_ffprobe(),
+            ffmpeg_path: default_ffmpeg(),
         }
     }
 }

@@ -14,6 +14,7 @@ pub mod ml;
 pub mod originals;
 pub mod paths;
 pub mod photos;
+pub mod probe;
 pub mod scan;
 pub mod search;
 pub mod tasks;

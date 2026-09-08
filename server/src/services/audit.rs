@@ -189,9 +189,9 @@ pub async fn upsert_peer(
         return Ok(id);
     }
 
-    sqlx::query(
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO wg_peers (public_key, name, tunnel_ip, first_seen, last_seen, enabled, source) \
-         VALUES (?, ?, ?, ?, ?, 1, ?)",
+         VALUES (?, ?, ?, ?, ?, 1, ?) RETURNING id",
     )
     .bind(public_key)
     .bind(name)
@@ -199,12 +199,9 @@ pub async fn upsert_peer(
     .bind(now)
     .bind(now)
     .bind(source)
-    .execute(db)
+    .fetch_one(db)
     .await?;
-    let id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
-        .fetch_one(db)
-        .await?;
-    Ok(id.0)
+    Ok(id)
 }
 
 pub async fn list_peers(db: &Db) -> Result<Vec<WgPeer>> {

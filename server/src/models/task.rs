@@ -20,6 +20,8 @@ pub enum TaskKind {
     Compress,
     /// (Re)read EXIF GPS / time.
     Geo,
+    /// ffprobe a video: duration / resolution / capture time / codec.
+    Probe,
     /// Full library duplicate scan.
     DedupScan,
     /// Purge expired trash + originals.
@@ -44,6 +46,7 @@ impl TaskKind {
             Self::DetectFace => "detect_face",
             Self::Compress => "compress",
             Self::Geo => "geo",
+            Self::Probe => "probe",
             Self::DedupScan => "dedup_scan",
             Self::CleanTrash => "clean_trash",
             Self::AuditRetention => "audit_retention",
@@ -62,6 +65,7 @@ impl TaskKind {
             "detect_face" => Some(Self::DetectFace),
             "compress" => Some(Self::Compress),
             "geo" => Some(Self::Geo),
+            "probe" => Some(Self::Probe),
             "dedup_scan" => Some(Self::DedupScan),
             "clean_trash" => Some(Self::CleanTrash),
             "audit_retention" => Some(Self::AuditRetention),
@@ -98,6 +102,7 @@ impl TaskKind {
             Self::DetectFace,
             Self::Compress,
             Self::Geo,
+            Self::Probe,
             Self::DedupScan,
             Self::CleanTrash,
             Self::AuditRetention,

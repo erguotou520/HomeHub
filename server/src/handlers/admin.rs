@@ -438,6 +438,11 @@ pub async fn stats(
     .fetch_one(&state.db)
     .await
     .unwrap_or((0,));
+    let videos: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM photo_assets WHERE status = 'ok' AND media_kind = 'video'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or((0,));
     let faces: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM faces")
         .fetch_one(&state.db)
         .await
@@ -453,6 +458,7 @@ pub async fn stats(
     Ok(Json(serde_json::json!({
         "dirs": dirs,
         "photos": photo_count.0,
+        "videos": videos.0,
         "tagged": tagged.0,
         "faces": faces.0,
         "people": people.0,

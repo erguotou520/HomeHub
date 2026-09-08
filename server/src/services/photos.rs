@@ -17,7 +17,7 @@ use crate::services::exif::PhotoMeta;
 
 // ───────────────────────────────── indexing ────────────────────────────────
 
-/// Insert or update a photo row discovered by the scanner.
+/// Insert or update a media asset row discovered by the scanner.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert(
     db: &Db,
@@ -29,21 +29,26 @@ pub async fn upsert(
     meta: &PhotoMeta,
     file_hash: &str,
     pixel_hash: Option<&str>,
+    media_kind: &str,
+    duration_ms: Option<i64>,
+    video_codec: Option<&str>,
 ) -> Result<i64> {
     let now = crate::db::now();
     sqlx::query(
         "INSERT INTO photo_assets \
             (dir_id, rel_path, fingerprint, file_hash, pixel_hash, size, mtime, taken_at, \
              width, height, orientation, gps_lat, gps_lng, camera_make, camera_model, \
-             status, compressed, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, ?, ?) \
+             status, compressed, media_kind, duration_ms, video_codec, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, ?, ?, ?, ?, ?) \
          ON CONFLICT(dir_id, rel_path) DO UPDATE SET \
              fingerprint = excluded.fingerprint, file_hash = excluded.file_hash, \
              pixel_hash = excluded.pixel_hash, size = excluded.size, mtime = excluded.mtime, \
              taken_at = excluded.taken_at, width = excluded.width, height = excluded.height, \
              orientation = excluded.orientation, gps_lat = excluded.gps_lat, \
              gps_lng = excluded.gps_lng, camera_make = excluded.camera_make, \
-             camera_model = excluded.camera_model, status = 'ok', updated_at = excluded.updated_at",
+             camera_model = excluded.camera_model, status = 'ok', \
+             media_kind = excluded.media_kind, duration_ms = excluded.duration_ms, \
+             video_codec = excluded.video_codec, updated_at = excluded.updated_at",
     )
     .bind(dir.id)
     .bind(rel_path)
@@ -60,6 +65,9 @@ pub async fn upsert(
     .bind(meta.gps_lng)
     .bind(&meta.camera_make)
     .bind(&meta.camera_model)
+    .bind(media_kind)
+    .bind(duration_ms)
+    .bind(video_codec)
     .bind(now)
     .bind(now)
     .execute(db)
@@ -194,6 +202,8 @@ pub struct PhotoQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub has_gps: Option<bool>,
+    /// "photo" | "video" — media type filter.
+    pub kind: Option<String>,
     /// Explicit id list — used by the map views to expand one geo cluster.
     pub ids: Vec<i64>,
     pub limit: i64,
@@ -243,6 +253,11 @@ pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Ve
     if q.has_gps.unwrap_or(false) {
         filters.push_str(" AND p.gps_lat IS NOT NULL AND p.gps_lng IS NOT NULL");
     }
+    if let Some(kind) = &q.kind {
+        // Validated by the handler; inlining keeps the bind order simple.
+        let k = if kind == "video" { "video" } else { "photo" };
+        filters.push_str(&format!(" AND p.media_kind = '{}'", k));
+    }
     // Ids are validated integers formatted by us, so inlining them is safe.
     if !q.ids.is_empty() {
         let ids = q
@@ -275,11 +290,12 @@ pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Ve
     Ok((to_items(db, rows).await?, total))
 }
 
-/// Timeline grouped by year or month, aggregated across every album directory.
+/// Media grouped by year / month / day, aggregated across every album directory.
 pub async fn timeline(
     db: &Db,
     registry: &DirRegistry,
     group: &str,
+    kind: Option<&str>,
     from: Option<i64>,
     to: Option<i64>,
     limit_per_group: i64,
@@ -291,6 +307,10 @@ pub async fn timeline(
          WHERE p.status = 'ok'{}",
         clause
     );
+    if let Some(kind) = kind {
+        let k = if kind == "video" { "video" } else { "photo" };
+        sql.push_str(&format!(" AND p.media_kind = '{}'", k));
+    }
     if let Some(from) = from {
         sql.push_str(&format!(" AND COALESCE(p.taken_at, p.mtime) >= {}", from));
     }
@@ -302,23 +322,38 @@ pub async fn timeline(
     let rows = sqlx::query_as::<_, PhotoRow>(&sql).fetch_all(db).await?;
     let items = to_items(db, rows).await?;
 
-    let by_month = group == "month";
+    let granularity = match group {
+        "day" => 2,
+        "month" => 1,
+        _ => 0,
+    };
+    let today = chrono::Local::now().date_naive();
     let mut groups: Vec<TimelineGroup> = Vec::new();
     for item in items {
         let dt = chrono::DateTime::from_timestamp(item.taken_at, 0);
-        let (year, month) = match dt {
-            Some(d) => (d.year(), Some(d.month())),
-            None => (1970, Some(1)),
+        let (year, month, day) = match dt.map(|d| d.with_timezone(&chrono::Local)) {
+            Some(d) => (d.year(), d.month(), d.day()),
+            None => (1970, 1, 1),
         };
-        let key = if by_month {
-            format!("{:04}-{:02}", year, month.unwrap_or(1))
-        } else {
-            format!("{:04}", year)
-        };
-        let label = if by_month {
-            format!("{}年{}月", year, month.unwrap_or(1))
-        } else {
-            format!("{}年", year)
+        let (key, label) = match granularity {
+            2 => {
+                let key = format!("{:04}-{:02}-{:02}", year, month, day);
+                let date = chrono::NaiveDate::from_ymd_opt(year, month, day);
+                let label = match date {
+                    Some(d) if d == today => "今天".to_string(),
+                    Some(d) if d == today.pred_opt().unwrap_or(today) => "昨天".to_string(),
+                    Some(d) if d.year() == today.year() => {
+                        format!("{}月{}日 星期{}", month, day, weekday_cn(d))
+                    }
+                    _ => format!("{}年{}月{}日", year, month, day),
+                };
+                (key, label)
+            }
+            1 => (
+                format!("{:04}-{:02}", year, month),
+                format!("{}年{}月", year, month),
+            ),
+            _ => (format!("{:04}", year), format!("{}年", year)),
         };
 
         let slot = match groups.iter_mut().find(|g| g.key == key) {
@@ -331,7 +366,7 @@ pub async fn timeline(
                     key,
                     label,
                     year,
-                    month: if by_month { month } else { None },
+                    month: if granularity >= 1 { Some(month) } else { None },
                     count: 1,
                     items: Vec::new(),
                 });
@@ -343,6 +378,18 @@ pub async fn timeline(
         }
     }
     Ok(groups)
+}
+
+fn weekday_cn(d: chrono::NaiveDate) -> &'static str {
+    match d.weekday() {
+        chrono::Weekday::Mon => "一",
+        chrono::Weekday::Tue => "二",
+        chrono::Weekday::Wed => "三",
+        chrono::Weekday::Thu => "四",
+        chrono::Weekday::Fri => "五",
+        chrono::Weekday::Sat => "六",
+        chrono::Weekday::Sun => "日",
+    }
 }
 
 /// Photos grouped by their immediate parent folder.
@@ -567,6 +614,9 @@ pub async fn rotate(
     let photo = get(db, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("photo {} not found", id))?;
+    if photo.media_kind == "video" {
+        anyhow::bail!("videos cannot be rotated");
+    }
     let (dir, full) = registry
         .resolve_id(photo.dir_id, &photo.rel_path)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve photo path"))?;
@@ -605,6 +655,9 @@ pub async fn rotate(
         &meta,
         &file_hash,
         pixel_hash.as_deref(),
+        "photo",
+        photo.duration_ms,
+        photo.video_codec.as_deref(),
     )
     .await?;
 
@@ -741,6 +794,9 @@ pub struct PhotoRow {
     pub camera_model: Option<String>,
     pub status: String,
     pub compressed: i64,
+    pub media_kind: String,
+    pub duration_ms: Option<i64>,
+    pub video_codec: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub dir_name: String,
@@ -767,6 +823,9 @@ impl PhotoRow {
             camera_model: a.camera_model,
             status: a.status,
             compressed: a.compressed,
+            media_kind: a.media_kind,
+            duration_ms: a.duration_ms,
+            video_codec: a.video_codec,
             created_at: a.created_at,
             updated_at: a.updated_at,
             dir_name,
@@ -839,6 +898,9 @@ fn from_row(r: PhotoRow, tags: Vec<PhotoTag>) -> PhotoItem {
         gps_lng: r.gps_lng,
         camera_make: r.camera_make,
         camera_model: r.camera_model,
+        media_kind: r.media_kind,
+        duration_ms: r.duration_ms,
+        video_codec: r.video_codec,
         tags,
     }
 }

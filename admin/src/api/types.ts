@@ -214,6 +214,7 @@ export interface SystemInfo {
 export interface Stats {
   dirs: DirStat[]
   photos: number
+  videos?: number
   tagged: number
   faces: number
   people: number

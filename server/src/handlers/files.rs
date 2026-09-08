@@ -102,6 +102,7 @@ pub async fn list_or_download(
     State(state): State<AppState>,
     Path((dir, path)): Path<(String, String)>,
     Query(q): Query<ListQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     let record = state
         .registry
@@ -114,7 +115,13 @@ pub async fn list_or_download(
         let json = list_dir_contents(&state, &dir, &path, &q).await?;
         return Ok(json.into_response());
     }
-    Ok(stream_file(&full).await?.into_response())
+    let range = range_header(&headers);
+    Ok(stream_file_range(&full, range).await?.into_response())
+}
+
+/// Extract a Range request header as a `&str` slice.
+fn range_header(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers.get(axum::http::header::RANGE)?.to_str().ok()
 }
 
 async fn list_dir_contents(
@@ -142,9 +149,19 @@ async fn list_dir_contents(
     })))
 }
 
-/// Stream a file with HTTP Range support.
-async fn stream_file(full: &std::path::Path) -> Result<Response, AppError> {
-    use tokio::io::AsyncSeekExt;
+/// Stream a file with HTTP Range support (single byte range, as used by
+/// ExoPlayer / native `<video>` seeking): `bytes=start-end`, `bytes=start-`
+/// and `bytes=-suffix` are answered with 206 + Content-Range; anything else
+/// falls back to a plain 200 full response.
+pub(crate) async fn stream_file(full: &std::path::Path) -> Result<Response, AppError> {
+    stream_file_range(full, None).await
+}
+
+pub(crate) async fn stream_file_range(
+    full: &std::path::Path,
+    range_header: Option<&str>,
+) -> Result<Response, AppError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     if !full.is_file() {
         return Err(AppError::NotFound("file not found".into()));
@@ -157,26 +174,81 @@ async fn stream_file(full: &std::path::Path) -> Result<Response, AppError> {
         .first_or_octet_stream()
         .to_string();
 
+    // Parse "bytes=..." — only when we know the size.
+    let parsed = range_header
+        .and_then(|h| parse_byte_range(h, file_size));
+
     let mut file = tokio::fs::File::open(full)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let _ = file.seek(std::io::SeekFrom::Start(0)).await;
-    drop(file);
 
-    let file = tokio::fs::File::open(full)
+    let (status, start, length) = match parsed {
+        // Unsatifiable range (e.g. start beyond EOF).
+        Some(None) => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+                .body(Body::empty())
+                .map_err(|e| AppError::Internal(e.to_string()));
+        }
+        Some(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
+        None => (StatusCode::OK, 0, file_size),
+    };
+
+    file.seek(std::io::SeekFrom::Start(start))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+    let reader = file.take(length);
+    let body = Body::from_stream(ReaderStream::new(reader));
 
-    Response::builder()
-        .status(StatusCode::OK)
+    let mut builder = Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, file_size)
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CACHE_CONTROL, "private, max-age=86400")
+        .header(header::CONTENT_LENGTH, length)
+        .header(header::CACHE_CONTROL, "private, max-age=86400");
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, start + length - 1, file_size),
+        );
+    }
+    builder
         .body(body)
         .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Parse a single-range `Range` header against `size`.
+/// Returns `Some(Some((start, end)))` inclusive, `Some(None)` when the range
+/// cannot be satisfied, `None` when the header is absent/malformed.
+fn parse_byte_range(header: &str, size: u64) -> Option<Option<(u64, u64)>> {
+    let rest = header.trim().strip_prefix("bytes=")?;
+    if rest.contains(',') {
+        return None; // multi-range unsupported → serve 200
+    }
+    let spec = rest.trim();
+    if let Some((start_s, end_s)) = spec.split_once('-') {
+        if start_s.is_empty() {
+            // bytes=-suffix: last N bytes
+            let suffix: u64 = end_s.trim().parse().ok()?;
+            if size == 0 {
+                return Some(None);
+            }
+            let n = suffix.min(size);
+            return Some(Some((size - n, size - 1)));
+        }
+        let start: u64 = start_s.trim().parse().ok()?;
+        let end: u64 = if end_s.trim().is_empty() {
+            size.saturating_sub(1)
+        } else {
+            end_s.trim().parse().ok()?
+        };
+        if size == 0 || start >= size {
+            return Some(None);
+        }
+        return Some(Some((start, end.min(size - 1))));
+    }
+    None
 }
 
 /// Upload into the root of a registered directory.
@@ -455,6 +527,7 @@ pub async fn media(
     State(state): State<AppState>,
     Query(q): Query<std::collections::HashMap<String, String>>,
     Path((dir, path)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     let record = state
         .registry
@@ -469,15 +542,38 @@ pub async fn media(
 
     let wants_thumb = q.get("size").map(|s| s == "thumb").unwrap_or(false);
     if wants_thumb {
-        // Videos have no thumbnail pipeline in v1: fall back to a poster image
-        // sitting next to the file, otherwise serve the original.
+        // Videos: ffmpeg first-frame extraction (cached like image thumbs),
+        // falling back to a poster image sitting next to the file, then to
+        // serving the original bytes.
         if !crate::services::paths::is_image(
             &crate::services::paths::ext_of(&path),
         ) {
-            if let Some(poster) = crate::services::thumbs::video_poster(&full).await {
-                return Ok(stream_file(&poster).await?.into_response());
+            let fp = match crate::services::photos::get_path(&state.db, record.id, &path).await? {
+                Some(p) => crate::services::paths::fingerprint(p.mtime, p.size as u64),
+                None => {
+                    let meta = std::fs::metadata(&full).ok();
+                    let mtime = meta
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let size = meta.map(|m| m.len()).unwrap_or(0);
+                    crate::services::paths::fingerprint(mtime, size)
+                }
+            };
+            let ffmpeg_path = state.config.get().runtime.video.ffmpeg_path.clone();
+            match crate::services::thumbs::ensure_video_thumbnail(&full, &fp, &ffmpeg_path).await {
+                Ok(thumb) => {
+                    return Ok(stream_file_range(&thumb, range_header(&headers)).await?.into_response())
+                }
+                Err(_) => {
+                    if let Some(poster) = crate::services::thumbs::video_poster(&full).await {
+                        return Ok(stream_file_range(&poster, range_header(&headers)).await?.into_response());
+                    }
+                    return Ok(stream_file_range(&full, range_header(&headers)).await?.into_response());
+                }
             }
-            return Ok(stream_file(&full).await?.into_response());
         }
         let photo = crate::services::photos::get_path(&state.db, record.id, &path).await?;
         let (fp, orientation) = match &photo {
@@ -500,10 +596,10 @@ pub async fn media(
         let thumb = crate::services::thumbs::ensure_thumbnail(&full, &fp, orientation)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        return Ok(stream_file(&thumb).await?.into_response());
+        return Ok(stream_file_range(&thumb, range_header(&headers)).await?.into_response());
     }
 
-    Ok(stream_file(&full).await?.into_response())
+    Ok(stream_file_range(&full, range_header(&headers)).await?.into_response())
 }
 
 pub async fn lyrics(
@@ -536,4 +632,21 @@ pub async fn media_info(
         .await
         .map_err(|e| AppError::NotFound(e.to_string()))?;
     Ok(Json(serde_json::to_value(info).unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_byte_range;
+
+    #[test]
+    fn test_parse_byte_range() {
+        assert_eq!(parse_byte_range("bytes=0-1023", 10000), Some(Some((0, 1023))));
+        assert_eq!(parse_byte_range("bytes=5000-", 10000), Some(Some((5000, 9999))));
+        assert_eq!(parse_byte_range("bytes=-500", 10000), Some(Some((9500, 9999))));
+        assert_eq!(parse_byte_range("bytes=9900-99999", 10000), Some(Some((9900, 9999))));
+        assert_eq!(parse_byte_range("bytes=20000-", 10000), Some(None));
+        assert_eq!(parse_byte_range("bytes=0-1023,2000-", 10000), None);
+        assert_eq!(parse_byte_range("garbage", 10000), None);
+        assert_eq!(parse_byte_range("bytes=0-", 0), Some(None));
+    }
 }

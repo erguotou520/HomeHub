@@ -32,8 +32,55 @@ pub async fn make_thumbnail(queue: &TaskQueue, payload: &FileTaskPayload) -> Res
         anyhow::bail!("photo not indexed: {}", payload.rel_path);
     };
     let fp = crate::services::paths::fingerprint(asset.mtime, asset.size as u64);
-    crate::services::thumbs::ensure_thumbnail(&full, &fp, asset.orientation as u32).await?;
+    if asset.media_kind == "video" {
+        let ffmpeg_path = queue.config().runtime.video.ffmpeg_path.clone();
+        crate::services::thumbs::ensure_video_thumbnail(&full, &fp, &ffmpeg_path).await?;
+    } else {
+        crate::services::thumbs::ensure_thumbnail(&full, &fp, asset.orientation as u32).await?;
+    }
     let _ = dir;
+    Ok(())
+}
+
+/// ffprobe a video and persist duration / resolution / capture time / codec.
+pub async fn probe_video(queue: &TaskQueue, payload: &FileTaskPayload) -> Result<()> {
+    let (_dir, full) = resolve(queue, payload)?;
+    if !full.exists() {
+        anyhow::bail!("file missing: {}", full.display());
+    }
+    let Some(asset) = load_photo(queue, payload).await? else {
+        anyhow::bail!("video not indexed: {}", payload.rel_path);
+    };
+    if asset.media_kind != "video" {
+        return Ok(());
+    }
+
+    let ffprobe_path = queue.config().runtime.video.ffprobe_path.clone();
+    let meta = crate::services::probe::probe(&full, &ffprobe_path).await?;
+
+    // EXIF-only fields stay untouched when ffprobe yields nothing.
+    let taken_at = meta.taken_at.or(asset.taken_at);
+    let gps_lat = meta.gps_lat.or(asset.gps_lat);
+    let gps_lng = meta.gps_lng.or(asset.gps_lng);
+    let width = meta.width.or(asset.width);
+    let height = meta.height.or(asset.height);
+
+    sqlx::query(
+        "UPDATE photo_assets SET duration_ms = ?, video_codec = ?, taken_at = ?, \
+         gps_lat = ?, gps_lng = ?, width = ?, height = ?, updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(meta.duration_ms)
+    .bind(meta.codec)
+    .bind(taken_at)
+    .bind(gps_lat)
+    .bind(gps_lng)
+    .bind(width)
+    .bind(height)
+    .bind(crate::db::now())
+    .bind(asset.id)
+    .execute(queue.db())
+    .await?;
     Ok(())
 }
 
@@ -152,9 +199,9 @@ pub async fn run_detection(
             .await?;
         let now = crate::db::now();
         for face in faces {
-            let _res = sqlx::query(
+            let face_id: i64 = sqlx::query_scalar(
                 "INSERT INTO faces (photo_id, box_x, box_y, box_w, box_h, phash, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(photo_id)
             .bind(face.x as f64)
@@ -163,13 +210,10 @@ pub async fn run_detection(
             .bind(face.h as f64)
             .bind(&face.hash)
             .bind(now)
-            .execute(&db)
+            .fetch_one(&db)
             .await?;
-            let face_id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
-                .fetch_one(&db)
-                .await?;
             if !face.hash.is_empty() {
-                crate::services::ml::cluster::assign_group(&db, face_id.0, &face.hash, &face_cfg)
+                crate::services::ml::cluster::assign_group(&db, face_id, &face.hash, &face_cfg)
                     .await?;
             }
         }

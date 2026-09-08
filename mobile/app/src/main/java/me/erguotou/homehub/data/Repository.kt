@@ -47,8 +47,11 @@ class Repository(private val context: Context) {
 
     // ──────────────────────────── album ────────────────────────────
 
-    suspend fun timeline(group: String = "month"): Result<List<TimelineGroup>> = runCatching {
-        api().timeline(group).groups
+    suspend fun timeline(
+        group: String = "day",
+        kind: String? = null
+    ): Result<List<TimelineGroup>> = runCatching {
+        api().timeline(group, kind).groups
     }
 
     suspend fun tree(dirId: Long? = null): Result<List<TreeGroup>> = runCatching {
@@ -69,11 +72,16 @@ class Repository(private val context: Context) {
         personId: Long? = null,
         from: Long? = null,
         to: Long? = null,
+        /** "photo" | "video" media filter. */
+        kind: String? = null,
         /** Explicit ids — used when drilling into one geo cluster on the map. */
         ids: List<Long>? = null
     ): Result<List<PhotoItem>> = runCatching {
-        api().list(dirId, tag, personId, from, to, null, ids?.joinToString(",")).items
+        api().list(dirId, tag, personId, from, to, null, kind, ids?.joinToString(",")).items
     }
+
+    /** Range-streaming URL for video playback (server resolves the path). */
+    fun mediaUrl(id: Long): String = absolute("api/photos/$id/raw")
 
     suspend fun photoDetail(id: Long): Result<PhotoDetail> = runCatching { api().photoDetail(id) }
 

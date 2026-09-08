@@ -189,6 +189,27 @@ impl TaskQueue {
         Ok(n)
     }
 
+    /// Enqueue thumb + probe for one video (no detection/compression — the
+    /// YOLO models only understand still images).
+    pub async fn enqueue_video_pipeline(
+        &self,
+        dir_id: i64,
+        rel_path: &str,
+        priority: i32,
+    ) -> Result<u64> {
+        let payload = serde_json::to_string(&FileTaskPayload {
+            dir_id,
+            rel_path: rel_path.to_string(),
+            priority,
+        })?;
+        let mut n = 0;
+        for kind in [TaskKind::Thumb, TaskKind::Probe] {
+            self.enqueue(kind, &payload, priority).await?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub async fn enqueue_kind(&self, kind: TaskKind, payload: &str, priority: i32) -> Result<()> {
         self.enqueue(kind, payload, priority).await
     }
@@ -403,6 +424,10 @@ impl TaskQueue {
             TaskKind::Geo => {
                 let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;
                 crate::services::workers::refresh_geo(self, &payload).await
+            }
+            TaskKind::Probe => {
+                let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;
+                crate::services::workers::probe_video(self, &payload).await
             }
             TaskKind::DetectObject | TaskKind::DetectScene | TaskKind::DetectFace => {
                 let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;

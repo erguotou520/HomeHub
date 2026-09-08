@@ -25,10 +25,17 @@ data class PhotoItem(
     @SerializedName("gps_lng") val gpsLng: Double? = null,
     @SerializedName("camera_make") val cameraMake: String? = null,
     @SerializedName("camera_model") val cameraModel: String? = null,
+    /** "photo" | "video" — server serialises media_kind. */
+    @SerializedName("media_kind") val mediaKind: String = "photo",
+    /** Video length in milliseconds; null for photos or when ffprobe is absent. */
+    @SerializedName("duration_ms") val durationMs: Long? = null,
+    @SerializedName("video_codec") val videoCodec: String? = null,
     val url: String = "",
     @SerializedName("thumb_url") val thumbUrl: String = "",
     val tags: List<PhotoTag> = emptyList()
-)
+) {
+    val isVideo: Boolean get() = mediaKind == "video"
+}
 
 data class TimelineGroup(
     val key: String,

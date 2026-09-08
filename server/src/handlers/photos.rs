@@ -5,6 +5,7 @@
 
 use axum::{
     extract::{Path, Query, State},
+    response::IntoResponse,
     Json, Router,
     routing::{get, post},
 };
@@ -22,6 +23,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/photos/geo", get(geo))
         .route("/api/photos/list", get(list))
         .route("/api/photos/:id", get(detail))
+        .route("/api/photos/:id/raw", get(raw))
         .route("/api/photos/:id/rotate", post(rotate))
         .route("/api/photos/people/:id/rename", post(rename_person))
         .route("/api/search", get(search))
@@ -33,6 +35,8 @@ pub fn routes() -> Router<AppState> {
 #[derive(Deserialize, Default)]
 pub struct TimelineQuery {
     pub group: Option<String>,
+    /// "photo" | "video" — media type filter.
+    pub kind: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub per_group: Option<i64>,
@@ -46,6 +50,8 @@ pub struct ListQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub has_gps: Option<bool>,
+    /// "photo" | "video" — media type filter.
+    pub kind: Option<String>,
     /// Comma separated photo ids (map cluster drill-down).
     pub ids: Option<String>,
     pub limit: Option<i64>,
@@ -105,6 +111,7 @@ pub async fn timeline(
         &state.db,
         &state.registry,
         &group,
+        q.kind.as_deref(),
         q.from,
         q.to,
         q.per_group.unwrap_or(500),
@@ -160,6 +167,7 @@ pub async fn list(
             from: q.from,
             to: q.to,
             has_gps: q.has_gps,
+            kind: q.kind,
             ids,
             limit: q.limit.unwrap_or(200).clamp(1, 1000),
             offset: q.offset.unwrap_or(0).max(0),
@@ -209,6 +217,9 @@ pub async fn detail(
         "camera_make": photo.camera_make,
         "camera_model": photo.camera_model,
         "compressed": photo.compressed,
+        "media_kind": photo.media_kind,
+        "duration_ms": photo.duration_ms,
+        "video_codec": photo.video_codec,
         "url": crate::services::photos::full_url(&dir.name, &photo.rel_path),
         "thumb_url": crate::services::photos::thumb_url(&dir.name, &photo.rel_path),
         "tags": tags,
@@ -216,12 +227,35 @@ pub async fn detail(
     })))
 }
 
+/// `GET /api/photos/:id/raw` – stream the original file with Range support.
+/// Videos play through this endpoint (ExoPlayer sends Range requests);
+/// the path is resolved server-side from the asset id.
+pub async fn raw(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, crate::models::AppError> {
+    let photo = crate::services::photos::get(&state.db, id)
+        .await?
+        .ok_or_else(|| crate::models::AppError::NotFound("photo not found".into()))?;
+    let (_dir, full) = state
+        .registry
+        .resolve_id(photo.dir_id, &photo.rel_path)
+        .ok_or_else(|| crate::models::AppError::NotFound("directory not found".into()))?;
+    if !full.exists() {
+        return Err(crate::models::AppError::NotFound("file no longer exists".into()));
+    }
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    Ok(crate::handlers::files::stream_file_range(&full, range).await?.into_response())
+}
+
 pub async fn rotate(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<RotateBody>,
-) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let config = state.config.get();
+) -> Result<Json<serde_json::Value>, crate::models::AppError> {    let config = state.config.get();
     let item = crate::services::photos::rotate(&state.db, &state.registry, &config, id, body.angle)
         .await?;
     Ok(Json(serde_json::json!({ "photo": item })))

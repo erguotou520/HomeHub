@@ -54,9 +54,9 @@ pub async fn move_to_trash(
 
     let retention = config.runtime.trash.retention_days as i64;
     let purged_due = now + retention * 86400;
-    sqlx::query(
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO trash_entries (dir_id, dir_name, rel_path, trash_path, is_dir, size, trashed_at, purged_due) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(dir.id)
     .bind(&dir.name)
@@ -66,11 +66,11 @@ pub async fn move_to_trash(
     .bind(size as i64)
     .bind(now)
     .bind(purged_due)
-    .execute(db)
+    .fetch_one(db)
     .await?;
 
     Ok(TrashEntry {
-        id: last_id(db).await?,
+        id,
         dir_id: Some(dir.id),
         dir_name: dir.name.clone(),
         rel_path: rel_path.to_string(),
@@ -80,13 +80,6 @@ pub async fn move_to_trash(
         trashed_at: now,
         purged_due,
     })
-}
-
-async fn last_id(db: &Db) -> Result<i64> {
-    let id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
-        .fetch_one(db)
-        .await?;
-    Ok(id.0)
 }
 
 pub async fn list(db: &Db) -> Result<Vec<TrashEntry>> {

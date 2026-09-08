@@ -23,20 +23,19 @@ pub async fn assign_group(db: &Db, face_id: i64, hash: &str, cfg: &MlFaceConfig)
     }
 
     let now = crate::db::now();
-    sqlx::query("INSERT INTO person_groups (name, representative_face_id, created_at) VALUES (NULL, ?, ?)")
-        .bind(face_id)
-        .bind(now)
-        .execute(db)
-        .await?;
-    let id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
-        .fetch_one(db)
-        .await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO person_groups (name, representative_face_id, created_at) VALUES (NULL, ?, ?) RETURNING id",
+    )
+    .bind(face_id)
+    .bind(now)
+    .fetch_one(db)
+    .await?;
     sqlx::query("UPDATE faces SET group_id = ? WHERE id = ?")
-        .bind(id.0)
+        .bind(id)
         .bind(face_id)
         .execute(db)
         .await?;
-    Ok(id.0)
+    Ok(id)
 }
 
 async fn find_group(db: &Db, hash: &str, cfg: &MlFaceConfig) -> Result<Option<i64>> {

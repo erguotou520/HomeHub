@@ -30,6 +30,16 @@ fun formatDate(seconds: Long): String =
 fun formatMonth(seconds: Long): String =
     if (seconds <= 0) "-" else monthFormatter.format(Date(seconds * 1000))
 
+/** "m:ss" for sub-hour videos, "h:mm:ss" beyond that. */
+fun formatDuration(ms: Long?): String {
+    if (ms == null || ms <= 0) return ""
+    val totalSeconds = ms / 1000
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
 /** Strips the highlight markers the server puts into FTS snippets. */
 fun plainSnippet(snippet: String?): String =
     snippet?.replace("<b>", "")?.replace("</b>", "").orEmpty()

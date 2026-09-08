@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 use crate::db::Db;
 use crate::models::dir::{DirMark, DirRecord};
 use crate::services::dirs::DirRegistry;
-use crate::services::paths::{ext_of, fingerprint, is_image, normalize_rel};
+use crate::services::paths::{ext_of, fingerprint, is_image, is_video, normalize_rel};
 use crate::services::tasks::{TaskQueue, PRIORITY_NORMAL};
 
 #[derive(Debug, Default)]
@@ -124,15 +124,35 @@ pub async fn scan_dir(
 
         crate::services::search::index_file(db, dir.id, &dir.name, &rel, &name).await?;
 
-        if is_dir || !album || !is_image(&ext_of(&name)) {
+        let ext = ext_of(&name);
+        let media_kind = if is_image(&ext) {
+            Some("photo")
+        } else if is_video(&ext) {
+            Some("video")
+        } else {
+            None
+        };
+        if is_dir || !album || media_kind.is_none() {
             continue;
         }
+        let media_kind = media_kind.unwrap();
 
         // Photo asset metadata
         let full_path = entry.path().to_path_buf();
-        let meta = crate::services::exif::read_metadata(&full_path).unwrap_or_default();
+        let is_video_file = media_kind == "video";
+        let meta = if is_video_file {
+            // Video metadata (duration/codec) is filled in by the probe task;
+            // EXIF parsers only understand still images.
+            crate::services::exif::PhotoMeta::default()
+        } else {
+            crate::services::exif::read_metadata(&full_path).unwrap_or_default()
+        };
         let file_hash = crate::services::hash::file_sha256(&full_path).unwrap_or_default();
-        let pixel_hash = crate::services::hash::pixel_hash(&full_path, meta.orientation);
+        let pixel_hash = if is_video_file {
+            None
+        } else {
+            crate::services::hash::pixel_hash(&full_path, meta.orientation)
+        };
 
         let photo_id = crate::services::photos::upsert(
             db,
@@ -144,6 +164,9 @@ pub async fn scan_dir(
             &meta,
             &file_hash,
             pixel_hash.as_deref(),
+            media_kind,
+            None,
+            None,
         )
         .await?;
 
@@ -153,10 +176,17 @@ pub async fn scan_dir(
         }
 
         let priority = if changed { PRIORITY_NORMAL } else { PRIORITY_NORMAL };
-        stats.enqueued += queue
-            .enqueue_photo_pipeline(dir.id, &rel, priority, full || changed)
-            .await
-            .unwrap_or(0);
+        if is_video_file {
+            stats.enqueued += queue
+                .enqueue_video_pipeline(dir.id, &rel, priority)
+                .await
+                .unwrap_or(0);
+        } else {
+            stats.enqueued += queue
+                .enqueue_photo_pipeline(dir.id, &rel, priority, full || changed)
+                .await
+                .unwrap_or(0);
+        }
     }
 
     // Anything we know about but did not see has disappeared from disk.
@@ -174,7 +204,7 @@ pub async fn scan_dir(
             .execute(db)
             .await?;
         crate::services::search::remove(db, "file", &format!("{}:{}", dir.id, rel)).await?;
-        if album && is_image(&ext_of(&rel)) {
+        if album && (is_image(&ext_of(&rel)) || is_video(&ext_of(&rel))) {
             let photo = crate::services::photos::get_path(db, dir.id, &rel).await?;
             if let Some(photo) = photo {
                 crate::services::search::remove(db, "photo", &photo.id.to_string()).await?;

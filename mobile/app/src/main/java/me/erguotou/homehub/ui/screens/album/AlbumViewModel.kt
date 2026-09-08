@@ -17,10 +17,18 @@ import me.erguotou.homehub.data.TreeGroup
 
 enum class AlbumView { TIMELINE, TREE, TAGS, PEOPLE, GEO }
 
+/** Media type filter for the timeline, mirroring the system gallery. */
+enum class MediaKind(val apiValue: String?, val label: String) {
+    ALL(null, "全部"),
+    PHOTOS("photo", "照片"),
+    VIDEOS("video", "视频")
+}
+
 data class AlbumUiState(
     val view: AlbumView = AlbumView.TIMELINE,
     val loading: Boolean = false,
     val error: String? = null,
+    val kind: MediaKind = MediaKind.ALL,
     val groups: List<TimelineGroup> = emptyList(),
     val trees: List<TreeGroup> = emptyList(),
     val tags: List<TagSummary> = emptyList(),
@@ -54,6 +62,12 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Timeline media-type filter (全部 / 照片 / 视频). */
+    fun selectKind(kind: MediaKind) {
+        _state.value = _state.value.copy(kind = kind)
+        loadTimeline()
+    }
+
     fun refresh() = select(_state.value.view)
 
     private fun <T> load(block: suspend () -> Result<T>, apply: (T) -> Unit) {
@@ -75,7 +89,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadTimeline() = load(
-        block = { repository.timeline("month") },
+        block = { repository.timeline("day", _state.value.kind.apiValue) },
         apply = { _state.value = _state.value.copy(groups = it) }
     )
 

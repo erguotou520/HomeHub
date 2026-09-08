@@ -22,8 +22,15 @@ pub struct PhotoAsset {
     pub camera_model: Option<String>,
     pub status: String,
     pub compressed: i64,
+    pub media_kind: String,
+    pub duration_ms: Option<i64>,
+    pub video_codec: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_media_kind() -> String {
+    "photo".to_string()
 }
 
 impl PhotoAsset {
@@ -51,6 +58,13 @@ pub struct PhotoItem {
     pub gps_lng: Option<f64>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    /// "photo" | "video"
+    #[serde(rename = "media_kind", default = "default_media_kind")]
+    pub media_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

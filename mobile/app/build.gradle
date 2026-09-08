@@ -77,6 +77,10 @@ dependencies {
     implementation libs.squareup.gson
     implementation libs.coil.compose
 
+    // Video playback in the album viewer
+    implementation libs.media3.exoplayer
+    implementation libs.media3.ui
+
     // Background upload
     implementation libs.androidx.work.runtime.ktx
 

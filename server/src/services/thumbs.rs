@@ -84,3 +84,39 @@ pub async fn video_poster(file_path: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+/// Build a video thumbnail: ffmpeg first-frame extraction, falling back to a
+/// poster image sitting next to the file, falling back to the source itself
+/// (clients then show a generic dark tile until ffmpeg is installed).
+pub async fn ensure_video_thumbnail(
+    file_path: &Path,
+    fp: &str,
+    ffmpeg_path: &str,
+) -> Result<PathBuf> {
+    let target = thumbnail_path(file_path, fp);
+    if target.exists() {
+        return Ok(target);
+    }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    // extract_poster just awaits a subprocess — no blocking work needed.
+    let bin = ffmpeg_path.to_string();
+    let extracted =
+        crate::services::probe::extract_poster(file_path, &target, &bin).await;
+
+    match extracted {
+        Ok(_) => Ok(target),
+        Err(e) => {
+            tracing::debug!("video poster extraction failed for {}: {}", file_path.display(), e);
+            let _ = tokio::fs::remove_file(&target).await;
+            // Fallback: neighbouring poster (movie-library convention).
+            if let Some(poster) = video_poster(file_path).await {
+                std::fs::copy(&poster, &target)?;
+                return Ok(target);
+            }
+            Err(e)
+        }
+    }
+}

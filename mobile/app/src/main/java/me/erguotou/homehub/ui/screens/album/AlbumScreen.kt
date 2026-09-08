@@ -141,6 +141,25 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                 }
             }
 
+            // Timeline-only media type filter, like the system gallery's
+            // 全部 / 照片 / 视频 segmented control.
+            if (state.view == AlbumView.TIMELINE && state.activeFilter == null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    MediaKind.values().forEach { kind ->
+                        FilterChip(
+                            selected = state.kind == kind,
+                            onClick = { vm.selectKind(kind) },
+                            label = { Text(kind.label) }
+                        )
+                    }
+                }
+            }
+
             if (state.loading && state.groups.isEmpty() && state.filtered.isEmpty()) {
                 Loading()
                 return@Scaffold
@@ -192,6 +211,7 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                 photos = viewerList,
                 initialIndex = index,
                 urlResolver = vm::url,
+                mediaUrlResolver = { id -> repository.mediaUrl(id) },
                 onRotate = { p, angle, done -> vm.rotate(p, angle, done) },
                 onDismiss = { viewerPhoto = null }
             )
@@ -205,12 +225,13 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
             subdir = uploadSubdir,
             onDirChange = { uploadDir = it },
             onSubdirChange = { uploadSubdir = it },
-            onConfirm = {
-                if (uploadDir != null) {
-                    showUpload = false
-                    pickImages.launch("image/*")
-                }
-            },
+        onConfirm = {
+            if (uploadDir != null) {
+                showUpload = false
+                // Photos and videos both belong in the album.
+                pickImages.launch("image/* video/*")
+            }
+        },
             onDismiss = { showUpload = false }
         )
     }
@@ -221,7 +242,7 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                 showUploadConfirm = false
                 pendingUploadUris = emptyList()
             },
-            title = { Text("上传 ${pendingUploadUris.size} 张照片") },
+            title = { Text("上传 ${pendingUploadUris.size} 个文件") },
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = uploadDeleteLocal, onCheckedChange = { uploadDeleteLocal = it })
@@ -293,7 +314,7 @@ private fun UploadTargetDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("选择照片") } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("选择照片/视频") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
@@ -346,14 +367,14 @@ private fun TimelineList(
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit
 ) {
     if (groups.isEmpty()) {
-        Empty("还没有照片。连上 WireGuard 并等待目录扫描完成。")
+        Empty("还没有照片或视频。连上 WireGuard 并等待目录扫描完成。")
         return
     }
     LazyColumn {
         groups.forEach { group ->
             item {
                 Text(
-                    text = "${group.label} · ${group.count} 张",
+                    text = "${group.label} · ${group.count} 项",
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                 )

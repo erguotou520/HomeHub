@@ -286,8 +286,21 @@ pub async fn save_upload_bytes_with_policy(
     crate::services::search::index_file(db, dir.id, &dir.name, &rel, &safe_name).await?;
 
     let mut queued = false;
-    if is_image(&ext) && dir.has_mark(crate::models::dir::DirMark::Album) {
-        let meta = crate::services::exif::read_metadata(&final_path).unwrap_or_default();
+    let is_album = dir.has_mark(crate::models::dir::DirMark::Album);
+    let media_kind = if is_image(&ext) {
+        Some("photo")
+    } else if is_video(&ext) {
+        Some("video")
+    } else {
+        None
+    };
+    if is_album && media_kind.is_some() {
+        let media_kind = media_kind.unwrap();
+        let meta = if media_kind == "video" {
+            crate::services::exif::PhotoMeta::default()
+        } else {
+            crate::services::exif::read_metadata(&final_path).unwrap_or_default()
+        };
         let photo_id = crate::services::photos::upsert(
             db,
             dir,
@@ -298,22 +311,35 @@ pub async fn save_upload_bytes_with_policy(
             &meta,
             &file_hash,
             pixel_hash.as_deref(),
+            media_kind,
+            None,
+            None,
         )
         .await?;
         if let Some(asset) = crate::services::photos::get(db, photo_id).await? {
             crate::services::search::index_photo(db, &asset, &dir.name).await?;
         }
-        queue
-            .enqueue_photo_pipeline(
-                dir.id,
-                &rel,
-                crate::services::tasks::PRIORITY_HIGH,
-                true,
-            )
-            .await?;
+        if media_kind == "video" {
+            queue
+                .enqueue_video_pipeline(
+                    dir.id,
+                    &rel,
+                    crate::services::tasks::PRIORITY_HIGH,
+                )
+                .await?;
+        } else {
+            queue
+                .enqueue_photo_pipeline(
+                    dir.id,
+                    &rel,
+                    crate::services::tasks::PRIORITY_HIGH,
+                    true,
+                )
+                .await?;
+        }
         queued = true;
     } else {
-        // Non-image uploads still need to be discoverable.
+        // Non-media uploads still need to be discoverable.
         queue.enqueue_scan(dir.id, false, crate::services::tasks::PRIORITY_HIGH).await?;
     }
     let _ = config;

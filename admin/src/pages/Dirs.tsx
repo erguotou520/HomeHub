@@ -3,6 +3,13 @@ import { api } from '../api/client'
 import type { DirInput, DirStat } from '../api/types'
 
 const ALL_MARKS = ['album', 'video', 'music', 'document', 'none']
+const MARK_LABELS: Record<string, string> = {
+  album: '相册',
+  video: '视频',
+  music: '音乐',
+  document: '文档',
+  none: '无归属',
+}
 const DEFAULT_IGNORE = ['@eaDir', '.thumbnails', '#recycle', '.stfolder', '.originals']
 
 const empty: DirInput = {
@@ -180,14 +187,21 @@ export default function Dirs() {
       <div className="card">
         <h2>{editing ? `编辑目录 #${editing}` : '登记新目录'}</h2>
         <form onSubmit={submit}>
-          <div className="row" style={{ alignItems: 'flex-end' }}>
-            <div className="field" style={{ flex: '0 0 180px', marginBottom: 0 }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '160px 1fr 1fr',
+              gap: 12,
+              alignItems: 'end',
+            }}
+          >
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>名称（唯一）</label>
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
             </div>
-            <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>本地路径</label>
-              <div className="row" style={{ gap: 6 }}>
+              <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
                 <input
                   value={form.path}
                   onChange={(e) => setForm({ ...form, path: e.target.value })}
@@ -204,7 +218,7 @@ export default function Dirs() {
                 </button>
               </div>
             </div>
-            <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>忽略目录（逗号分隔）</label>
               <input
                 value={form.ignore.join(',')}
@@ -227,7 +241,7 @@ export default function Dirs() {
                 className={form.marks.includes(m) ? 'tag-chip active' : 'tag-chip'}
                 onClick={() => toggleMark(m)}
               >
-                {m}
+                {MARK_LABELS[m] ?? m}
               </button>
             ))}
           </div>
@@ -285,7 +299,7 @@ export default function Dirs() {
                 <td>
                   {d.marks.map((m) => (
                     <span key={m} className="badge">
-                      {m}
+                      {MARK_LABELS[m] ?? m}
                     </span>
                   ))}
                 </td>

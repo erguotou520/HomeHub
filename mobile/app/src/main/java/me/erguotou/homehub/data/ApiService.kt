@@ -26,6 +26,7 @@ interface ApiService {
     @GET("api/photos/timeline")
     suspend fun timeline(
         @Query("group") group: String = "month",
+        @Query("kind") kind: String? = null,
         @Query("per_group") perGroup: Int? = null
     ): TimelineResponse
 
@@ -49,6 +50,7 @@ interface ApiService {
         @Query("from") from: Long? = null,
         @Query("to") to: Long? = null,
         @Query("has_gps") hasGps: Boolean? = null,
+        @Query("kind") kind: String? = null,
         @Query("ids") ids: String? = null,
         @Query("limit") limit: Int = 300,
         @Query("offset") offset: Int = 0

@@ -24,7 +24,7 @@ export default function Login() {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <h1>
-          Home<span style={{ color: 'var(--accent)' }}>Hub</span>
+          Home<span style={{ background: 'var(--grad)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}>Hub</span>
         </h1>
         <p className="muted" style={{ marginTop: 0, marginBottom: 18 }}>
           管理后台 · 请输入管理员密码

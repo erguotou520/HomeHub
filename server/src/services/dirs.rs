@@ -134,9 +134,11 @@ impl DirRegistry {
         } else {
             cfg.ignore.join(",")
         };
-        sqlx::query(
+        // RETURNING keeps id retrieval on the same connection — a separate
+        // last_insert_rowid() via the pool can read a different connection's value.
+        let id: i64 = sqlx::query_scalar(
             "INSERT INTO dirs (name, path, marks, ignore_rules, enabled, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(&cfg.name)
         .bind(&cfg.path)
@@ -144,11 +146,8 @@ impl DirRegistry {
         .bind(ignore)
         .bind(if cfg.enabled { 1 } else { 0 })
         .bind(crate::db::now())
-        .execute(&self.db)
+        .fetch_one(&self.db)
         .await?;
-        let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-            .fetch_one(&self.db)
-            .await?;
         self.reload().await?;
         self.by_id(id)
             .ok_or_else(|| anyhow::anyhow!("directory vanished after insert"))

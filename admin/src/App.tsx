@@ -1,8 +1,11 @@
+import { useEffect } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useAuth } from './state/auth'
+import { useAutoLabelIds } from './hooks/useAutoLabelIds'
 import Login from './pages/Login'
 import Home from './pages/Home'
 import Dirs from './pages/Dirs'
+import Files from './pages/Files'
 import Tasks from './pages/Tasks'
 import Peers from './pages/Peers'
 import Album from './pages/Album'
@@ -33,6 +36,7 @@ function Ico({ d }: { d: string }) {
 const NAV = [
   { to: '/', label: '概览', ico: 'M3 12l9-8 9 8M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10' },
   { to: '/album', label: '相册', ico: 'M4 5h16v14H4zM4 15l4-4 3 3 4-5 5 6M8.5 8.5h.01' },
+  { to: '/files', label: '文件管理', ico: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5M9 13h6M9 17h4' },
   { to: '/search', label: '全局搜索', ico: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5' },
   { to: '/dirs', label: '目录管理', ico: 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z' },
   { to: '/tasks', label: '任务中心', ico: 'M4 6h16M4 12h16M4 18h10' },
@@ -45,6 +49,7 @@ const NAV = [
 const TITLES: Record<string, string> = {
   '/': '概览',
   '/album': '相册浏览',
+  '/files': '文件管理',
   '/search': '全局搜索',
   '/dirs': '目录管理',
   '/tasks': '任务中心',
@@ -57,12 +62,22 @@ const TITLES: Record<string, string> = {
 export default function App() {
   const { token, ready, logout } = useAuth()
   const location = useLocation()
+  const title = TITLES[location.pathname] ?? 'HomeHub'
+
+  useAutoLabelIds()
+
+  useEffect(() => {
+    document.title = `${title} · HomeHub`
+  }, [title])
 
   if (!ready) return <div className="spinner">加载中…</div>
   if (!token) return <Login />
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main">
+        跳到主要内容
+      </a>
       <aside className="sidebar">
         <div className="brand">
           Home<span>Hub</span>
@@ -89,12 +104,13 @@ export default function App() {
       </aside>
       <div className="main">
         <header className="topbar">
-          <h1>{TITLES[location.pathname] ?? 'HomeHub'}</h1>
+          <h1 id="page-title">{title}</h1>
         </header>
-        <div className="content">
+        <main className="content" id="main" tabIndex={-1} aria-labelledby="page-title">
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/album" element={<Album />} />
+            <Route path="/files" element={<Files />} />
             <Route path="/search" element={<Search />} />
             <Route path="/dirs" element={<Dirs />} />
             <Route path="/tasks" element={<Tasks />} />
@@ -104,7 +120,7 @@ export default function App() {
             <Route path="/system" element={<SystemPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </div>
+        </main>
       </div>
     </div>
   )

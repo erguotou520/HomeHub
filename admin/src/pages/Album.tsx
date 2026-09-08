@@ -1,13 +1,39 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, formatBytes } from '../api/client'
 import type { DirStat, GeoPoint, PhotoItem, Stats, TimelineGroup } from '../api/types'
 import { PhotoViewer } from '../components/PhotoViewer'
 import GeoMap from '../components/GeoMap'
 
 type AlbumView = 'timeline' | 'tree' | 'tags' | 'people' | 'geo'
+type KindFilter = 'all' | 'photo' | 'video'
 
 export default function Album() {
-  const [view, setView] = useState<AlbumView>('timeline')
+  // View and media-type filter live in the URL so they survive refresh and sharing.
+  const [params, setParams] = useSearchParams()
+  const rawView = params.get('view') as AlbumView | null
+  const rawKind = params.get('kind') as KindFilter | null
+  const view: AlbumView =
+    rawView && rawView in VIEW_LABELS ? rawView : 'timeline'
+  const kind: KindFilter = rawKind === 'photo' || rawKind === 'video' ? rawKind : 'all'
+  const setView = useCallback(
+    (v: AlbumView) => {
+      const next = new URLSearchParams(params)
+      if (v === 'timeline') next.delete('view')
+      else next.set('view', v)
+      setParams(next, { replace: true })
+    },
+    [params, setParams],
+  )
+  const setKind = useCallback(
+    (k: KindFilter) => {
+      const next = new URLSearchParams(params)
+      if (k === 'all') next.delete('kind')
+      else next.set('kind', k)
+      setParams(next, { replace: true })
+    },
+    [params, setParams],
+  )
   const [groups, setGroups] = useState<TimelineGroup[]>([])
   const [tags, setTags] = useState<{ tag: string; kind: string; photo_count: number; cover_url?: string | null }[]>([])
   const [people, setPeople] = useState<{ id: number; name?: string | null; photo_count: number; cover_url?: string | null }[]>([])
@@ -21,6 +47,32 @@ export default function Album() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [viewer, setViewer] = useState<{ items: PhotoItem[]; index: number } | null>(null)
+  /** Ids removed during this session — the grid hides them until the next fetch. */
+  const [removed, setRemoved] = useState<Set<number>>(new Set())
+  const [renamed, setRenamed] = useState<Record<number, string>>({})
+
+  const handleDeleted = useCallback((id: number) => {
+    setRemoved((prev) => new Set(prev).add(id))
+    setViewer((v) => {
+      if (!v) return v
+      const next = v.items.filter((p) => p.id !== id)
+      if (next.length === 0) return null
+      return { items: next, index: Math.min(v.index, next.length - 1) }
+    })
+  }, [])
+
+  const handleRenamed = useCallback((id: number, name: string) => {
+    setRenamed((prev) => ({ ...prev, [id]: name }))
+  }, [])
+
+  /** Drop deleted photos and apply local renames. */
+  const decorate = useCallback(
+    (list: PhotoItem[]) =>
+      list
+        .filter((p) => !removed.has(p.id))
+        .map((p) => (renamed[p.id] ? { ...p, name: renamed[p.id] } : p)),
+    [removed, renamed],
+  )
 
   const loadList = useCallback(
     async (ids?: number[]) => {
@@ -63,7 +115,10 @@ export default function Album() {
     setError(null)
     if (view === 'timeline') {
       api
-        .get<{ groups: TimelineGroup[] }>('/api/photos/timeline', { group: 'month' })
+        .get<{ groups: TimelineGroup[] }>('/api/photos/timeline', {
+          group: 'day',
+          kind: kind === 'all' ? undefined : kind,
+        })
         .then((r) => setGroups(r.groups))
         .catch((e: Error) => setError(e.message))
     } else if (view === 'tags') {
@@ -142,6 +197,20 @@ export default function Album() {
             清除筛选
           </button>
         )}
+        {view === 'timeline' && !tag && !personId && !dirId && !geoLabel && (
+          <span className="seg" role="group" aria-label="媒体类型">
+            {(['all', 'photo', 'video'] as const).map((k) => (
+              <button
+                key={k}
+                className={`seg-btn${kind === k ? ' on' : ''}`}
+                onClick={() => setKind(k)}
+                aria-pressed={kind === k}
+              >
+                {KIND_LABELS[k]}
+              </button>
+            ))}
+          </span>
+        )}
         {loading && <span className="muted">加载中…</span>}
       </div>
 
@@ -150,14 +219,18 @@ export default function Album() {
       {view === 'timeline' && !tag && !personId && !geoLabel && (
         <>
           {groups.length === 0 && <div className="empty">暂无照片，请先在「目录管理」登记带 album 标记的目录</div>}
-          {groups.map((g) => (
-            <div key={g.key}>
-              <div className="section-title">
-                {g.label} <span className="muted">{g.count} 张</span>
+          {groups.map((g) => {
+            const list = decorate(g.items)
+            if (list.length === 0) return null
+            return (
+              <div key={g.key}>
+                <div className="section-title">
+                  {g.label} <span className="muted">{list.length} 项</span>
+                </div>
+                <PhotoGrid items={list} onOpen={(i) => setViewer({ items: list, index: i })} />
               </div>
-              <PhotoGrid items={g.items} onOpen={(i) => setViewer({ items: g.items, index: i })} />
-            </div>
-          ))}
+            )
+          })}
         </>
       )}
 
@@ -228,26 +301,22 @@ export default function Album() {
           {people.length === 0 && <div className="empty">还没有人脸分组</div>}
           <div className="photo-grid">
             {people.map((p) => (
-              <div key={p.id} className="tile" onClick={() => setPersonId(p.id)}>
+              <button
+                key={p.id}
+                type="button"
+                className="tile"
+                onClick={() => setPersonId(p.id)}
+                aria-label={`人物 ${p.name ?? p.id}，${p.photo_count} 张`}
+              >
                 {p.cover_url ? (
-                  <img src={p.cover_url} alt={p.name ?? `人物 ${p.id}`} loading="lazy" />
+                  <img src={p.cover_url} alt="" loading="lazy" />
                 ) : (
-                  <div className="empty">无封面</div>
+                  <span className="empty">无封面</span>
                 )}
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    background: 'rgba(0,0,0,.6)',
-                    padding: '4px 8px',
-                    fontSize: 12,
-                  }}
-                >
+                <span className="tile-caption">
                   {p.name ?? `未命名 ${p.id}`} · {p.photo_count}
-                </div>
-              </div>
+                </span>
+              </button>
             ))}
           </div>
         </div>
@@ -275,11 +344,14 @@ export default function Album() {
                   : geoLabel
                     ? `地点 ${geoLabel}`
                     : `目录 ${dirId}`}{' '}
-              · {items.length} 张
+              · {items.length} 项
             </span>
           </div>
           {items.length === 0 && !loading && <div className="empty">没有匹配的照片</div>}
-          <PhotoGrid items={items} onOpen={(i) => setViewer({ items, index: i })} />
+          <PhotoGrid
+            items={decorate(items)}
+            onOpen={(i) => setViewer({ items: decorate(items), index: i })}
+          />
         </div>
       )}
 
@@ -289,6 +361,8 @@ export default function Album() {
           index={viewer.index}
           onIndexChange={(i) => setViewer({ items: viewer.items, index: i })}
           onClose={() => setViewer(null)}
+          onDeleted={handleDeleted}
+          onRenamed={handleRenamed}
         />
       )}
     </div>
@@ -301,6 +375,18 @@ const VIEW_LABELS: Record<AlbumView, string> = {
   tags: '分类',
   people: '人物',
   geo: '地点',
+}
+
+const KIND_LABELS: Record<KindFilter, string> = {
+  all: '全部',
+  photo: '照片',
+  video: '视频',
+}
+
+function formatDuration(ms?: number | null): string {
+  if (!ms || ms <= 0) return ''
+  const total = Math.round(ms / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
 function Stat({ label, value }: { label: string; value: number | string }) {
@@ -316,9 +402,21 @@ export function PhotoGrid({ items, onOpen }: { items: PhotoItem[]; onOpen: (i: n
   return (
     <div className="photo-grid">
       {items.map((p, i) => (
-        <div key={p.id} className="tile" onClick={() => onOpen(i)} title={p.rel_path}>
-          <img src={p.thumb_url} alt={p.name} loading="lazy" />
-        </div>
+        <button
+          key={p.id}
+          type="button"
+          className="tile"
+          onClick={() => onOpen(i)}
+          title={p.rel_path}
+          aria-label={`打开 ${p.name}`}
+        >
+          <img src={p.thumb_url} alt={p.name} loading="lazy" width="256" height="256" />
+          {p.media_kind === 'video' && (
+            <span className="tile-video" aria-hidden="true">
+              ▶ {formatDuration(p.duration_ms)}
+            </span>
+          )}
+        </button>
       ))}
     </div>
   )

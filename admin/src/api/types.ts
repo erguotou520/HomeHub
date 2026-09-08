@@ -15,6 +15,9 @@ export interface PhotoItem {
   camera_model?: string | null
   file_hash?: string | null
   pixel_hash?: string | null
+  media_kind?: 'photo' | 'video'
+  duration_ms?: number | null
+  video_codec?: string | null
   url: string
   thumb_url: string
   tags: PhotoTag[]

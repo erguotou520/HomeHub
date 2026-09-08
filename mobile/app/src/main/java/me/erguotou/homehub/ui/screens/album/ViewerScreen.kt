@@ -59,6 +59,7 @@ fun PhotoViewerScreen(
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { photos.size })
     val scope = rememberCoroutineScope()
+    android.util.Log.d("ViewerDbg", "PhotoViewerScreen compose photos=${photos.size}")
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
@@ -106,29 +107,33 @@ fun PhotoViewerScreen(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                AsyncImage(
-                    model = urlResolver(photo.url),
-                    contentDescription = photo.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offsetX,
-                            translationY = offsetY
-                        )
-                )
-            }
-
-            ViewerOverlay(
-                photo = photo,
-                page = page,
-                total = photos.size,
-                onClose = onDismiss,
-                onRotate = { angle -> onRotate(photo, angle) {} }
+            AsyncImage(
+                model = urlResolver(photo.url),
+                contentDescription = photo.name,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = offsetX,
+                        translationY = offsetY
+                    )
             )
         }
+        }
+
+        // Overlay lives OUTSIDE the pager: one instance over the current
+        // page, so its buttons can never be clipped by a page transition.
+        val currentPage = pagerState.currentPage
+        val currentPhoto = photos[currentPage.coerceIn(0, photos.size - 1)]
+        ViewerOverlay(
+            photo = currentPhoto,
+            page = currentPage,
+            total = photos.size,
+            onClose = onDismiss,
+            onRotate = { angle -> onRotate(currentPhoto, angle) {} }
+        )
     }
 }
 

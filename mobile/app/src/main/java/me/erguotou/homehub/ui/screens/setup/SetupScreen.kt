@@ -78,8 +78,14 @@ fun SetupScreen(vm: SetupViewModel = viewModel(), onFinished: () -> Unit) {
                         TextButton(onClick = { vm.update { copy(step = step - 1) } }) { Text("上一步") }
                     }
                     Button(onClick = {
-                        if (state.step < 2) vm.update { copy(step = step + 1) }
-                        else vm.testConnection()
+                        if (state.step < 2) {
+                            // Persist after every step so a crash/kill never
+                            // loses what the user already typed.
+                            vm.save()
+                            vm.update { copy(step = step + 1) }
+                        } else {
+                            vm.testConnection()
+                        }
                     }) {
                         Text(if (state.step < 2) "下一步" else "测试连接")
                     }

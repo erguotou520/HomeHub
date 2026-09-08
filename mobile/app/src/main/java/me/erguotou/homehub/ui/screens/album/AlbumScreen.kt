@@ -22,9 +22,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.AlertDialog
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -68,7 +68,7 @@ import me.erguotou.homehub.work.UploadWorker
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AlbumScreen(vm: AlbumViewModel = viewModel()) {
+fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel = viewModel()) {
     val state by vm.state.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -94,7 +94,11 @@ fun AlbumScreen(vm: AlbumViewModel = viewModel()) {
         }
     }
 
-    Scaffold(
+    // The viewer is drawn as the last child of this Box so it covers the
+    // album's own top bar; Root.kt hides the bottom navigation bar while the
+    // viewer is open, which makes the experience truly full screen.
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("相册") },
@@ -178,15 +182,12 @@ fun AlbumScreen(vm: AlbumViewModel = viewModel()) {
         }
     }
 
-    viewerPhoto?.let { photo ->
-        val index = viewerList.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
-        Dialog(
-            onDismissRequest = { viewerPhoto = null },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false
-            )
-        ) {
+        viewerPhoto?.let { photo ->
+            val index = viewerList.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
+            LaunchedEffect(photo.id) { onFullscreenChange(true) }
+            DisposableEffect(Unit) {
+                onDispose { onFullscreenChange(false) }
+            }
             PhotoViewerScreen(
                 photos = viewerList,
                 initialIndex = index,

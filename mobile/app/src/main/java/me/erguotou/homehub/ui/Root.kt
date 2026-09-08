@@ -19,6 +19,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -31,6 +34,7 @@ import me.erguotou.homehub.ui.screens.album.AlbumScreen
 import me.erguotou.homehub.ui.screens.files.FilesScreen
 import me.erguotou.homehub.ui.screens.monitor.MonitorScreen
 import me.erguotou.homehub.ui.screens.settings.SettingsScreen
+import me.erguotou.homehub.ui.screens.setup.SetupScreen
 
 sealed class Tab(val route: String, val label: String, val icon: ImageVector, val iconSelected: ImageVector) {
     data object Album : Tab("album", "相册", Icons.Outlined.PhotoLibrary, Icons.Filled.PhotoLibrary)
@@ -44,9 +48,11 @@ private val TABS = listOf(Tab.Album, Tab.Files, Tab.Monitor, Tab.Settings)
 @Composable
 fun HomeHubRoot() {
     val navController = rememberNavController()
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         bottomBar = {
-            NavigationBar {
+            if (!fullscreen) {
+                NavigationBar {
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
                 val currentDestination = navBackStackEntry?.destination
                 TABS.forEach { tab ->
@@ -71,16 +77,20 @@ fun HomeHubRoot() {
                         label = { Text(tab.label) }
                     )
                 }
+                }
             }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             NavHost(navController = navController, startDestination = Tab.Album.route) {
-                composable(Tab.Album.route) { AlbumScreen() }
+                composable(Tab.Album.route) { AlbumScreen(onFullscreenChange = { fullscreen = it }) }
                 composable(Tab.Files.route) { FilesScreen() }
                 composable(Tab.Monitor.route) { MonitorScreen() }
                 composable(Tab.Settings.route) {
-                    SettingsScreen(onOpenSetup = { /* handled by MainActivity gate */ })
+                    SettingsScreen(onOpenSetup = { navController.navigate("setup") })
+                }
+                composable("setup") {
+                    SetupScreen(onFinished = { navController.popBackStack() })
                 }
             }
         }

@@ -45,15 +45,23 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         prefs = Prefs(this)
 
+        android.util.Log.d(
+            "HomeHubGate",
+            "server=${prefs.isServerConfigured()} addr='${prefs.serverAddress}' " +
+                "wg=${prefs.isWireGuardConfigured()} priv=${prefs.wgPrivateKey.length} " +
+                "peer=${prefs.wgPeerPublicKey.length} ep='${prefs.wgEndpoint}'"
+        )
+
         requestNotificationPermission()
         if (prefs.isWireGuardConfigured()) connectTunnel()
 
         setContent {
             HomeHubTheme {
                 var unlocked by rememberSaveable { mutableStateOf(!prefs.biometricLock) }
-                var showSetup by remember {
-                    mutableStateOf(!prefs.isServerConfigured() || !prefs.isWireGuardConfigured())
-                }
+                // Only the server address is required to enter the app; the
+                // WireGuard tunnel is optional (LAN access works without it)
+                // and can be configured later from 设置 → 编辑配置.
+                var showSetup by remember { mutableStateOf(!prefs.isServerConfigured()) }
 
                 if (prefs.biometricLock && !unlocked) {
                     LaunchedEffect(Unit) { authenticate { unlocked = true } }

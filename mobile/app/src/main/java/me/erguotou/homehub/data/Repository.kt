@@ -38,8 +38,12 @@ class Repository(private val context: Context) {
         cachedClientKey = ""
     }
 
-    fun absolute(url: String): String =
-        if (url.startsWith("http")) url else prefs.baseUrl() + url.removePrefix("/")
+    fun absolute(url: String): String {
+        if (url.startsWith("http")) return url
+        val base = prefs.baseUrl().trimEnd('/')
+        val path = if (url.startsWith("/")) url else "/$url"
+        return base + path
+    }
 
     // ──────────────────────────── album ────────────────────────────
 

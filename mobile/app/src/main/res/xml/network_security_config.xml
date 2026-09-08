@@ -1,18 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  HomeHub talks to the server over the WireGuard tunnel. Cleartext HTTP is only
-  allowed for the private ranges below; TLS uses the system trust store, or the
-  single self-signed certificate registered in Settings (see HttpClientFactory).
+  HomeHub talks to the server over the WireGuard tunnel or the trusted home
+  LAN; the server is never exposed to the public internet and currently has
+  no TLS listener, so cleartext HTTP is permitted for all server addresses
+  the app may point at (WG 10.0.0.1, LAN 192.168.x.x, localhost).
+  TLS uses the system trust store, or the single self-signed certificate
+  registered in Settings (see HttpClientFactory) once the server gains HTTPS.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">10.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.0.0</domain>
-        <domain includeSubdomains="false">localhost</domain>
-    </domain-config>
 </network-security-config>

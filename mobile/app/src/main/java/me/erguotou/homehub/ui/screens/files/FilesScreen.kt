@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -33,6 +34,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -164,6 +167,7 @@ fun FilesScreen(vm: FilesViewModel = viewModel()) {
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             val segments = vm.breadcrumbSegments()
             val currentDir = state.currentDir
+            val retryDir = currentDir?.let { it to state.currentPath }
             if (currentDir != null && segments.isNotEmpty()) {
                 Breadcrumb(
                     root = currentDir,
@@ -176,8 +180,8 @@ fun FilesScreen(vm: FilesViewModel = viewModel()) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     state.loading && state.entries.isEmpty() -> Loading()
-                    state.error != null && state.entries.isEmpty() -> ErrorText(state.error!!)
-                    state.entries.isEmpty() -> Empty("这个目录是空的")
+                    state.error != null && state.entries.isEmpty() -> ErrorText(state.error!!) { retryDir?.let { vm.open(it.first, it.second) } }
+                    state.entries.isEmpty() -> Empty("这个目录是空的", icon = Icons.Outlined.FolderOpen)
                     else -> LazyColumn {
                         items(state.entries, key = { it.path }) { entry ->
                             FileRow(
@@ -198,17 +202,31 @@ fun FilesScreen(vm: FilesViewModel = viewModel()) {
                 }
 
                 if (state.selected.isNotEmpty()) {
-                    Row(
+                    // M3 floating action bar for the multi-select mode.
+                    Surface(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
                             .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        tonalElevation = 6.dp,
+                        shadowElevation = 4.dp
                     ) {
-                        TextButton(onClick = { vm.clearSelection() }) { Text("取消") }
-                        TextButton(onClick = {
-                            confirmDelete = state.entries.filter { state.selected.contains(it.path) }
-                        }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "已选 ${state.selected.size}",
+                                modifier = Modifier.padding(start = 12.dp),
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            TextButton(onClick = { vm.clearSelection() }) { Text("取消") }
+                            TextButton(onClick = {
+                                confirmDelete = state.entries.filter { state.selected.contains(it.path) }
+                            }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                        }
                     }
                 }
             }

@@ -5,6 +5,44 @@ import ImageEditor from '../components/ImageEditor'
 
 type SortKey = 'name' | 'mtime' | 'size'
 
+type UpStatus = 'pending' | 'uploading' | 'done' | 'skipped' | 'error'
+
+interface UpItem {
+  id: number
+  file: File
+  status: UpStatus
+  progress: number
+  error?: string
+}
+
+/** Single-file XHR upload with progress; resolves to the duplicate outcome. */
+function uploadOne(
+  item: UpItem,
+  url: string,
+  onProgress: (p: number) => void,
+): Promise<'done' | 'skipped'> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('file', item.file, item.file.name)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.responseType = 'json'
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total)
+    }
+    xhr.onload = () => {
+      const body = xhr.response as { uploaded?: { skipped?: boolean }[]; error?: string } | null
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body?.uploaded?.[0]?.skipped ? 'skipped' : 'done')
+      } else {
+        reject(new Error(body?.error ?? `HTTP ${xhr.status}`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('网络错误'))
+    xhr.send(form)
+  })
+}
+
 /** Encode each path segment individually so "/" separators survive. */
 function enc(path: string): string {
   return path.split('/').filter(Boolean).map(encodeURIComponent).join('/')
@@ -61,7 +99,15 @@ export default function Files() {
   const [toast, setToast] = useState<string | null>(null)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [rev, setRev] = useState(0)
+  const [queue, setQueue] = useState<UpItem[]>([])
+  const [dup, setDup] = useState<'skip' | 'keep'>('skip')
+  const [dragging, setDragging] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
+  const queueRef = useRef<UpItem[]>([])
+  const pumpLock = useRef(false)
+  const dupRef = useRef(dup)
+  const upIdRef = useRef(0)
+  dupRef.current = dup
 
   /** Images of the current listing, in display order — the editor navigates these. */
   const imageEntries = useMemo(
@@ -108,6 +154,103 @@ export default function Files() {
     setRev((r) => r + 1)
     void load()
   }, [load])
+
+  function patchUp(id: number, patch: Partial<UpItem>) {
+    queueRef.current = queueRef.current.map((i) => (i.id === id ? { ...i, ...patch } : i))
+    setQueue(queueRef.current)
+  }
+
+  const enqueue = useCallback((files: File[]) => {
+    if (!files.length) return
+    const items: UpItem[] = files.map((file) => ({
+      id: ++upIdRef.current,
+      file,
+      status: 'pending',
+      progress: 0,
+    }))
+    queueRef.current = [...queueRef.current, ...items]
+    setQueue(queueRef.current)
+    void pumpRef.current()
+  }, [])
+
+  const pumpRef = useRef<() => Promise<void>>(async () => {})
+
+  async function pump() {
+    if (pumpLock.current) return
+    pumpLock.current = true
+    try {
+      for (;;) {
+        const next = queueRef.current.find((i) => i.status === 'pending')
+        if (!next) break
+        patchUp(next.id, { status: 'uploading', progress: 0 })
+        const tail = path ? `/${enc(path)}` : ''
+        const url = `${API_BASE}/api/files/${encodeURIComponent(dir)}${tail}?on-duplicate=${dupRef.current}`
+        try {
+          const result = await uploadOne(next, url, (p) => patchUp(next.id, { progress: p }))
+          patchUp(next.id, { status: result, progress: 1 })
+        } catch (e) {
+          patchUp(next.id, { status: 'error', error: e instanceof Error ? e.message : '上传失败' })
+        }
+      }
+    } finally {
+      pumpLock.current = false
+    }
+    void load()
+  }
+  pumpRef.current = pump
+
+  function retry(id: number) {
+    patchUp(id, { status: 'pending', progress: 0, error: undefined })
+    void pumpRef.current()
+  }
+
+  function removeUp(id: number) {
+    if (queueRef.current.find((i) => i.id === id)?.status === 'uploading') return
+    queueRef.current = queueRef.current.filter((i) => i.id !== id)
+    setQueue(queueRef.current)
+  }
+
+  function clearFinished() {
+    queueRef.current = queueRef.current.filter((i) => i.status === 'pending' || i.status === 'uploading')
+    setQueue(queueRef.current)
+  }
+
+  // Drag & drop onto the file area.
+  const dropHandlers = useMemo(
+    () => ({
+      onDragOver: (e: React.DragEvent) => {
+        if (Array.from(e.dataTransfer.types).includes('Files')) {
+          e.preventDefault()
+          setDragging(true)
+        }
+      },
+      onDragLeave: (e: React.DragEvent) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)
+      },
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault()
+        setDragging(false)
+        const files = Array.from(e.dataTransfer.files ?? [])
+        if (files.length) enqueue(files)
+      },
+    }),
+    [enqueue],
+  )
+
+  // Paste files from the clipboard.
+  useEffect(() => {
+    function onPaste(e: ClipboardEvent) {
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const files = Array.from(e.clipboardData?.files ?? [])
+      if (files.length) {
+        e.preventDefault()
+        enqueue(files)
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [enqueue])
 
   useEffect(() => {
     void load()
@@ -197,29 +340,6 @@ export default function Files() {
     }
   }
 
-  async function doUpload(files: FileList) {
-    if (!files.length) return
-    setBusy(true)
-    try {
-      const form = new FormData()
-      for (const f of Array.from(files)) form.append('file', f, f.name)
-      const headers: Record<string, string> = {}
-      const tail = path ? `/${enc(path)}` : ''
-      const res = await fetch(`${API_BASE}/api/files/${encodeURIComponent(dir)}${tail}`, {
-        method: 'POST',
-        headers,
-        body: form,
-      })
-      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? '上传失败')
-      showToast(`已上传 ${files.length} 个文件`)
-      await load()
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : '上传失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
     <div className="files-layout">
       <aside className="files-side card" aria-label="注册目录">
@@ -244,7 +364,12 @@ export default function Files() {
         {dirs.length === 0 && <div className="empty">没有注册目录</div>}
       </aside>
 
-      <div className="files-main">
+      <div className="files-main" {...dropHandlers}>
+        {dragging && (
+          <div className="drop-overlay" aria-hidden="true">
+            <div className="drop-hint">松开以上传到当前目录</div>
+          </div>
+        )}
         <div className="toolbar">
           <nav className="crumbs" aria-label="路径">
             <button className="crumb" onClick={() => setPath('')}>{dir}</button>
@@ -275,6 +400,15 @@ export default function Files() {
             {desc ? '降序' : '升序'}
           </button>
           <button className="small" onClick={() => setShowMkdir(true)}>新建目录</button>
+          <select
+            value={dup}
+            onChange={(e) => setDup(e.target.value as 'skip' | 'keep')}
+            aria-label="重复文件策略"
+            title="上传重名/同内容文件时的处理方式"
+          >
+            <option value="skip">重复跳过</option>
+            <option value="keep">重复保留</option>
+          </select>
           <button className="small" onClick={() => uploadRef.current?.click()} disabled={busy}>
             {busy ? '处理中…' : '上传'}
           </button>
@@ -284,7 +418,7 @@ export default function Files() {
             multiple
             hidden
             onChange={(e) => {
-              if (e.target.files?.length) void doUpload(e.target.files)
+              if (e.target.files?.length) enqueue(Array.from(e.target.files))
               e.target.value = ''
             }}
           />
@@ -436,10 +570,77 @@ export default function Files() {
           onDismiss={() => setShowMkdir(false)}
         />
       )}
+      {queue.length > 0 && (
+        <UploadQueuePanel
+          items={queue}
+          onRetry={retry}
+          onRemove={removeUp}
+          onClear={clearFinished}
+        />
+      )}
       {toast && (
         <div className="toast" role="status" aria-live="polite">{toast}</div>
       )}
     </div>
+  )
+}
+
+function UploadQueuePanel({
+  items,
+  onRetry,
+  onRemove,
+  onClear,
+}: {
+  items: UpItem[]
+  onRetry: (id: number) => void
+  onRemove: (id: number) => void
+  onClear: () => void
+}) {
+  const finished = items.filter((i) => i.status === 'done' || i.status === 'skipped').length
+  const errors = items.filter((i) => i.status === 'error').length
+  return (
+    <aside className="upload-panel card" aria-label="上传队列">
+      <div className="up-head">
+        <span className="up-title">
+          上传队列
+          {errors > 0 && <span className="badge danger-badge">{errors} 失败</span>}
+        </span>
+        <span className="muted">{finished}/{items.length}</span>
+        <button className="ghost small" onClick={onClear} disabled={finished === 0}>
+          清除已完成
+        </button>
+      </div>
+      <ul className="up-list">
+        {items.map((i) => (
+          <li key={i.id} className={`up-item st-${i.status}`}>
+            <span className="up-icon" aria-hidden="true">
+              {i.status === 'done' ? '✓' : i.status === 'skipped' ? '⏭' : i.status === 'error' ? '✕' : '↑'}
+            </span>
+            <span className="up-body">
+              <span className="up-name truncate">{i.file.name}</span>
+              <span className="up-meta">
+                {i.status === 'uploading' && `上传中 ${Math.round(i.progress * 100)}%`}
+                {i.status === 'pending' && '等待中…'}
+                {i.status === 'done' && formatBytes(i.file.size)}
+                {i.status === 'skipped' && '重复，已跳过'}
+                {i.status === 'error' && (i.error ?? '失败')}
+              </span>
+              {(i.status === 'uploading' || i.status === 'pending') && (
+                <span className="up-bar">
+                  <span className="up-bar-fill" style={{ width: `${Math.max(i.progress * 100, 4)}%` }} />
+                </span>
+              )}
+            </span>
+            {i.status === 'error' && (
+              <button className="op" onClick={() => onRetry(i.id)}>重试</button>
+            )}
+            {i.status !== 'uploading' && (
+              <button className="op" aria-label={`移除 ${i.file.name}`} onClick={() => onRemove(i.id)}>✕</button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </aside>
   )
 }
 

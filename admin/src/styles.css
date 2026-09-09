@@ -1708,3 +1708,146 @@ input[type='radio'] {
   color: #fff;
   word-break: break-all;
 }
+
+/* ─────────────────────── upload queue (files page) ─────────────────────── */
+
+.files-main {
+  position: relative;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent, #5b8cff) 12%, transparent);
+  border: 2px dashed var(--accent, #5b8cff);
+  border-radius: 12px;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.drop-hint {
+  padding: 14px 28px;
+  border-radius: 999px;
+  background: var(--accent, #5b8cff);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.upload-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 320px;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  z-index: 60;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+}
+
+.upload-panel .up-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upload-panel .up-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.danger-badge {
+  background: var(--danger, #e5484d);
+  color: #fff;
+}
+
+.upload-panel .up-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upload-panel .up-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+
+.upload-panel .up-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 12px;
+  background: rgba(127, 127, 127, 0.18);
+}
+
+.upload-panel .up-item.st-done .up-icon {
+  background: var(--ok, #2e9e5b);
+  color: #fff;
+}
+
+.upload-panel .up-item.st-error .up-icon {
+  background: var(--danger, #e5484d);
+  color: #fff;
+}
+
+.upload-panel .up-item.st-skipped {
+  opacity: 0.65;
+}
+
+.upload-panel .up-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.upload-panel .up-name {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.upload-panel .up-meta {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+}
+
+.upload-panel .up-item.st-error .up-meta {
+  color: var(--danger, #e5484d);
+}
+
+.upload-panel .up-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.2);
+  overflow: hidden;
+}
+
+.upload-panel .up-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #5b8cff);
+  transition: width 0.15s ease-out;
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { DirStat, FileEntry } from '../api/types'
+import ImageEditor from '../components/ImageEditor'
 
 type SortKey = 'name' | 'mtime' | 'size'
 
@@ -9,8 +10,20 @@ function enc(path: string): string {
   return path.split('/').filter(Boolean).map(encodeURIComponent).join('/')
 }
 
-export function mediaUrl(dir: string, path: string, thumb = false): string {
-  return `${API_BASE}/api/media/${encodeURIComponent(dir)}/${enc(path)}${thumb ? '?size=thumb' : ''}`
+/**
+ * The listing API returns `path` relative to the registered-root (it includes
+ * the dir name), but per-file endpoints take paths relative to the dir.
+ */
+function rel(entry: FileEntry, dir: string): string {
+  return entry.path.startsWith(`${dir}/`) ? entry.path.slice(dir.length + 1) : entry.path
+}
+
+export function mediaUrl(dir: string, path: string, thumb = false, rev = 0): string {
+  const q: string[] = []
+  if (thumb) q.push('size=thumb')
+  if (rev) q.push(`rev=${rev}`)
+  const s = q.length ? `?${q.join('&')}` : ''
+  return `${API_BASE}/api/media/${encodeURIComponent(dir)}/${enc(path)}${s}`
 }
 
 const TEXT_EXTS = new Set([
@@ -24,7 +37,6 @@ function extOf(name: string): string {
 }
 
 type Preview =
-  | { kind: 'image'; entry: FileEntry }
   | { kind: 'video'; entry: FileEntry }
   | { kind: 'audio'; entry: FileEntry }
   | { kind: 'text'; entry: FileEntry; content: string }
@@ -47,7 +59,15 @@ export default function Files() {
   const [showMkdir, setShowMkdir] = useState(false)
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [editIndex, setEditIndex] = useState<number | null>(null)
+  const [rev, setRev] = useState(0)
   const uploadRef = useRef<HTMLInputElement>(null)
+
+  /** Images of the current listing, in display order — the editor navigates these. */
+  const imageEntries = useMemo(
+    () => entries.filter((e) => !e.is_dir && e.media_kind === 'image'),
+    [entries],
+  )
 
   const showToast = useCallback((msg: string) => {
     setToast(msg)
@@ -69,17 +89,25 @@ export default function Files() {
     setLoading(true)
     setError(null)
     try {
+      // Trailing slash on a single-segment path makes the server route miss
+      // and fall back to the SPA shell; omit it when the subpath is empty.
+      const tail = path ? `/${enc(path)}` : ''
       const res = await api.get<{ entries: FileEntry[] }>(
-        `/api/files/${encodeURIComponent(dir)}/${enc(path)}`,
+        `/api/files/${encodeURIComponent(dir)}${tail}`,
         { sort, desc },
       )
-      setEntries(res.entries)
+      setEntries(res.entries ?? [])
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败')
     } finally {
       setLoading(false)
     }
   }, [dir, path, sort, desc])
+
+  const onEdited = useCallback(() => {
+    setRev((r) => r + 1)
+    void load()
+  }, [load])
 
   useEffect(() => {
     void load()
@@ -93,12 +121,15 @@ export default function Files() {
       return
     }
     const ext = extOf(entry.name)
-    if (entry.media_kind === 'image') setPreview({ kind: 'image', entry })
+    if (entry.media_kind === 'image') {
+      const idx = imageEntries.findIndex((e) => e.path === entry.path)
+      setEditIndex(idx >= 0 ? idx : 0)
+    }
     else if (entry.media_kind === 'video') setPreview({ kind: 'video', entry })
     else if (entry.media_kind === 'music') setPreview({ kind: 'audio', entry })
     else if (TEXT_EXTS.has(ext)) {
       api
-        .get<{ content: string }>(`/api/documents/${encodeURIComponent(dir)}/${enc(entry.path)}`)
+        .get<{ content: string }>(`/api/documents/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`)
         .then((r) => setPreview({ kind: 'text', entry, content: r.content ?? '' }))
         .catch((e: Error) => showToast(`无法读取：${e.message}`))
     } else setPreview({ kind: 'other', entry })
@@ -107,7 +138,7 @@ export default function Files() {
   async function doRename(entry: FileEntry, name: string) {
     setBusy(true)
     try {
-      await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(entry.path)}`, { name })
+      await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`, { name })
       setRenameTarget(null)
       showToast('已重命名')
       await load()
@@ -121,7 +152,7 @@ export default function Files() {
   async function doCopyMove(entry: FileEntry, op: 'copy' | 'move', toDir: string, toPath: string) {
     setBusy(true)
     try {
-      await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(entry.path)}`, {
+      await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`, {
         op,
         to_dir: toDir,
         to_path: toPath,
@@ -139,7 +170,7 @@ export default function Files() {
   async function doDelete(entry: FileEntry) {
     setBusy(true)
     try {
-      await api.del(`/api/files/${encodeURIComponent(dir)}/${enc(entry.path)}`)
+      await api.del(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`)
       setDeleteTarget(null)
       showToast('已移入回收站')
       await load()
@@ -154,7 +185,8 @@ export default function Files() {
     setBusy(true)
     try {
       const base = path ? `${dir}/${path}` : dir
-      await api.post(`/api/mkdir/${encodeURIComponent(dir)}/${enc(path ? `${path}/${name}` : name)}`)
+      const tail = path ? `/${enc(`${path}/${name}`)}` : `/${enc(name)}`
+      await api.post(`/api/mkdir/${encodeURIComponent(dir)}${tail}`)
       setShowMkdir(false)
       showToast(`已创建 ${base}/${name}`)
       await load()
@@ -172,7 +204,8 @@ export default function Files() {
       const form = new FormData()
       for (const f of Array.from(files)) form.append('file', f, f.name)
       const headers: Record<string, string> = {}
-      const res = await fetch(`${API_BASE}/api/files/${encodeURIComponent(dir)}/${enc(path)}`, {
+      const tail = path ? `/${enc(path)}` : ''
+      const res = await fetch(`${API_BASE}/api/files/${encodeURIComponent(dir)}${tail}`, {
         method: 'POST',
         headers,
         body: form,
@@ -274,7 +307,7 @@ export default function Files() {
               >
                 <span className="file-thumb">
                   {en.media_kind === 'image' ? (
-                    <img src={mediaUrl(dir, en.path, true)} alt="" loading="lazy" />
+                    <img src={mediaUrl(dir, rel(en, dir), true, rev)} alt="" loading="lazy" />
                   ) : (
                     <KindIcon entry={en} />
                   )}
@@ -313,7 +346,7 @@ export default function Files() {
                         <>
                           <a
                             className="op"
-                            href={mediaUrl(dir, en.path)}
+                            href={mediaUrl(dir, rel(en, dir))}
                             download={en.name}
                             aria-label={`下载 ${en.name}`}
                           >
@@ -339,6 +372,17 @@ export default function Files() {
         )}
       </div>
 
+      {editIndex !== null && imageEntries[editIndex] && (
+        <ImageEditor
+          dir={dir}
+          entries={imageEntries}
+          index={editIndex}
+          onIndexChange={setEditIndex}
+          onClose={() => setEditIndex(null)}
+          onChanged={onEdited}
+          notify={showToast}
+        />
+      )}
       {preview && (
         <PreviewModal
           preview={preview}
@@ -445,7 +489,7 @@ function PreviewModal({
   async function save() {
     setSaving(true)
     try {
-      await api.put(`/api/documents/${encodeURIComponent(dir)}/${enc(entry.path)}`, { content: text })
+      await api.put(`/api/documents/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`, { content: text })
       setDirty(false)
       onSaved()
     } catch (e) {
@@ -470,14 +514,11 @@ function PreviewModal({
           <button className="ghost small" onClick={onClose} aria-label="关闭预览">关闭</button>
         </div>
         <div className="preview-body">
-          {preview.kind === 'image' && (
-            <img src={mediaUrl(dir, entry.path)} alt={entry.name} />
-          )}
           {preview.kind === 'video' && (
-            <video src={mediaUrl(dir, entry.path)} controls preload="metadata" />
+            <video src={mediaUrl(dir, rel(entry, dir))} controls preload="metadata" />
           )}
           {preview.kind === 'audio' && (
-            <audio src={mediaUrl(dir, entry.path)} controls style={{ width: '100%' }} />
+            <audio src={mediaUrl(dir, rel(entry, dir))} controls style={{ width: '100%' }} />
           )}
           {preview.kind === 'text' && (
             <textarea
@@ -493,7 +534,7 @@ function PreviewModal({
           {preview.kind === 'other' && (
             <div className="empty">
               暂不支持在线预览，
-              <a href={mediaUrl(dir, entry.path)} download={entry.name}>点击下载</a>
+              <a href={mediaUrl(dir, rel(entry, dir))} download={entry.name}>点击下载</a>
             </div>
           )}
         </div>

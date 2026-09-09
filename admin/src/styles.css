@@ -1915,3 +1915,52 @@ input[type='radio'] {
   background: var(--accent, #5b8cff);
   border-color: transparent;
 }
+
+/* ─────────────────────── files page enhancements ─────────────────────── */
+
+.toolbar .search-input {
+  width: 180px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  color: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.toolbar .search-input:focus {
+  border-color: var(--accent, #5b8cff);
+}
+
+.table-card tr.row-active td {
+  background: color-mix(in srgb, var(--accent, #5b8cff) 16%, transparent);
+}
+
+.table-card tr.row-active td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent, #5b8cff);
+}
+
+.attr-dl {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.attr-dl dt {
+  color: var(--text-muted, #888);
+}
+
+.attr-dl dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.attr-dl dd.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}

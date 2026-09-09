@@ -106,6 +106,10 @@ export default function Files() {
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [batchOp, setBatchOp] = useState<'copy' | 'move' | null>(null)
   const [confirmBatchDel, setConfirmBatchDel] = useState(false)
+  const [query, setQuery] = useState('')
+  const [showNewText, setShowNewText] = useState(false)
+  const [attrTarget, setAttrTarget] = useState<FileEntry | null>(null)
+  const [activeIdx, setActiveIdx] = useState(-1)
   const uploadRef = useRef<HTMLInputElement>(null)
   const queueRef = useRef<UpItem[]>([])
   const pumpLock = useRef(false)
@@ -217,7 +221,12 @@ export default function Files() {
     })
   }
 
-  const fileEntries = useMemo(() => entries.filter((e) => !e.is_dir), [entries])
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? entries.filter((e) => e.name.toLowerCase().includes(q)) : entries
+  }, [entries, query])
+
+  const fileEntries = useMemo(() => filtered.filter((e) => !e.is_dir), [filtered])
 
   function toggleAllSel() {
     setSel((s) => (s.size === fileEntries.length ? new Set() : new Set(fileEntries.map((e) => e.path))))
@@ -307,6 +316,33 @@ export default function Files() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [selMode, batchOp, confirmBatchDel])
+
+  // Arrow-key navigation + Enter to open (list view only).
+  useEffect(() => {
+    setActiveIdx(-1)
+  }, [path, entries])
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+      if (grid || selMode || preview || editIndex !== null) return
+      if (document.querySelector('.modal') || document.querySelector('.viewer')) return
+      if (filtered.length === 0) return
+      e.preventDefault()
+      if (e.key === 'ArrowDown') setActiveIdx((i) => Math.min(i + 1, filtered.length - 1))
+      else if (e.key === 'ArrowUp') setActiveIdx((i) => Math.max(i - 1, 0))
+      else if (e.key === 'Enter' && activeIdx >= 0 && activeIdx < filtered.length) open(filtered[activeIdx])
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  useEffect(() => {
+    if (activeIdx < 0) return
+    document.querySelector('.row-active')?.scrollIntoView({ block: 'nearest' })
+  }, [activeIdx])
 
   function removeUp(id: number) {
     if (queueRef.current.find((i) => i.id === id)?.status === 'uploading') return
@@ -447,6 +483,22 @@ export default function Files() {
     }
   }
 
+  async function doNewText(rawName: string) {
+    const name = rawName.includes('.') ? rawName : `${rawName}.txt`
+    setBusy(true)
+    try {
+      const tail = path ? `/${enc(path)}` : ''
+      await api.put(`/api/documents/${encodeURIComponent(dir)}${tail}/${enc(name)}`, { content: '' })
+      setShowNewText(false)
+      showToast(`已创建 ${name}`)
+      await load()
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : '创建失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="files-layout">
       <aside className="files-side card" aria-label="注册目录">
@@ -513,6 +565,15 @@ export default function Files() {
           >
             {selMode ? '退出选择' : '选择'}
           </button>
+          <input
+            className="search-input"
+            type="search"
+            placeholder="搜索当前目录…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="搜索文件"
+          />
+          <button className="ghost small" onClick={() => setShowNewText(true)}>新建文本</button>
           <button className="small" onClick={() => setShowMkdir(true)}>新建目录</button>
           <select
             value={dup}
@@ -563,10 +624,13 @@ export default function Files() {
         {!loading && !error && entries.length === 0 && (
           <div className="empty">这个目录是空的</div>
         )}
+        {!loading && !error && entries.length > 0 && filtered.length === 0 && (
+          <div className="empty">没有匹配「{query}」的文件</div>
+        )}
 
         {grid ? (
           <div className="files-grid">
-            {entries.map((en) => (
+            {filtered.map((en) => (
               <button
                 key={en.path}
                 className={`file-tile${selMode && sel.has(en.path) ? ' selected' : ''}`}
@@ -612,8 +676,11 @@ export default function Files() {
                 </tr>
               </thead>
               <tbody>
-                {entries.map((en) => (
-                  <tr key={en.path} className={selMode && sel.has(en.path) ? 'row-sel' : undefined}>
+                {filtered.map((en, idx) => (
+                  <tr
+                    key={en.path}
+                    className={`${selMode && sel.has(en.path) ? 'row-sel' : ''} ${idx === activeIdx ? 'row-active' : ''}`.trim() || undefined}
+                  >
                     {selMode && (
                       <td className="chk">
                         {!en.is_dir && (
@@ -645,6 +712,7 @@ export default function Files() {
                           >
                             下载
                           </a>
+                          <button className="op" onClick={() => setAttrTarget(en)}>属性</button>
                           <button className="op" onClick={() => setRenameTarget(en)}>重命名</button>
                           <button className="op" onClick={() => setMoveTarget({ entry: en, op: 'copy' })}>复制</button>
                           <button className="op" onClick={() => setMoveTarget({ entry: en, op: 'move' })}>移动</button>
@@ -758,6 +826,46 @@ export default function Files() {
           onConfirm={runBatchDelete}
           onDismiss={() => setConfirmBatchDel(false)}
         />
+      )}
+      {showNewText && (
+        <PromptDialog
+          title="新建文本文件"
+          label="文件名（无扩展名自动补 .txt）"
+          initial="未命名.txt"
+          confirmText="创建"
+          busy={busy}
+          onConfirm={(v) => doNewText(v)}
+          onDismiss={() => setShowNewText(false)}
+        />
+      )}
+      {attrTarget && (
+        <div className="modal-overlay" onClick={() => setAttrTarget(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`属性 ${attrTarget.name}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>属性</h3>
+            <dl className="attr-dl">
+              <dt>名称</dt>
+              <dd className="truncate">{attrTarget.name}</dd>
+              <dt>类型</dt>
+              <dd>{attrTarget.is_dir ? '文件夹' : attrTarget.mime_type || `${extOf(attrTarget.name).toUpperCase()} 文件`}</dd>
+              <dt>大小</dt>
+              <dd>{attrTarget.is_dir ? '-' : formatBytes(attrTarget.size ?? 0)}</dd>
+              <dt>修改时间</dt>
+              <dd>{formatTime(attrTarget.modified)}</dd>
+              <dt>完整路径</dt>
+              <dd className="mono truncate">{attrTarget.path}</dd>
+            </dl>
+            <div className="modal-foot">
+              <span className="flex-spacer" />
+              <button className="ghost" onClick={() => setAttrTarget(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
       )}
       {toast && (
         <div className="toast" role="status" aria-live="polite">{toast}</div>

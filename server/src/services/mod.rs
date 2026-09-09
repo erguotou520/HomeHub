@@ -9,6 +9,7 @@ pub mod dirs;
 pub mod exif;
 pub mod files;
 pub mod hash;
+pub mod image_ops;
 pub mod media_service;
 pub mod ml;
 pub mod originals;

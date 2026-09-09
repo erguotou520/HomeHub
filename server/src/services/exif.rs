@@ -18,6 +18,21 @@ pub struct PhotoMeta {
     pub height: Option<i64>,
 }
 
+/// Read only the EXIF orientation tag (1..8). Cheap helper for image editing.
+pub fn orientation_of(path: &Path) -> u32 {
+    let Ok(file) = std::fs::File::open(path) else {
+        return 1;
+    };
+    let mut bufreader = std::io::BufReader::new(&file);
+    let Ok(exif) = Reader::new().read_from_container(&mut bufreader) else {
+        return 1;
+    };
+    exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
 /// Read EXIF and fall back to decoding the image for dimensions.
 pub fn read_metadata(path: &Path) -> Result<PhotoMeta> {
     let mut meta = PhotoMeta {

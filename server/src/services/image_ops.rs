@@ -151,7 +151,7 @@ pub async fn restore_original(
     if !original.exists() {
         bail!("no archived original for {}", rel_path);
     }
-    let tmp = full.with_extension("restore.tmp");
+    let tmp = full.with_extension(format!("restore.{}.tmp", unique_nonce()));
     tokio::fs::copy(&original, &tmp).await?;
     tokio::fs::rename(&tmp, full).await?;
 
@@ -180,6 +180,18 @@ pub fn has_original(dir: &DirRecord, rel_path: &str, config: &Config) -> bool {
 
 // ────────────────────────────── pixel work ──────────────────────────────
 
+/// Unique per-call suffix so concurrent transforms of the same file never
+/// share temp files (deterministic names made `rename` fail under load).
+fn unique_nonce() -> u128 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    (n << 32) | (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u128)
+        .unwrap_or(0))
+}
+
 fn apply(path: &Path, ops: &[Op], lossless: bool, jpegtran_path: &str) -> Result<()> {
     let ext = path
         .extension()
@@ -204,9 +216,10 @@ fn lossless_chain(path: &Path, ops: &[Op], jpegtran_path: &str) -> Result<()> {
     let mut current = path.to_path_buf();
     let mut stage = 0usize;
     let mut temps: Vec<PathBuf> = Vec::new();
+    let nonce = unique_nonce();
 
     for op in ops {
-        let tmp = path.with_extension(format!("edit{stage}.tmp"));
+        let tmp = path.with_extension(format!("edit{stage}.{nonce}.tmp"));
         let mut cmd = std::process::Command::new(jpegtran_path);
         cmd.arg("-copy").arg("all");
         match op {
@@ -281,7 +294,7 @@ fn decoded_chain(path: &Path, ops: &[Op], ext: &str) -> Result<()> {
         Op::Resize { quality, .. } => *quality,
         _ => None,
     });
-    let tmp = path.with_extension("edit.tmp");
+    let tmp = path.with_extension(format!("edit.{}.tmp", unique_nonce()));
     let result = (|| -> Result<()> {
         match ext {
             "png" => img.save_with_format(&tmp, image::ImageFormat::Png)?,

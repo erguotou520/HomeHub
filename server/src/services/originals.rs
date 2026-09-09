@@ -30,11 +30,23 @@ pub async fn archive(file: &Path, dir: &DirRecord, rel_path: &str, config: &Conf
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = target.with_extension("orig.tmp");
-    tokio::fs::copy(file, &tmp).await?;
-    tokio::fs::rename(&tmp, &target).await?;
-    tracing::info!("archived original -> {}", target.display());
-    Ok(Some(target))
+    // create_new makes "keep the very first version" atomic: a concurrent
+    // first-edit cannot overwrite the archive with already-edited pixels.
+    let bytes = tokio::fs::read(file).await?;
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .await
+    {
+        Ok(mut f) => {
+            tokio::io::AsyncWriteExt::write_all(&mut f, &bytes).await?;
+            tracing::info!("archived original -> {}", target.display());
+            Ok(Some(target))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn target_path(dir: &DirRecord, rel_path: &str, config: &Config) -> Option<PathBuf> {

@@ -65,6 +65,12 @@ pub async fn scan_dir(
         if rel.is_empty() || registry.is_ignored(dir, &rel) {
             continue;
         }
+        // Pipeline intermediates (compress/edit/restore temp files) are never
+        // content: indexing them made every scan see phantom +N/-N churn and
+        // re-triggered work while they existed.
+        if !entry.file_type().is_dir() && entry.file_name().to_string_lossy().ends_with(".tmp") {
+            continue;
+        }
 
         let metadata = match entry.metadata() {
             Ok(m) => m,
@@ -282,6 +288,19 @@ pub fn spawn_watcher(registry: DirRegistry, queue: TaskQueue, debounce_secs: u64
                     continue;
                 }
                 let Some(path) = event.paths.first() else {
+                    continue;
+                };
+                // Pipeline temp files and thumbnail churn are not content
+                // changes: reacting to them feeds a scan/compress feedback loop.
+                let ev_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if ev_name.ends_with(".tmp")
+                    || path
+                        .components()
+                        .any(|c| c.as_os_str().to_string_lossy() == ".thumbnails")
+                {
                     continue;
                 };
                 let Some((_, dir_id)) = watched

@@ -1851,3 +1851,67 @@ input[type='radio'] {
   background: var(--accent, #5b8cff);
   transition: width 0.15s ease-out;
 }
+
+/* ─────────────────────── multi-select (files page) ─────────────────────── */
+
+.sel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-top: 10px;
+}
+
+.sel-bar .chk-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sel-bar button.danger {
+  background: var(--danger, #e5484d);
+  color: #fff;
+  border-color: transparent;
+}
+
+.table-card th.chk,
+.table-card td.chk {
+  width: 36px;
+  text-align: center;
+}
+
+.table-card tr.row-sel td {
+  background: color-mix(in srgb, var(--accent, #5b8cff) 10%, transparent);
+}
+
+.files-grid .file-tile {
+  position: relative;
+}
+
+.files-grid .file-tile.selected {
+  outline: 2px solid var(--accent, #5b8cff);
+  outline-offset: 1px;
+}
+
+.files-grid .tile-check {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(18, 18, 22, 0.55);
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+}
+
+.files-grid .file-tile.selected .tile-check {
+  background: var(--accent, #5b8cff);
+  border-color: transparent;
+}

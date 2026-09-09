@@ -102,6 +102,10 @@ export default function Files() {
   const [queue, setQueue] = useState<UpItem[]>([])
   const [dup, setDup] = useState<'skip' | 'keep'>('skip')
   const [dragging, setDragging] = useState(false)
+  const [selMode, setSelMode] = useState(false)
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [batchOp, setBatchOp] = useState<'copy' | 'move' | null>(null)
+  const [confirmBatchDel, setConfirmBatchDel] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
   const queueRef = useRef<UpItem[]>([])
   const pumpLock = useRef(false)
@@ -204,6 +208,106 @@ export default function Files() {
     void pumpRef.current()
   }
 
+  function toggleSel(p: string) {
+    setSel((s) => {
+      const n = new Set(s)
+      if (n.has(p)) n.delete(p)
+      else n.add(p)
+      return n
+    })
+  }
+
+  const fileEntries = useMemo(() => entries.filter((e) => !e.is_dir), [entries])
+
+  function toggleAllSel() {
+    setSel((s) => (s.size === fileEntries.length ? new Set() : new Set(fileEntries.map((e) => e.path))))
+  }
+
+  function exitSel() {
+    setSelMode(false)
+    setSel(new Set())
+  }
+
+  function batchDownload() {
+    const items = entries.filter((e) => sel.has(e.path) && !e.is_dir)
+    items.forEach((en, idx) => {
+      window.setTimeout(() => {
+        const a = document.createElement('a')
+        a.href = mediaUrl(dir, rel(en, dir))
+        a.download = en.name
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }, idx * 400)
+    })
+    showToast(`开始下载 ${items.length} 个文件`)
+  }
+
+  async function runBatch(op: 'copy' | 'move', toDir: string, toPath: string) {
+    const targets = entries.filter((e) => sel.has(e.path) && !e.is_dir)
+    setBusy(true)
+    let ok = 0
+    let fail = 0
+    try {
+      for (const en of targets) {
+        try {
+          const toPathFull = toPath ? `${toPath.replace(/\/+$/, '')}/${en.name}` : en.name
+          await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(rel(en, dir))}`, {
+            op,
+            to_dir: toDir,
+            to_path: toPathFull,
+          })
+          ok++
+        } catch {
+          fail++
+        }
+      }
+      setBatchOp(null)
+      showToast(`已${op === 'copy' ? '复制' : '移动'} ${ok} 项${fail ? `，${fail} 项失败` : ''}`)
+      await load()
+      exitSel()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runBatchDelete() {
+    const targets = entries.filter((e) => sel.has(e.path) && !e.is_dir)
+    setBusy(true)
+    let ok = 0
+    let fail = 0
+    try {
+      for (const en of targets) {
+        try {
+          await api.del(`/api/files/${encodeURIComponent(dir)}/${enc(rel(en, dir))}`)
+          ok++
+        } catch {
+          fail++
+        }
+      }
+      setConfirmBatchDel(false)
+      showToast(`已移入回收站 ${ok} 项${fail ? `，${fail} 项失败` : ''}`)
+      await load()
+      exitSel()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Esc leaves selection mode when no dialog is open.
+  useEffect(() => {
+    if (!selMode) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (batchOp || confirmBatchDel) return
+      exitSel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selMode, batchOp, confirmBatchDel])
+
   function removeUp(id: number) {
     if (queueRef.current.find((i) => i.id === id)?.status === 'uploading') return
     queueRef.current = queueRef.current.filter((i) => i.id !== id)
@@ -295,10 +399,13 @@ export default function Files() {
   async function doCopyMove(entry: FileEntry, op: 'copy' | 'move', toDir: string, toPath: string) {
     setBusy(true)
     try {
+      // The API's to_path is the full destination path (file name included);
+      // the dialog collects only the target subdirectory.
+      const toPathFull = toPath ? `${toPath.replace(/\/+$/, '')}/${entry.name}` : entry.name
       await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`, {
         op,
         to_dir: toDir,
-        to_path: toPath,
+        to_path: toPathFull,
       })
       setMoveTarget(null)
       showToast(op === 'copy' ? '已复制' : '已移动')
@@ -399,6 +506,13 @@ export default function Files() {
           <button className="ghost small" onClick={() => setDesc((d) => !d)} aria-label="排序方向">
             {desc ? '降序' : '升序'}
           </button>
+          <button
+            className={`ghost small${selMode ? ' on' : ''}`}
+            onClick={() => (selMode ? exitSel() : setSelMode(true))}
+            aria-pressed={selMode}
+          >
+            {selMode ? '退出选择' : '选择'}
+          </button>
           <button className="small" onClick={() => setShowMkdir(true)}>新建目录</button>
           <select
             value={dup}
@@ -424,6 +538,26 @@ export default function Files() {
           />
         </div>
 
+        {selMode && (
+          <div className="sel-bar card" role="toolbar" aria-label="批量操作">
+            <label className="chk-all">
+              <input
+                type="checkbox"
+                checked={fileEntries.length > 0 && sel.size === fileEntries.length}
+                onChange={toggleAllSel}
+                aria-label="全选文件"
+              />
+              全选
+            </label>
+            <span className="muted">已选 {sel.size} 项</span>
+            <span className="flex-spacer" />
+            <button className="small" disabled={!sel.size || busy} onClick={batchDownload}>下载</button>
+            <button className="small" disabled={!sel.size || busy} onClick={() => setBatchOp('copy')}>复制到</button>
+            <button className="small" disabled={!sel.size || busy} onClick={() => setBatchOp('move')}>移动到</button>
+            <button className="danger small" disabled={!sel.size || busy} onClick={() => setConfirmBatchDel(true)}>删除</button>
+          </div>
+        )}
+
         {error && <div className="error" role="alert">{error}</div>}
         {loading && entries.length === 0 && <div className="empty">加载中…</div>}
         {!loading && !error && entries.length === 0 && (
@@ -435,8 +569,8 @@ export default function Files() {
             {entries.map((en) => (
               <button
                 key={en.path}
-                className="file-tile"
-                onClick={() => open(en)}
+                className={`file-tile${selMode && sel.has(en.path) ? ' selected' : ''}`}
+                onClick={() => (selMode && !en.is_dir ? toggleSel(en.path) : open(en))}
                 title={en.name}
               >
                 <span className="file-thumb">
@@ -446,6 +580,9 @@ export default function Files() {
                     <KindIcon entry={en} />
                   )}
                 </span>
+                {selMode && !en.is_dir && (
+                  <span className="tile-check" aria-hidden="true">{sel.has(en.path) ? '✓' : ''}</span>
+                )}
                 <span className="file-name">{en.name}</span>
                 {!en.is_dir && (
                   <span className="file-meta">{formatBytes(en.size ?? 0)}</span>
@@ -458,6 +595,16 @@ export default function Files() {
             <table>
               <thead>
                 <tr>
+                  {selMode && (
+                    <th className="chk">
+                      <input
+                        type="checkbox"
+                        checked={fileEntries.length > 0 && sel.size === fileEntries.length}
+                        onChange={toggleAllSel}
+                        aria-label="全选文件"
+                      />
+                    </th>
+                  )}
                   <th>名称</th>
                   <th className="num">大小</th>
                   <th>修改时间</th>
@@ -466,7 +613,19 @@ export default function Files() {
               </thead>
               <tbody>
                 {entries.map((en) => (
-                  <tr key={en.path}>
+                  <tr key={en.path} className={selMode && sel.has(en.path) ? 'row-sel' : undefined}>
+                    {selMode && (
+                      <td className="chk">
+                        {!en.is_dir && (
+                          <input
+                            type="checkbox"
+                            checked={sel.has(en.path)}
+                            onChange={() => toggleSel(en.path)}
+                            aria-label={`选择 ${en.name}`}
+                          />
+                        )}
+                      </td>
+                    )}
                     <td>
                       <button className="file-link" onClick={() => open(en)}>
                         <KindIcon entry={en} small />
@@ -576,6 +735,28 @@ export default function Files() {
           onRetry={retry}
           onRemove={removeUp}
           onClear={clearFinished}
+        />
+      )}
+      {batchOp && (
+        <CopyMoveDialog
+          op={batchOp}
+          name={`${sel.size} 个文件`}
+          dirs={dirs}
+          currentDir={dir}
+          currentPath={path}
+          busy={busy}
+          onConfirm={(toDir, toPath) => runBatch(batchOp, toDir, toPath)}
+          onDismiss={() => setBatchOp(null)}
+        />
+      )}
+      {confirmBatchDel && (
+        <ConfirmDialog
+          title="批量删除"
+          message={`${sel.size} 个文件会移入回收站，30 天后自动清理。确认删除？`}
+          confirmText="删除"
+          busy={busy}
+          onConfirm={runBatchDelete}
+          onDismiss={() => setConfirmBatchDel(false)}
         />
       )}
       {toast && (
@@ -879,7 +1060,7 @@ function CopyMoveDialog({
             </select>
           </label>
           <label className="field grow">
-            <span>子目录（留空为根）</span>
+            <span>目标子目录（留空为根，保留原文件名）</span>
             <input
               value={toPath}
               onChange={(e) => setToPath(e.target.value)}

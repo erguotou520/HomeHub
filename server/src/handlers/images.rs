@@ -48,7 +48,20 @@ fn resolve(
 }
 
 /// Invalidate the cached thumbnail and re-scan so indexes catch up.
-async fn after_edit(state: &AppState, record: &crate::models::dir::DirRecord, full: &std::path::Path) {
+///
+/// The new geometry is also written straight into `photo_assets`. The scan
+/// below is asynchronous and lands a few hundred milliseconds later, so a
+/// client refetching right after an edit would otherwise still be served the
+/// pre-edit width/height/size (visible as a stale info panel / thumbnail).
+/// Only geometry is fast-pathed here: `file_hash` / `pixel_hash` still come
+/// from the scan, which sees the changed fingerprint and refreshes them.
+async fn after_edit(
+    state: &AppState,
+    record: &crate::models::dir::DirRecord,
+    full: &std::path::Path,
+    rel_path: &str,
+    geometry: (Option<u32>, Option<u32>, i64),
+) {
     if let Ok(meta) = std::fs::metadata(full) {
         if let Ok(mtime) = meta.modified() {
             let secs = mtime
@@ -59,6 +72,23 @@ async fn after_edit(state: &AppState, record: &crate::models::dir::DirRecord, fu
             let _ = tokio::fs::remove_file(crate::services::thumbs::thumbnail_path(full, &fp)).await;
         }
     }
+
+    let (width, height, size) = geometry;
+    let rel = crate::services::paths::normalize_rel(rel_path);
+    let _ = sqlx::query(
+        "UPDATE photo_assets SET width = COALESCE(?, width), \
+             height = COALESCE(?, height), size = ?, updated_at = ? \
+         WHERE dir_id = ? AND rel_path = ?",
+    )
+    .bind(width.map(|v| v as i64))
+    .bind(height.map(|v| v as i64))
+    .bind(size)
+    .bind(crate::db::now())
+    .bind(record.id)
+    .bind(&rel)
+    .execute(&state.db)
+    .await;
+
     let _ = state
         .queue
         .enqueue_scan(record.id, false, crate::services::tasks::PRIORITY_HIGH)
@@ -79,7 +109,7 @@ pub async fn transform(
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    after_edit(&state, &record, &full).await;
+    after_edit(&state, &record, &full, &path, (result.width, result.height, result.size)).await;
     Ok(Json(json!({
         "success": true,
         "result": result,
@@ -98,7 +128,7 @@ pub async fn restore(
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    after_edit(&state, &record, &full).await;
+    after_edit(&state, &record, &full, &path, (result.width, result.height, result.size)).await;
     Ok(Json(json!({ "success": true, "result": result })))
 }
 

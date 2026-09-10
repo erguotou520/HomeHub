@@ -87,6 +87,19 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
     var viewerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var viewerList by remember { mutableStateOf(listOf<PhotoItem>()) }
 
+    // The viewer is handed a snapshot list when it opens. After an edit the
+    // ViewModel refetches and that snapshot goes stale (the info panel would
+    // keep reporting the pre-edit dimensions). Re-map the snapshot onto the
+    // freshest objects by id: order and membership are preserved, only the
+    // metadata is refreshed.
+    val liveById = remember(state.groups, state.filtered, state.treePhotos) {
+        buildMap<Long, PhotoItem> {
+            state.groups.forEach { g -> g.items.forEach { put(it.id, it) } }
+            state.filtered.forEach { put(it.id, it) }
+            state.treePhotos.forEach { put(it.id, it) }
+        }
+    }
+
     // In the 目录 view back goes up one folder; only the top level leaves the app.
     BackHandler(enabled = state.view == AlbumView.TREE && state.treeStack.isNotEmpty()) {
         vm.treeUp()
@@ -240,13 +253,18 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
         }
 
         viewerPhoto?.let { photo ->
-            val index = viewerList.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
+            // Prefer the freshest objects so post-edit metadata (dimensions,
+            // tags) is accurate; fall back to the snapshot if the state has
+            // not loaded the photo yet.
+            val list = if (liveById.isEmpty()) viewerList
+            else viewerList.map { liveById[it.id] ?: it }
+            val index = list.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
             LaunchedEffect(photo.id) { onFullscreenChange(true) }
             DisposableEffect(Unit) {
                 onDispose { onFullscreenChange(false) }
             }
             PhotoViewerScreen(
-                photos = viewerList,
+                photos = list,
                 initialIndex = index,
                 urlResolver = vm::url,
                 mediaUrlResolver = { id -> repository.mediaUrl(id) },

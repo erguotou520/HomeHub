@@ -26,6 +26,22 @@ function absolute(base: string): string {
   return API_BASE + (base.startsWith('/') ? base : `/${base}`)
 }
 
+/** Encode each path segment individually so "/" separators survive. */
+function enc(path: string): string {
+  return path.split('/').filter(Boolean).map(encodeURIComponent).join('/')
+}
+
+/** File-level image endpoint (shared with the files page editor). */
+function imagesApi(dir: string, relPath: string, tail: string): string {
+  return `${API_BASE}/api/images/${tail}/${encodeURIComponent(dir)}/${enc(relPath)}`
+}
+
+type EditOp =
+  | { op: 'rotate'; angle: number }
+  | { op: 'flip-h' }
+  | { op: 'flip-v' }
+  | { op: 'resize'; width?: number; height?: number; quality?: number }
+
 export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, onRenamed }: Props) {
   const safeIndex = Math.min(Math.max(index, 0), Math.max(items.length - 1, 0))
   const photo = items[safeIndex]
@@ -42,6 +58,10 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [toast, setToast] = useState<string | null>(null)
+  const [hasOriginal, setHasOriginal] = useState(false)
+  const [confirmRestore, setConfirmRestore] = useState(false)
+  const [resizeOpen, setResizeOpen] = useState(false)
+  const [widthText, setWidthText] = useState('')
 
   const stageRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
@@ -72,7 +92,18 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
     setOffset({ x: 0, y: 0 })
     setConfirm(null)
     setRenaming(false)
+    setConfirmRestore(false)
+    setResizeOpen(false)
+    setWidthText('')
+    setHasOriginal(false)
+    if (photo && !isVideo && photo.dir_name && photo.rel_path) {
+      api
+        .get<{ has_original: boolean }>(imagesApi(photo.dir_name, photo.rel_path, 'exif'))
+        .then((d) => setHasOriginal(!!d.has_original))
+        .catch(() => setHasOriginal(false))
+    }
     if (photoId !== undefined) void loadInfo(photoId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photoId, loadInfo])
 
   // Keep the active thumbnail in view.
@@ -102,6 +133,10 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
           if (confirm || renaming) {
             setConfirm(null)
             setRenaming(false)
+          } else if (confirmRestore) {
+            setConfirmRestore(false)
+          } else if (resizeOpen) {
+            setResizeOpen(false)
           } else {
             onClose()
           }
@@ -131,6 +166,18 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
         case 'i':
         case 'I':
           setShowInfo((v) => !v)
+          break
+        case 'r':
+        case 'R':
+          if (!isVideo) void rotate(90)
+          break
+        case 'h':
+        case 'H':
+          if (!isVideo) void transform([{ op: 'flip-h' }], '已水平翻转')
+          break
+        case 'v':
+        case 'V':
+          if (!isVideo) void transform([{ op: 'flip-v' }], '已垂直翻转')
           break
         default:
           break
@@ -190,19 +237,51 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
   }
 
   // ── actions ─────────────────────────────────────────────────────────────
-  async function rotate(angle: number) {
+  async function transform(ops: EditOp[], msg: string) {
     if (!photo) return
     setBusy(true)
     try {
-      await api.post(`/api/photos/${photo.id}/rotate`, { angle })
+      await api.post(imagesApi(photo.dir_name, photo.rel_path, 'transform'), { ops })
       await loadInfo(photo.id)
       setBust(Date.now())
-      notify('已旋转')
+      setHasOriginal(true) // the pre-edit bytes are now archived
+      notify(msg)
     } catch (e) {
-      notify(e instanceof Error ? e.message : '旋转失败')
+      notify(e instanceof Error ? e.message : '操作失败')
     } finally {
       setBusy(false)
     }
+  }
+
+  function rotate(angle: number) {
+    return transform([{ op: 'rotate', angle }], '已旋转')
+  }
+
+  async function doRestore() {
+    if (!photo) return
+    setBusy(true)
+    try {
+      await api.post(imagesApi(photo.dir_name, photo.rel_path, 'restore'), undefined)
+      await loadInfo(photo.id)
+      setBust(Date.now())
+      setConfirmRestore(false)
+      setHasOriginal(false)
+      notify('已还原到最近一次编辑前')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : '还原失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function doResize() {
+    const w = Number.parseInt(widthText, 10)
+    if (!Number.isFinite(w) || w <= 0) {
+      notify('请输入有效的宽度（像素）')
+      return
+    }
+    setResizeOpen(false)
+    return transform([{ op: 'resize', width: w, quality: 85 }], `已缩放到宽 ${w}px`)
   }
 
   async function submitRename() {
@@ -419,6 +498,37 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       )}
 
       {/* ── action bar ── */}
+      {(confirmRestore || resizeOpen) && (
+        <div className="viewer-confirm" onClick={(e) => e.stopPropagation()}>
+          {confirmRestore && (
+            <>
+              <span>确认还原到最近一次编辑前的状态？当前编辑将丢弃。</span>
+              <button className="danger" onClick={doRestore} disabled={busy}>
+                {busy ? '还原中…' : '确认还原'}
+              </button>
+              <button className="ghost" onClick={() => setConfirmRestore(false)} disabled={busy}>取消</button>
+            </>
+          )}
+          {resizeOpen && (
+            <>
+              <label className="resize-field">
+                <span>目标宽度（px，等比缩放）：</span>
+                <input
+                  value={widthText}
+                  onChange={(e) => setWidthText(e.target.value.replace(/\D/g, ''))}
+                  onKeyDown={(e) => e.key === 'Enter' && doResize()}
+                  inputMode="numeric"
+                  autoFocus
+                  placeholder="如 1280"
+                />
+              </label>
+              <button onClick={doResize} disabled={busy}>缩放</button>
+              <button className="ghost" onClick={() => setResizeOpen(false)} disabled={busy}>取消</button>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="viewer-bar" onClick={(e) => e.stopPropagation()}>
         {!isVideo && (
           <div className="zoom-group">
@@ -445,7 +555,19 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
         {!isVideo && (
           <>
             <button onClick={() => rotate(270)} disabled={busy} title="向左旋转">↺ 左转</button>
-            <button onClick={() => rotate(90)} disabled={busy} title="向右旋转">↻ 右转</button>
+            <button onClick={() => rotate(90)} disabled={busy} title="向右旋转 (R)">↻ 右转</button>
+            <button onClick={() => transform([{ op: 'flip-h' }], '已水平翻转')} disabled={busy} title="水平翻转 (H)">⇋</button>
+            <button onClick={() => transform([{ op: 'flip-v' }], '已垂直翻转')} disabled={busy} title="垂直翻转 (V)">⇅</button>
+            <button onClick={() => setResizeOpen(true)} disabled={busy} title="按宽度缩放">⤢</button>
+            {hasOriginal && (
+              <button
+                onClick={() => (confirmRestore ? doRestore() : setConfirmRestore(true))}
+                disabled={busy}
+                title="还原原图"
+              >
+                ↺ 还原
+              </button>
+            )}
           </>
         )}
         <button className="ghost" onClick={() => { setNameDraft(photo.name); setRenaming(true) }} title="重命名">

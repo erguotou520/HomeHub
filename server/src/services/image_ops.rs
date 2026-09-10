@@ -251,11 +251,22 @@ fn lossless_chain(path: &Path, ops: &[Op], jpegtran_path: &str) -> Result<()> {
 
     // Reset orientation so viewers do not rotate the pixels a second time.
     crate::services::exif::reset_jpeg_orientation(&current, 1).ok();
-    std::fs::rename(&current, path).context("atomic replace")?;
-    for t in temps {
-        let _ = std::fs::remove_file(t);
+    // Clean up intermediates on every exit path — a failed rename used to
+    // leave the staged files behind forever.
+    match std::fs::rename(&current, path) {
+        Ok(()) => {
+            for t in temps {
+                let _ = std::fs::remove_file(t);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            for t in &temps {
+                let _ = std::fs::remove_file(t);
+            }
+            Err(e).context("atomic replace")
+        }
     }
-    Ok(())
 }
 
 /// Decode once, apply everything in memory, re-encode.
@@ -313,13 +324,18 @@ fn decoded_chain(path: &Path, ops: &[Op], ext: &str) -> Result<()> {
     })();
 
     match result {
-        Ok(()) => {
-            std::fs::rename(&tmp, path).context("atomic replace")?;
-            if matches!(ext, "jpg" | "jpeg" | "jpe" | "jfif") {
-                crate::services::exif::reset_jpeg_orientation(path, 1).ok();
+        Ok(()) => match std::fs::rename(&tmp, path) {
+            Ok(()) => {
+                if matches!(ext, "jpg" | "jpeg" | "jpe" | "jfif") {
+                    crate::services::exif::reset_jpeg_orientation(path, 1).ok();
+                }
+                Ok(())
             }
-            Ok(())
-        }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e).context("atomic replace")
+            }
+        },
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)

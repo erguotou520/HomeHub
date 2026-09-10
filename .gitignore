@@ -24,6 +24,12 @@ mobile/local.properties
 *.apk
 *.aab
 
+# Android 签名（绝不入库）
+mobile/release.jks
+*.jks
+*.keystore
+keystore.properties
+
 # 环境与密钥
 *.env
 config.yaml.bak

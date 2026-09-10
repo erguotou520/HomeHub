@@ -25,6 +25,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
@@ -229,6 +230,7 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                             urlResolver = vm::url,
                             onOpenFolder = { vm.treeEnter(it) },
                             onGoUp = { vm.treeUp() },
+                            onJumpTo = { vm.treeJumpTo(it) },
                             onOpenPhoto = { photo, list ->
                                 viewerList = list
                                 viewerPhoto = photo
@@ -460,9 +462,14 @@ private fun TimelineGrid(
 }
 
 /**
- * Hierarchical 目录 browser: one level at a time, with a breadcrumb and an
- * "up" affordance instead of the old flat list of every folder on the server.
- * A rightward drag anywhere in the list goes up a level too.
+ * Hierarchical 目录 browser: one level at a time, with a clickable
+ * breadcrumb and an "up" affordance instead of the old flat list of every
+ * folder on the server. A rightward drag anywhere in the list goes up a level
+ * too.
+ *
+ * The breadcrumb starts with a Home icon (back to 全部目录); each segment
+ * jumps straight to that level. It scrolls horizontally so deep paths stay
+ * reachable instead of being ellipsised away.
  */
 @Composable
 private fun FolderBrowser(
@@ -472,11 +479,15 @@ private fun FolderBrowser(
     urlResolver: (String) -> String,
     onOpenFolder: (TreeNode) -> Unit,
     onGoUp: () -> Unit,
+    onJumpTo: (Int) -> Unit,
     onOpenPhoto: (PhotoItem, List<PhotoItem>) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, top = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(start = 4.dp, end = 12.dp, top = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (stack.isNotEmpty()) {
@@ -484,14 +495,42 @@ private fun FolderBrowser(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一级")
                 }
             }
-            Text(
-                text = if (stack.isEmpty()) "全部目录" else stack.joinToString(" / ") { it.label },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = if (stack.isEmpty()) 10.dp else 0.dp)
-            )
+            IconButton(onClick = { onJumpTo(-1) }) {
+                Icon(
+                    Icons.Filled.Home,
+                    contentDescription = "全部目录",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (stack.isEmpty()) {
+                Text(
+                    text = "全部目录",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 2.dp)
+                )
+            } else {
+                stack.forEachIndexed { index, node ->
+                    if (index > 0) {
+                        Text(
+                            text = " / ",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = node.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (index == stack.lastIndex) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        maxLines = 1,
+                        modifier = Modifier.clickable { onJumpTo(index) }
+                    )
+                }
+            }
         }
 
         if (folders.isEmpty() && photos.isEmpty()) {

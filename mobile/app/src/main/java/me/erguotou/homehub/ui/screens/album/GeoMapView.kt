@@ -1,6 +1,10 @@
 package me.erguotou.homehub.ui.screens.album
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -20,6 +24,7 @@ import com.amap.api.maps.CameraUpdateFactory
 import com.amap.api.maps.CoordinateConverter
 import com.amap.api.maps.MapView
 import com.amap.api.maps.MapsInitializer
+import com.amap.api.maps.model.BitmapDescriptor
 import com.amap.api.maps.model.BitmapDescriptorFactory
 import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.LatLngBounds
@@ -100,7 +105,8 @@ fun AMapView(
                     .position(gcj)
                     .title("${point.count} 张")
                     .snippet(String.format(Locale.US, "%.5f, %.5f", point.lat, point.lng))
-                    .icon(BitmapDescriptorFactory.defaultMarker(hue))
+                    .icon(countBadge(context, point.count, hue))
+                    .anchor(0.5f, 0.5f)
             )?.setObject(point)
         }
 
@@ -133,4 +139,45 @@ private fun toGcj02(context: Context, lat: Double, lng: Double): LatLng {
         null
     }
     return converted ?: LatLng(lat, lng)
+}
+
+/**
+ * Round badge showing the cluster's photo count, tinted by density like the
+ * pin hues were. Matches the PC web map, where every cluster shows its number.
+ */
+private fun countBadge(context: Context, count: Long, hue: Float): BitmapDescriptor {
+    val density = context.resources.displayMetrics.density
+    val size = (38 * density).toInt()
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = when {
+            hue == BitmapDescriptorFactory.HUE_RED -> Color.argb(235, 229, 57, 53)
+            hue == BitmapDescriptorFactory.HUE_ORANGE -> Color.argb(235, 251, 140, 0)
+            else -> Color.argb(235, 30, 136, 229)
+        }
+        style = Paint.Style.FILL
+    }
+    val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2 * density
+    }
+    val cx = size / 2f
+    val radius = size / 2f - 2 * density
+    canvas.drawCircle(cx, cx, radius, fill)
+    canvas.drawCircle(cx, cx, radius, stroke)
+
+    val text = if (count > 999) "999+" else count.toString()
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        textSize = (if (text.length > 3) 12 else if (text.length > 2) 14 else 16) * density
+        isFakeBoldText = true
+    }
+    val baseline = cx - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(text, cx, baseline, textPaint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
 }

@@ -185,6 +185,17 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    /**
+     * Jump straight to a breadcrumb level: index 0 is the first dir under
+     * Home, negative goes back to the top level (全部目录).
+     */
+    fun treeJumpTo(index: Int) {
+        val stack = _state.value.treeStack
+        _state.value = _state.value.copy(
+            treeStack = if (index < 0) emptyList() else stack.take(index + 1)
+        )
+    }
+
     fun filterByTag(tag: String) {
         _state.value = _state.value.copy(activeFilter = tag)
         load(block = { repository.photos(tag = tag) },

@@ -183,6 +183,31 @@ if [ -n "$PID" ]; then
   check "rotate 90" "photo" "$R"
 fi
 
+echo "== edit publishes geometry immediately =="
+# after_edit() used to only enqueue the async scan, which lands ~200-400ms later.
+# A client that refetches right after an edit therefore still saw the pre-edit
+# width/height (stale info panel + thumbnail). This asserts the new geometry is
+# readable with NO sleep/poll in between: a 90° rotate must swap the dimensions.
+dim_of() { # $1 = file name -> "WxH" from the directory tree view
+  curl -s "$BASE/api/photos/tree" | python3 -c "
+import sys, json
+name = sys.argv[1]
+d = json.load(sys.stdin)
+groups = d if isinstance(d, list) else d.get('groups', d)
+for g in groups:
+    if g.get('dir_name') == 'photos':
+        for it in g.get('items', []):
+            if it.get('name') == name:
+                print('%sx%s' % (it.get('width'), it.get('height')))
+" "$1"
+}
+DIM_BEFORE=$(dim_of d.png)
+curl -s -X POST "$BASE/api/images/transform/photos/2025/01/d.png" \
+  -H 'content-type: application/json' -d '{"ops":[{"op":"rotate","angle":90}]}' >/dev/null
+DIM_AFTER=$(dim_of d.png)
+check "transform publishes new size without waiting for the scan" \
+  "$(echo "$DIM_BEFORE" | awk -F'x' '{print $2"x"$1}')" "$DIM_AFTER"
+
 echo "== audit =="
 sleep 2
 R=$(curl -s -H "$AUTH" "$BASE/api/admin/traffic" | short); check "traffic by peer" "traffic" "$R"

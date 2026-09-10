@@ -93,9 +93,22 @@ pub async fn compress(path: &Path, config: &Config) -> Result<CompressResult> {
     Ok(result)
 }
 
+/// Unique temp name: two workers compressing the same file concurrently
+/// would otherwise share one path and clobber each other's output.
 fn temp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".hh-compress.tmp");
+    name.push(format!(
+        ".hh-compress.{}-{}.tmp",
+        std::process::id(),
+        nanos.wrapping_add(SEQ.fetch_add(1, Ordering::Relaxed) as u128)
+    ));
     path.with_file_name(name)
 }
 

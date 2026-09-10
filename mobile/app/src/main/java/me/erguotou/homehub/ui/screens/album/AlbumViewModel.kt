@@ -15,6 +15,7 @@ import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.data.TagSummary
 import me.erguotou.homehub.data.TimelineGroup
 import me.erguotou.homehub.data.TreeGroup
+import java.util.Locale
 
 enum class AlbumView { TIMELINE, TREE, TAGS, PEOPLE, GEO }
 
@@ -204,7 +205,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Drill into one map cluster: the server filters by the cluster's ids. */
     fun filterByGeo(point: GeoPoint) {
-        val label = String.format("%.4f, %.4f", point.lat, point.lng)
+        val label = String.format(Locale.US, "%.4f, %.4f", point.lat, point.lng)
         _state.value = _state.value.copy(activeFilter = "地点 $label")
         load(
             block = { repository.photos(ids = point.photoIds) },

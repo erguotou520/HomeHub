@@ -67,6 +67,7 @@ import me.erguotou.homehub.data.PhotoItem
 import me.erguotou.homehub.util.formatBytes
 import me.erguotou.homehub.util.formatDateTime
 import me.erguotou.homehub.util.formatDuration
+import java.util.Locale
 
 /**
  * Full screen viewer for photos AND videos, following the system gallery:
@@ -501,7 +502,7 @@ private fun ViewerOverlay(
                         }
                         photo.cameraMake?.let { InfoLine("相机", listOfNotNull(it, photo.cameraModel).joinToString(" ")) }
                         photo.gpsLat?.let { lat ->
-                            InfoLine("位置", String.format("%.5f, %.5f", lat, photo.gpsLng ?: 0.0))
+                            InfoLine("位置", String.format(Locale.US, "%.5f, %.5f", lat, photo.gpsLng ?: 0.0))
                         }
                         if (photo.tags.isNotEmpty()) {
                             InfoLine("标签", photo.tags.joinToString("、") { it.tag })

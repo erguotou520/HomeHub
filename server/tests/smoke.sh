@@ -208,6 +208,54 @@ DIM_AFTER=$(dim_of d.png)
 check "transform publishes new size without waiting for the scan" \
   "$(echo "$DIM_BEFORE" | awk -F'x' '{print $2"x"$1}')" "$DIM_AFTER"
 
+echo "== edit moves the media URL version =="
+# Media bytes are rewritten in place while the path stays the same, so the URL
+# has to change with the pixels: with a bare URL an HTTP cache (Coil, browser)
+# keeps serving the pre-edit image for as long as max-age allows — Coil did
+# exactly that for 24h, thumbnails and full size alike. The version lives in
+# `?v=<mtime>-<size>`, taken from photo_assets.fingerprint.
+url_of() { # $1 = file name -> "thumb_url | url"
+  curl -s "$BASE/api/photos/tree" | python3 -c "
+import sys, json
+name = sys.argv[1]
+d = json.load(sys.stdin)
+groups = d if isinstance(d, list) else d.get('groups', d)
+for g in groups:
+    if g.get('dir_name') == 'photos':
+        for it in g.get('items', []):
+            if it.get('name') == name:
+                print('%s | %s' % (it.get('thumb_url', ''), it.get('url', '')))
+" "$1"
+}
+URL_BEFORE=$(url_of d.png)
+# The token's mtime has second granularity, so give the clock a tick to move.
+sleep 1
+curl -s -X POST "$BASE/api/images/transform/photos/2025/01/d.png" \
+  -H 'content-type: application/json' -d '{"ops":[{"op":"rotate","angle":90}]}' >/dev/null
+URL_AFTER=$(url_of d.png)
+if [ -z "$URL_BEFORE" ] || [ "$URL_BEFORE" = "$URL_AFTER" ]; then
+  echo "  FAIL media URL version did not change after an edit"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "  ok   media URL carries a new version after an edit"
+fi
+case "$URL_AFTER" in
+  *"?v="*) echo "  ok   media URL carries a version token" ;;
+  *) echo "  FAIL media URL has no version token"; FAILURES=$((FAILURES + 1)) ;;
+esac
+CODE=$(curl -s -o /dev/null -D - "$BASE/api/media/photos/2025/01/d.png?v=1" | tr -d '\r' |
+  awk -F': ' 'tolower($1)=="cache-control"{print $2}')
+case "$CODE" in
+  *immutable*) echo "  ok   versioned URL answers with an immutable cache header" ;;
+  *) echo "  FAIL versioned URL cache header: '$CODE'"; FAILURES=$((FAILURES + 1)) ;;
+esac
+NC=$(curl -s -o /dev/null -D - "$BASE/api/media/photos/2025/01/d.png" | tr -d '\r' |
+  awk -F': ' 'tolower($1)=="cache-control"{print $2}')
+case "$NC" in
+  no-cache*) echo "  ok   unversioned URL must revalidate" ;;
+  *) echo "  FAIL unversioned URL cache header: '$NC'"; FAILURES=$((FAILURES + 1)) ;;
+esac
+
 echo "== audit =="
 sleep 2
 R=$(curl -s -H "$AUTH" "$BASE/api/admin/traffic" | short); check "traffic by peer" "traffic" "$R"

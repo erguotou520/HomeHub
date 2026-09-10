@@ -53,8 +53,12 @@ fn resolve(
 /// below is asynchronous and lands a few hundred milliseconds later, so a
 /// client refetching right after an edit would otherwise still be served the
 /// pre-edit width/height/size (visible as a stale info panel / thumbnail).
-/// Only geometry is fast-pathed here: `file_hash` / `pixel_hash` still come
-/// from the scan, which sees the changed fingerprint and refreshes them.
+///
+/// `mtime` + `fingerprint` are fast-pathed for the same reason and one more:
+/// every media URL carries the fingerprint as a cache token, so returning the
+/// edit response before the scan has run would hand the client the *old*
+/// URL — and the client would happily render the pre-edit pixels again.
+/// `file_hash` / `pixel_hash` still come from the scan.
 async fn after_edit(
     state: &AppState,
     record: &crate::models::dir::DirRecord,
@@ -62,27 +66,39 @@ async fn after_edit(
     rel_path: &str,
     geometry: (Option<u32>, Option<u32>, i64),
 ) {
+    // Same `mtime:size` recipe the scanner uses (scan.rs), so the fast path
+    // and the following scan agree on the value.
+    let mut stamp: Option<(i64, String)> = None;
     if let Ok(meta) = std::fs::metadata(full) {
         if let Ok(mtime) = meta.modified() {
             let secs = mtime
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let fp = crate::services::paths::fingerprint(secs as i64, meta.len());
+                .unwrap_or(0) as i64;
+            let fp = crate::services::paths::fingerprint(secs, meta.len());
             let _ = tokio::fs::remove_file(crate::services::thumbs::thumbnail_path(full, &fp)).await;
+            stamp = Some((secs, fp));
         }
     }
 
     let (width, height, size) = geometry;
     let rel = crate::services::paths::normalize_rel(rel_path);
+    let (mtime, fingerprint) = stamp.unwrap_or((0, String::new()));
     let _ = sqlx::query(
         "UPDATE photo_assets SET width = COALESCE(?, width), \
-             height = COALESCE(?, height), size = ?, updated_at = ? \
+             height = COALESCE(?, height), size = ?, \
+             mtime = CASE WHEN ? > 0 THEN ? ELSE mtime END, \
+             fingerprint = CASE WHEN ? <> '' THEN ? ELSE fingerprint END, \
+             updated_at = ? \
          WHERE dir_id = ? AND rel_path = ?",
     )
     .bind(width.map(|v| v as i64))
     .bind(height.map(|v| v as i64))
     .bind(size)
+    .bind(mtime)
+    .bind(mtime)
+    .bind(&fingerprint)
+    .bind(&fingerprint)
     .bind(crate::db::now())
     .bind(record.id)
     .bind(&rel)

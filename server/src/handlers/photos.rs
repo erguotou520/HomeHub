@@ -220,8 +220,8 @@ pub async fn detail(
         "media_kind": photo.media_kind,
         "duration_ms": photo.duration_ms,
         "video_codec": photo.video_codec,
-        "url": crate::services::photos::full_url(&dir.name, &photo.rel_path),
-        "thumb_url": crate::services::photos::thumb_url(&dir.name, &photo.rel_path),
+        "url": crate::services::photos::full_url(&dir.name, &photo.rel_path, &photo.fingerprint),
+        "thumb_url": crate::services::photos::thumb_url(&dir.name, &photo.rel_path, &photo.fingerprint),
         "tags": tags,
         "faces": faces,
     })))

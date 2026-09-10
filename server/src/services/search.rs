@@ -331,13 +331,13 @@ async fn decorate_photo(
             .bind(dir_id)
             .fetch_optional(db)
             .await?;
-    let rel: Option<(String,)> =
-        sqlx::query_as("SELECT rel_path FROM photo_assets WHERE id = ?")
+    let rel: Option<(String, String)> =
+        sqlx::query_as("SELECT rel_path, fingerprint FROM photo_assets WHERE id = ?")
             .bind(id)
             .fetch_optional(db)
             .await?;
     let dir_name = dir_name.map(|d| d.0).unwrap_or_default();
-    let rel_path = rel.map(|r| r.0).unwrap_or_default();
+    let (rel_path, fingerprint) = rel.unwrap_or_default();
     Ok(SearchHit {
         ftype: "photo".into(),
         ref_id: id.to_string(),
@@ -345,7 +345,11 @@ async fn decorate_photo(
         snippet,
         photo_id: Some(id),
         dir_id: Some(dir_id),
-        thumb_url: Some(crate::services::photos::thumb_url(&dir_name, &rel_path)),
+        thumb_url: Some(crate::services::photos::thumb_url(
+            &dir_name,
+            &rel_path,
+            &fingerprint,
+        )),
         rel_path: Some(rel_path),
     })
 }

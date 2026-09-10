@@ -443,7 +443,10 @@ pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSumma
                 (SELECT d2.name FROM photo_tags t3 JOIN photo_assets p3 ON p3.id = t3.photo_id \
                    JOIN dirs d2 ON d2.id = p3.dir_id \
                   WHERE t3.tag = t.tag AND t3.kind = t.kind AND p3.status = 'ok' \
-                  ORDER BY COALESCE(p3.taken_at, p3.mtime) DESC LIMIT 1) AS cover_dir \
+                  ORDER BY COALESCE(p3.taken_at, p3.mtime) DESC LIMIT 1) AS cover_dir, \
+                (SELECT p5.fingerprint FROM photo_tags t5 JOIN photo_assets p5 ON p5.id = t5.photo_id \
+                  WHERE t5.tag = t.tag AND t5.kind = t.kind AND p5.status = 'ok' \
+                  ORDER BY COALESCE(p5.taken_at, p5.mtime) DESC LIMIT 1) AS cover_fp \
          FROM photo_tags t JOIN photo_assets p ON p.id = t.photo_id \
          WHERE p.status = 'ok'{} \
          GROUP BY t.kind, t.tag ORDER BY photo_count DESC, t.tag",
@@ -454,13 +457,14 @@ pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSumma
     for row in rows {
         let cover_rel: Option<String> = row.try_get("cover_rel").ok().flatten();
         let cover_dir: Option<String> = row.try_get("cover_dir").ok().flatten();
+        let cover_fp: Option<String> = row.try_get("cover_fp").ok().flatten();
         out.push(TagSummary {
             tag: row.try_get("tag")?,
             kind: row.try_get("kind")?,
             photo_count: row.try_get("photo_count")?,
             cover_url: cover_rel
                 .zip(cover_dir)
-                .map(|(rel, dir)| thumb_url(&dir, &rel)),
+                .map(|(rel, dir)| thumb_url(&dir, &rel, cover_fp.as_deref().unwrap_or(""))),
         });
     }
     Ok(out)
@@ -482,7 +486,10 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
                 (SELECT d2.name FROM faces f4 JOIN photo_assets p4 ON p4.id = f4.photo_id \
                    JOIN dirs d2 ON d2.id = p4.dir_id \
                    WHERE f4.group_id = g.id AND p4.status = 'ok' AND p4.dir_id IN ({ids}) \
-                   ORDER BY COALESCE(p4.taken_at, p4.mtime) DESC LIMIT 1) AS cover_dir \
+                   ORDER BY COALESCE(p4.taken_at, p4.mtime) DESC LIMIT 1) AS cover_dir, \
+                (SELECT p5.fingerprint FROM faces f5 JOIN photo_assets p5 ON p5.id = f5.photo_id \
+                   WHERE f5.group_id = g.id AND p5.status = 'ok' AND p5.dir_id IN ({ids}) \
+                   ORDER BY COALESCE(p5.taken_at, p5.mtime) DESC LIMIT 1) AS cover_fp \
          FROM person_groups g ORDER BY photo_count DESC, g.id",
         ids = in_clause
     );
@@ -491,6 +498,7 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
     for row in rows {
         let cover_rel: Option<String> = row.try_get("cover_rel").ok().flatten();
         let cover_dir: Option<String> = row.try_get("cover_dir").ok().flatten();
+        let cover_fp: Option<String> = row.try_get("cover_fp").ok().flatten();
         out.push(PersonGroupSummary {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
@@ -498,7 +506,7 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
             photo_count: row.try_get("photo_count")?,
             cover_url: cover_rel
                 .zip(cover_dir)
-                .map(|(rel, dir)| thumb_url(&dir, &rel)),
+                .map(|(rel, dir)| thumb_url(&dir, &rel, cover_fp.as_deref().unwrap_or(""))),
         });
     }
     Ok(out)
@@ -510,6 +518,7 @@ pub async fn geo(db: &Db, registry: &DirRegistry, precision: f64) -> Result<Vec<
     let clause = album_clause(&albums);
     let sql = format!(
         "SELECT p.id AS id, p.gps_lat AS lat, p.gps_lng AS lng, p.rel_path AS rel_path, \
+                p.fingerprint AS fingerprint, \
                 d.name AS dir_name FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \
          WHERE p.status = 'ok' AND p.gps_lat IS NOT NULL AND p.gps_lng IS NOT NULL{}",
         clause
@@ -524,12 +533,13 @@ pub async fn geo(db: &Db, registry: &DirRegistry, precision: f64) -> Result<Vec<
         let lng: f64 = row.try_get("lng")?;
         let rel: String = row.try_get("rel_path")?;
         let dir: String = row.try_get("dir_name")?;
+        let fp: String = row.try_get("fingerprint").unwrap_or_default();
         let key = ((lat / step).round() as i64, (lng / step).round() as i64);
         let entry = map.entry(key).or_insert(GeoPoint {
             lat: key.0 as f64 * step,
             lng: key.1 as f64 * step,
             count: 0,
-            thumb_url: Some(thumb_url(&dir, &rel)),
+            thumb_url: Some(thumb_url(&dir, &rel, &fp)),
             photo_ids: Vec::new(),
         });
         entry.count += 1;
@@ -844,12 +854,43 @@ pub fn parent_folder(rel: &str) -> String {
     }
 }
 
-pub fn thumb_url(dir_name: &str, rel_path: &str) -> String {
-    format!("/api/media/{}/{}?size=thumb", dir_name, rel_path)
+/// URL-safe form of a photo's fingerprint, used as the media cache token.
+///
+/// `fingerprint` is `mtime:size`; the colon is normalised to `-` so the query
+/// string stays free of reserved characters.
+fn version_token(fingerprint: &str) -> String {
+    if fingerprint.is_empty() {
+        "0".to_string()
+    } else {
+        fingerprint.replace(':', "-")
+    }
 }
 
-pub fn full_url(dir_name: &str, rel_path: &str) -> String {
-    format!("/api/media/{}/{}", dir_name, rel_path)
+/// Thumbnail URL, carrying a version token.
+///
+/// Photos are edited in place (rotate / flip / restore), yet their path never
+/// changes. Without a version in the URL an HTTP cache is entitled to keep
+/// serving the pre-edit pixels — Coil honoured the `max-age=86400` on
+/// `/api/media` and showed stale thumbnails for a day, even after a restart.
+/// `photo_assets.fingerprint` (`mtime:size`) moves on every edit, so it makes
+/// the URL change with the pixels.
+pub fn thumb_url(dir_name: &str, rel_path: &str, fingerprint: &str) -> String {
+    format!(
+        "/api/media/{}/{}?size=thumb&v={}",
+        dir_name,
+        rel_path,
+        version_token(fingerprint)
+    )
+}
+
+/// Full-size media URL; versioned for the same reason as [thumb_url].
+pub fn full_url(dir_name: &str, rel_path: &str, fingerprint: &str) -> String {
+    format!(
+        "/api/media/{}/{}?v={}",
+        dir_name,
+        rel_path,
+        version_token(fingerprint)
+    )
 }
 
 pub async fn to_items(db: &Db, rows: Vec<PhotoRow>) -> Result<Vec<PhotoItem>> {
@@ -882,8 +923,8 @@ fn from_row(r: PhotoRow, tags: Vec<PhotoTag>) -> PhotoItem {
     PhotoItem {
         file_hash: r.file_hash.clone(),
         pixel_hash: r.pixel_hash.clone(),
-        thumb_url: thumb_url(&dir_name, &rel_path),
-        url: full_url(&dir_name, &rel_path),
+        thumb_url: thumb_url(&dir_name, &rel_path, &r.fingerprint),
+        url: full_url(&dir_name, &rel_path, &r.fingerprint),
         id: r.id,
         dir_id: r.dir_id,
         dir_name,

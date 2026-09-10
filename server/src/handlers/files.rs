@@ -522,6 +522,32 @@ pub async fn write_document(
 
 // ─────────────────────────────────── media ─────────────────────────────────
 
+/// Like [stream_file_range], but with a cache policy suited to `/api/media`.
+///
+/// Media bytes are rewritten in place by the image editor while their path
+/// stays the same, so a long `max-age` on an unversioned URL keeps serving
+/// the pre-edit picture (Coil honoured it for a full day, across restarts).
+/// Album URLs therefore carry `?v=<fingerprint>` and are immutable for as long
+/// as that version lives; anything without a version token — the video
+/// stream, or `?size=thumb` typed by hand — must revalidate instead.
+async fn stream_media(
+    path: &std::path::Path,
+    range: Option<&str>,
+    versioned: bool,
+) -> Result<Response, AppError> {
+    let resp = stream_file_range(path, range).await?;
+    let (mut parts, body) = resp.into_parts();
+    parts.headers.insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(if versioned {
+            "private, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        }),
+    );
+    Ok(Response::from_parts(parts, body))
+}
+
 /// `/api/media/:dir/*path` – original file, `?size=thumb` for the 256px variant.
 pub async fn media(
     State(state): State<AppState>,
@@ -540,6 +566,7 @@ pub async fn media(
         return Err(AppError::NotFound("file no longer exists".into()));
     }
 
+    let versioned = q.contains_key("v");
     let wants_thumb = q.get("size").map(|s| s == "thumb").unwrap_or(false);
     if wants_thumb {
         // Videos: ffmpeg first-frame extraction (cached like image thumbs),
@@ -565,13 +592,19 @@ pub async fn media(
             let ffmpeg_path = state.config.get().runtime.video.ffmpeg_path.clone();
             match crate::services::thumbs::ensure_video_thumbnail(&full, &fp, &ffmpeg_path).await {
                 Ok(thumb) => {
-                    return Ok(stream_file_range(&thumb, range_header(&headers)).await?.into_response())
+                    return Ok(stream_media(&thumb, range_header(&headers), versioned)
+                        .await?
+                        .into_response())
                 }
                 Err(_) => {
                     if let Some(poster) = crate::services::thumbs::video_poster(&full).await {
-                        return Ok(stream_file_range(&poster, range_header(&headers)).await?.into_response());
+                        return Ok(stream_media(&poster, range_header(&headers), versioned)
+                            .await?
+                            .into_response());
                     }
-                    return Ok(stream_file_range(&full, range_header(&headers)).await?.into_response());
+                    return Ok(stream_media(&full, range_header(&headers), versioned)
+                        .await?
+                        .into_response());
                 }
             }
         }
@@ -596,10 +629,14 @@ pub async fn media(
         let thumb = crate::services::thumbs::ensure_thumbnail(&full, &fp, orientation)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        return Ok(stream_file_range(&thumb, range_header(&headers)).await?.into_response());
+        return Ok(stream_media(&thumb, range_header(&headers), versioned)
+            .await?
+            .into_response());
     }
 
-    Ok(stream_file_range(&full, range_header(&headers)).await?.into_response())
+    Ok(stream_media(&full, range_header(&headers), versioned)
+        .await?
+        .into_response())
 }
 
 pub async fn lyrics(

@@ -42,7 +42,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -99,8 +98,6 @@ fun PhotoViewerScreen(
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { photos.size })
     var pageZoomed by remember { mutableStateOf(false) }
-    // Bumped after an edit so Coil drops its cached bitmap for that photo.
-    var revision by remember { mutableLongStateOf(0L) }
     var busy by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     val panels = remember { ViewerPanels() }
@@ -118,12 +115,7 @@ fun PhotoViewerScreen(
         busy = true
         action { success ->
             busy = false
-            if (success) {
-                revision++
-                toast = ok
-            } else {
-                toast = fail
-            }
+            toast = if (success) ok else fail
         }
     }
 
@@ -164,7 +156,7 @@ fun PhotoViewerScreen(
             } else {
                 ImagePage(
                     photo = photo,
-                    url = withRevision(urlResolver(photo.url), revision),
+                    url = urlResolver(photo.url),
                     onZoomChanged = { pageZoomed = it }
                 )
             }
@@ -206,13 +198,6 @@ fun PhotoViewerScreen(
         )
     }
 }
-
-/**
- * Append a cache-busting revision. Photo URLs carry no query string, so a
- * blind `&rev=` would end up inside the path and 404 — pick the separator.
- */
-private fun withRevision(url: String, rev: Long): String =
-    url + if (url.contains('?')) "&rev=$rev" else "?rev=$rev"
 
 /** Unwrap the hosting Activity from a Compose view's (possibly wrapped) context. */
 private tailrec fun Context.findActivity(): Activity? = when (this) {
@@ -328,9 +313,12 @@ private fun ImagePage(
  * play/pause, seek bar and time; playback pauses when swiped away and the
  * player is released when the page leaves composition.
  *
- * Pinch-to-zoom is supported: PlayerView is inflated from a TextureView
- * layout so `graphicsLayer` can scale it. Only two-finger gestures are
- * consumed, leaving taps and seek-bar drags to the controller.
+ * There is deliberately NO Compose gesture layer stacked over the player.
+ * A full-size `pointerInput` Box beats an `AndroidView` in the hit test, so
+ * the interop view underneath never sees a touch: the controller rendered
+ * fine but every tap (play, seek bar, settings) was swallowed, which made
+ * videos look unplayable. Videos keep the platform's own controls; pinch
+ * zoom stays a photo-only affordance.
  */
 @Composable
 private fun VideoPage(
@@ -340,9 +328,6 @@ private fun VideoPage(
 ) {
     val context = LocalContext.current
     var playbackError by remember(photo.id) { mutableStateOf<String?>(null) }
-    var scale by remember(photo.id) { mutableFloatStateOf(1f) }
-    var offsetX by remember(photo.id) { mutableFloatStateOf(0f) }
-    var offsetY by remember(photo.id) { mutableFloatStateOf(0f) }
 
     val player = remember(photo.id) {
         ExoPlayer.Builder(context).build().apply {
@@ -362,14 +347,9 @@ private fun VideoPage(
     }
 
     // Swipe away pauses; coming back keeps the position (doesn't auto-resume,
-    // mirroring the system gallery's manual-play behaviour). Zoom resets too.
+    // mirroring the system gallery's manual-play behaviour).
     LaunchedEffect(isCurrentPage) {
-        if (!isCurrentPage) {
-            if (player.isPlaying) player.pause()
-            scale = 1f
-            offsetX = 0f
-            offsetY = 0f
-        }
+        if (!isCurrentPage && player.isPlaying) player.pause()
     }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -378,49 +358,7 @@ private fun VideoPage(
                 LayoutInflater.from(ctx).inflate(R.layout.hh_player_view, null) as PlayerView
             },
             update = { view -> view.player = player },
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offsetX,
-                    translationY = offsetY
-                )
-        )
-        // The gesture layer sits ABOVE the player. PlayerView consumes touches
-        // for its controller, and Compose's calculateZoom() bails out on already
-        // consumed changes, so a pinch has to be seen before the interop view.
-        // Single-finger drags are never consumed here, so the seek bar and the
-        // tap-to-show controller keep working.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(photo.id) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        var multiTouch = false
-                        do {
-                            val event = awaitPointerEvent()
-                            if (event.changes.size > 1) multiTouch = true
-                            if (multiTouch || scale > 1.01f) {
-                                val next = (scale * event.calculateZoom()).coerceIn(1f, 6f)
-                                if (next <= 1.01f) {
-                                    scale = 1f
-                                    offsetX = 0f
-                                    offsetY = 0f
-                                } else {
-                                    scale = next
-                                    val pan = event.calculatePan()
-                                    val maxX = size.width * (scale - 1f) / 2f
-                                    val maxY = size.height * (scale - 1f) / 2f
-                                    offsetX = (offsetX + pan.x).coerceIn(-maxX, maxX)
-                                    offsetY = (offsetY + pan.y).coerceIn(-maxY, maxY)
-                                }
-                                event.changes.forEach { if (it.positionChanged()) it.consume() }
-                            }
-                        } while (event.changes.any { it.pressed })
-                    }
-                }
+            modifier = Modifier.fillMaxSize()
         )
         playbackError?.let { err ->
             Surface(color = Color.Black.copy(alpha = 0.7f)) {

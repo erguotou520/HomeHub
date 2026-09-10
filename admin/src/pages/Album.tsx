@@ -50,6 +50,8 @@ export default function Album() {
   /** Ids removed during this session — the grid hides them until the next fetch. */
   const [removed, setRemoved] = useState<Set<number>>(new Set())
   const [renamed, setRenamed] = useState<Record<number, string>>({})
+  /** Per-photo edit counter, folded into the media URL to defeat stale caches. */
+  const [editedRev, setEditedRev] = useState<Record<number, number>>({})
 
   const handleDeleted = useCallback((id: number) => {
     setRemoved((prev) => new Set(prev).add(id))
@@ -65,13 +67,30 @@ export default function Album() {
     setRenamed((prev) => ({ ...prev, [id]: name }))
   }, [])
 
-  /** Drop deleted photos and apply local renames. */
+  /**
+   * An in-place edit (rotate / flip / restore) rewrites the pixels but not the
+   * path, so the cached thumbnail URL keeps pointing at the old image. Bump a
+   * per-photo counter and rewrite the `v` token here: the grid and the viewer
+   * then request a URL nothing has cached yet. A fresh list fetch gets the
+   * real server-side version instead.
+   */
+  const handleEdited = useCallback((id: number) => {
+    setEditedRev((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }))
+  }, [])
+
+  /** Drop deleted photos, apply local renames and post-edit cache bumps. */
   const decorate = useCallback(
     (list: PhotoItem[]) =>
       list
         .filter((p) => !removed.has(p.id))
-        .map((p) => (renamed[p.id] ? { ...p, name: renamed[p.id] } : p)),
-    [removed, renamed],
+        .map((p) => {
+          const rev = editedRev[p.id]
+          const base = renamed[p.id] ? { ...p, name: renamed[p.id] } : p
+          if (!rev) return base
+          const bump = (url: string) => `${url}${url.includes('?') ? '&' : '?'}_=${rev}`
+          return { ...base, url: bump(base.url), thumb_url: bump(base.thumb_url) }
+        }),
+    [removed, renamed, editedRev],
   )
 
   const loadList = useCallback(
@@ -363,6 +382,7 @@ export default function Album() {
           onClose={() => setViewer(null)}
           onDeleted={handleDeleted}
           onRenamed={handleRenamed}
+          onEdited={handleEdited}
         />
       )}
     </div>

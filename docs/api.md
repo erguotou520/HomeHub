@@ -120,8 +120,8 @@
   "gps_lat": 31.2304, "gps_lng": 121.4737,
   "camera_make": "Apple", "camera_model": "iPhone 15",
   "file_hash": "…", "pixel_hash": "…",
-  "url": "/api/media/photos/2024/05/a.png",
-  "thumb_url": "/api/media/photos/2024/05/a.png?size=thumb",
+  "url": "/api/media/photos/2024/05/a.png?v=1714566896-573",
+  "thumb_url": "/api/media/photos/2024/05/a.png?size=thumb&v=1714566896-573",
   "tags": [{"tag": "dog", "kind": "object", "confidence": 0.87}]
 }
 ```
@@ -161,6 +161,14 @@
 | GET | `/api/media/lyrics/:dir/*path` | LRC 歌词 |
 | GET | `/api/media/info/:dir/*path` | 音视频元数据（NFO / 音乐标签） |
 
+**`v` 版本参数（必读）**：照片会被原地改写（旋转 / 翻转 / 还原），路径却不变。
+列表接口返回的 `url` / `thumb_url` 因此都带 `v=<mtime>-<size>`：
+
+- 带 `v` → 内容不可变，响应 `Cache-Control: private, max-age=31536000, immutable`，可放心长期缓存；
+- 不带 `v`（手拼的 URL、视频流）→ 响应 `Cache-Control: no-cache`，客户端必须每次回源校验。
+
+这样缓存不会跨过一次编辑，缩略图与原图都能立刻刷新。**不要自行剥离 `v` 参数。**
+
 ---
 
 ## 5. 搜索 `/api/search`
@@ -175,7 +183,7 @@
 {"hits": [{"ftype": "photo", "ref_id": "42", "title": "a.png",
            "snippet": "…<b>a.png</b>…", "photo_id": 42, "dir_id": 1,
            "rel_path": "2024/05/a.png",
-           "thumb_url": "/api/media/photos/2024/05/a.png?size=thumb"}]}
+           "thumb_url": "/api/media/photos/2024/05/a.png?size=thumb&v=1714566896-573"}]}
 ```
 
 ---

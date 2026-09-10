@@ -11,6 +11,12 @@ interface Props {
   onDeleted?: (id: number) => void
   /** Called after a successful rename so the grid can refresh. */
   onRenamed?: (id: number, name: string) => void
+  /**
+   * Called after an in-place edit (rotate / flip / restore). The pixels on
+   * disk changed while the path — and therefore the cached grid thumbnail —
+   * stayed the same, so the grid has to re-point at the new url version.
+   */
+  onEdited?: (id: number) => void
 }
 
 const MAX_ZOOM = 8
@@ -42,7 +48,7 @@ type EditOp =
   | { op: 'flip-v' }
   | { op: 'resize'; width?: number; height?: number; quality?: number }
 
-export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, onRenamed }: Props) {
+export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, onRenamed, onEdited }: Props) {
   const safeIndex = Math.min(Math.max(index, 0), Math.max(items.length - 1, 0))
   const photo = items[safeIndex]
 
@@ -244,6 +250,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       await api.post(imagesApi(photo.dir_name, photo.rel_path, 'transform'), { ops })
       await loadInfo(photo.id)
       setBust(Date.now())
+      onEdited?.(photo.id)
       setHasOriginal(true) // the pre-edit bytes are now archived
       notify(msg)
     } catch (e) {
@@ -264,6 +271,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       await api.post(imagesApi(photo.dir_name, photo.rel_path, 'restore'), undefined)
       await loadInfo(photo.id)
       setBust(Date.now())
+      onEdited?.(photo.id)
       setConfirmRestore(false)
       setHasOriginal(false)
       notify('已还原到最近一次编辑前')
@@ -329,9 +337,12 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
   if (!photo) return null
 
   const num = (v: unknown) => (typeof v === 'number' ? v : undefined)
-  const suffix = bust ? `?_=${bust}` : ''
-  const src = absolute(photo.url) + suffix
-  const thumbSrc = absolute(photo.thumb_url) + suffix
+  // `url` / `thumb_url` already carry `?v=<mtime>-<size>`, so a blind `?_=`
+  // would land inside that query and turn `?size=thumb` into garbage — the
+  // server then served the full image where a thumbnail was expected.
+  const busted = (url: string) => (bust ? `${url}${url.includes('?') ? '&' : '?'}_=${bust}` : url)
+  const src = busted(absolute(photo.url))
+  const thumbSrc = busted(absolute(photo.thumb_url))
   const downloadUrl = isVideo
     ? `${API_BASE}/api/photos/${photo.id}/raw`
     : `${API_BASE}/api/files/${encodeURIComponent(photo.dir_name)}/${photo.rel_path}?download=1`

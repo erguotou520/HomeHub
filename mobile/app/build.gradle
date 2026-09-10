@@ -30,6 +30,10 @@ android {
             // AMap 10.x only ships these two; keeps the APK ~20 MB smaller.
             abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
+
+        // 高德 Android SDK Key 内置在构建里（GeoMapView 运行时注入）。
+        // 这是产品自带的地图能力，用户不需要也不应该在应用内配置它。
+        buildConfigField "String", "AMAP_KEY", '"c96f0a79bce0906acef5d17bdbd1423b"'
     }
 
     signingConfigs {
@@ -65,6 +69,7 @@ android {
     }
     buildFeatures {
         compose true
+        buildConfig true
     }
     packagingOptions {
         resources {

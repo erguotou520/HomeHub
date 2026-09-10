@@ -58,11 +58,11 @@ app/src/main/java/me/erguotou/homehub/
 相册「地点」视图使用 **高德地图 Android SDK**（`com.amap.api:3dmap:10.0.600`）渲染服务端
 `/api/photos/geo` 的聚合点：
 
-1. 在[高德开放平台](https://console.amap.com/)申请 **Android 平台 Key**；
-2. 打开 App → 「设置 → 地图」填入 Key（保存在 `EncryptedSharedPreferences`，不写进 APK）；
-3. Key 通过 `MapsInitializer.setApiKey()` 在 `MapView` 创建前注入，因此无需在
-   `AndroidManifest.xml` 里声明 `com.amap.api.v2.apikey`（若要硬编码，Manifest 里已有注释说明）；
-4. 未填 Key 时「地点」页显示引导文案，不会崩溃。
+1. Key 已内置在构建里（`app/build.gradle` 的 `buildConfigField "AMAP_KEY"`），
+   用户**不需要**在应用内配置；
+2. `GeoMapView.kt` 在 `MapView` 创建前调用 `MapsInitializer.setApiKey(BuildConfig.AMAP_KEY)`，
+   因此无需在 `AndroidManifest.xml` 里声明 `com.amap.api.v2.apikey`；
+3. 换 Key 只改 `build.gradle`，并在高德后台登记包名 `me.erguotou.homehub` 与对应签名 SHA1。
 
 两点注意事项：
 

@@ -89,7 +89,7 @@ class Repository(private val context: Context) {
     // These take the photo's dir name + dir-relative path, matching every
     // other per-file endpoint (media, documents, files PATCH/DELETE).
 
-    /** Apply rotate/flip/resize steps to a photo's bytes on the server. */
+    /** Apply rotate/flip steps to a photo's bytes on the server. */
     suspend fun transformImage(photo: PhotoItem, ops: List<ImageOp>): Result<TransformResponse> =
         runCatching {
             api().transform(photo.dirName, photo.relPath, TransformRequest(ops))

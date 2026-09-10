@@ -73,13 +73,6 @@ class Prefs(context: Context) {
         get() = prefs.getString(KEY_FRIGATE_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_FRIGATE_URL, value.trim()).apply()
 
-    /** AMap (高德) Android SDK key used by the album geo view. */
-    var amapKey: String
-        get() = prefs.getString(KEY_AMAP_KEY, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_AMAP_KEY, value.trim()).apply()
-
-    fun hasAmapKey(): Boolean = amapKey.isNotBlank()
-
     fun baseUrl(): String {
         val scheme = if (useHttps) "https" else "http"
         val host = serverAddress.trim().trimEnd('/')
@@ -159,7 +152,6 @@ class Prefs(context: Context) {
         obj.put("wg_endpoint", wgEndpoint)
         obj.put("wg_persistent_keepalive", wgKeepalive)
         obj.put("frigate_url", frigateUrl)
-        obj.put("amap_key", amapKey)
         return obj.toString(2)
     }
 
@@ -180,7 +172,6 @@ class Prefs(context: Context) {
             if (obj.has("wg_endpoint")) wgEndpoint = obj.optString("wg_endpoint")
             if (obj.has("wg_persistent_keepalive")) wgKeepalive = obj.optString("wg_persistent_keepalive")
             if (obj.has("frigate_url")) frigateUrl = obj.optString("frigate_url")
-            if (obj.has("amap_key")) amapKey = obj.optString("amap_key")
             true
         } catch (e: Exception) {
             false
@@ -254,7 +245,6 @@ class Prefs(context: Context) {
         private const val KEY_DUPLICATE_POLICY = "duplicate_policy"
         private const val KEY_LAST_UPLOAD_DIR = "last_upload_dir"
         private const val KEY_FRIGATE_URL = "frigate_url"
-        private const val KEY_AMAP_KEY = "amap_key"
 
         private const val WG_PRIVATE_KEY = "wg_private_key"
         private const val WG_PUBLIC_KEY = "wg_public_key"

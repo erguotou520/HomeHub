@@ -1,12 +1,7 @@
 package me.erguotou.homehub.ui.screens.album
 
 import android.content.Context
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -14,9 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -31,16 +24,17 @@ import com.amap.api.maps.model.BitmapDescriptorFactory
 import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.LatLngBounds
 import com.amap.api.maps.model.MarkerOptions
+import me.erguotou.homehub.BuildConfig
 import me.erguotou.homehub.data.GeoPoint
-import me.erguotou.homehub.data.Prefs
 import java.util.Locale
 
 /**
  * AMap (高德) map rendering the server-side geo aggregation.
  *
  * Notes:
- * * the SDK key is injected at runtime through [MapsInitializer.setApiKey] so
- *   nothing has to be baked into the manifest;
+ * * the SDK key is baked into the build (`BuildConfig.AMAP_KEY`) and injected
+ *   through [MapsInitializer.setApiKey] — the map is part of the product, so
+ *   there is nothing for the user to configure;
  * * EXIF GPS is WGS-84 while AMap draws in GCJ-02, so every cluster is
  *   converted with [CoordinateConverter] before it becomes a marker.
  */
@@ -52,16 +46,14 @@ fun AMapView(
     modifier: Modifier = Modifier
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val prefs = remember(context) { Prefs(context) }
     var map by remember { mutableStateOf<AMap?>(null) }
 
-    if (prefs.amapKey.isBlank()) {
-        MissingKeyHint()
-        return
-    }
-
     val mapView = remember(context) {
-        MapsInitializer.setApiKey(prefs.amapKey)
+        // 高德 SDK 10.x 强制要求先表态隐私合规，否则引擎初始化了也不出图
+        // （表现为整块浅灰、无瓦片，logcat 里也没有授权报错）。
+        MapsInitializer.updatePrivacyShow(context, true, true)
+        MapsInitializer.updatePrivacyAgree(context, true)
+        MapsInitializer.setApiKey(BuildConfig.AMAP_KEY)
         MapView(context, AMapOptions().apply { zoomControlsEnabled(false) })
     }
 
@@ -141,26 +133,4 @@ private fun toGcj02(context: Context, lat: Double, lng: Double): LatLng {
         null
     }
     return converted ?: LatLng(lat, lng)
-}
-
-/** Shown until the user registers an AMap key in 设置 → 地图. */
-@Composable
-private fun MissingKeyHint() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                "需要高德地图 Key",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Text(
-                "在「设置 → 地图」中填入高德 Android SDK Key 后即可按地点浏览照片。" +
-                    "服务端已提供经纬度聚合数据，地图渲染由高德 SDK 完成。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
 }

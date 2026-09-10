@@ -65,7 +65,6 @@ class ViewerGestureTest {
                 mediaUrlResolver = { "" },
                 onRotate = { _, _, _ -> },
                 onFlip = { _, _, _ -> },
-                onResize = { _, _, _ -> },
                 onRestore = { _, _ -> },
                 onDismiss = { }
             )

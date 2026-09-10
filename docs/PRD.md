@@ -380,7 +380,7 @@ alerts(id, level, kind, message, created_at, resolved_at)
 | 目录模型 | 统一目录管理 + 归属标记，相册 = album 标记目录集合 |
 | YOLO | 物体 + 风景（场景分类）+ 人脸（检测聚类） |
 | 地图 | Android 与 PC 各用各自 SDK |
-| 地图 SDK 选型 | **高德**：Android 用高德地图 SDK（Key 由用户在 App 内填写，运行时注入）；PC 用 Leaflet + 高德瓦片。两端各自做 WGS-84 → GCJ-02 换算（§9 问题 1 已定） |
+| 地图 SDK 选型 | **高德**：Android 用高德地图 SDK（Key 内置在构建中，运行时注入）；PC 用 Leaflet + 高德瓦片。两端各自做 WGS-84 → GCJ-02 换算（§9 问题 1 已定） |
 | SQLite 备份 | 纳入 v1（§6 可靠）：`VACUUM INTO` 定期快照，默认 24 小时一次、保留 7 份，可在管理后台配置与手动触发 |
 | 原图保护 | 纳入 v1；仅破坏性操作（旋转/未来有损）触发，无损压缩不留原图；保留期 30 天可配 |
 | 回收站 | 纳入 v1；软删除 + 30 天自动清理 |
@@ -394,8 +394,9 @@ alerts(id, level, kind, message, created_at, resolved_at)
 ## 9. 待确认问题（Open Questions）
 
 1. ~~**地图 SDK 具体选型**：Android 端 osmdroid（离线友好）还是高德 SDK（国内体验好、需 Key）？Web 端 Leaflet + 何种瓦片源？取决于家中网络环境。~~
-   **已定（2026-09-05）**：选**高德**。Android 用高德地图 Android SDK（Key 由用户在「设置 → 地图」填写，
-   存 EncryptedSharedPreferences，运行时通过 `MapsInitializer.setApiKey()` 注入，不写进 APK）；
+   **已定（2026-09-05）**：选**高德**。Android 用高德地图 Android SDK（Key 内置在构建中，
+   运行时通过 `MapsInitializer.setApiKey()` 注入，用户无需在应用内配置，另需调用
+   `updatePrivacyShow/updatePrivacyAgree` 表态合规）；
    PC 用 Leaflet + 高德公开瓦片（无需 Key，可切换路网/影像）。代价是两端都要维护一份
    WGS-84 → GCJ-02 换算。
 2. **人脸聚类实现深度**：先「检测 + 感知哈希聚类」轻量方案，效果不满意再引入 ArcFace 嵌入聚类？建议 M4 先做轻量版。

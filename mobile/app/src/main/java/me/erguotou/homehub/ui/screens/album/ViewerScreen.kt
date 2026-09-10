@@ -28,15 +28,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Flip
-import androidx.compose.material.icons.filled.PhotoSizeSelectLarge
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -74,13 +71,18 @@ import me.erguotou.homehub.util.formatDuration
 /**
  * Full screen viewer for photos AND videos, following the system gallery:
  * swipe between media, images pinch/double-tap zoom, videos play in place
- * with the Media3 controller. Rotation (server rewrite) is photo-only.
+ * with the Media3 controller. Rotation / flip (server rewrite) is photo-only.
  *
  * It is an in-place overlay rather than a Dialog. Root's Scaffold no longer
  * contributes the status-bar inset (`contentWindowInsets = WindowInsets(0)`)
  * and the bottom bar is hidden while the viewer is open, so this Box really
  * does span the whole screen — including behind the status bar, which is
  * flipped to white icons so the black backdrop reads as one surface.
+ *
+ * The media pager fills the screen and the chrome floats ON TOP of it: the
+ * toolbar is pinned to the bottom edge (`Alignment.BottomCenter`) so it never
+ * moves when the info / restore panels grow above it, and the image behind it
+ * is never squeezed into a smaller box.
  */
 @Composable
 fun PhotoViewerScreen(
@@ -90,7 +92,6 @@ fun PhotoViewerScreen(
     mediaUrlResolver: (Long) -> String,
     onRotate: (PhotoItem, Int, (Boolean) -> Unit) -> Unit,
     onFlip: (PhotoItem, Boolean, (Boolean) -> Unit) -> Unit,
-    onResize: (PhotoItem, Int, (Boolean) -> Unit) -> Unit,
     onRestore: (PhotoItem, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -193,13 +194,6 @@ fun PhotoViewerScreen(
                     "翻转失败"
                 )
             },
-            onResize = { width, done ->
-                runEdit(
-                    { cb -> onResize(currentPhoto, width) { ok -> cb(ok); done(ok) } },
-                    "已缩放到宽 $width px",
-                    "缩放失败"
-                )
-            },
             onRestore = { done ->
                 runEdit(
                     { cb -> onRestore(currentPhoto) { ok -> cb(ok); done(ok) } },
@@ -228,15 +222,12 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 /** Panels the overlay can open; back closes these before leaving the viewer. */
 private class ViewerPanels {
     var info by mutableStateOf(false)
-    var resize by mutableStateOf(false)
     var restore by mutableStateOf(false)
-    var widthText by mutableStateOf("")
 
-    val anyOpen: Boolean get() = info || resize || restore
+    val anyOpen: Boolean get() = info || restore
 
     fun closeAll() {
         info = false
-        resize = false
         restore = false
     }
 }
@@ -442,6 +433,12 @@ private fun VideoPage(
     }
 }
 
+/**
+ * Floating chrome over the media: a close button + counter pinned to the top,
+ * and a translucent toolbar pinned to the BOTTOM edge of the screen. Panels
+ * and the toast stack upwards from just above the toolbar, so the toolbar
+ * itself never shifts — it always sits fixed at the bottom, over the image.
+ */
 @Composable
 private fun ViewerOverlay(
     photo: PhotoItem,
@@ -453,12 +450,12 @@ private fun ViewerOverlay(
     onClose: () -> Unit,
     onRotate: (Int, (Boolean) -> Unit) -> Unit,
     onFlip: (Boolean, (Boolean) -> Unit) -> Unit,
-    onResize: (Int, (Boolean) -> Unit) -> Unit,
     onRestore: ((Boolean) -> Unit) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
+                .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .padding(8.dp),
@@ -474,30 +471,12 @@ private fun ViewerOverlay(
             )
         }
 
-        Box(modifier = Modifier.weight(1f))
-
-        // Transient feedback, mirroring the web lightbox toast.
-        toast?.let {
-            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Surface(
-                    color = Color.Black.copy(alpha = 0.7f),
-                    shape = MaterialTheme.shapes.small
-                ) {
-                    Text(
-                        it,
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                    )
-                }
-            }
-        }
-
         Column(
             modifier = Modifier
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(12.dp)
+                .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
             if (panels.info) {
                 Surface(color = Color.Black.copy(alpha = 0.55f)) {
@@ -558,93 +537,71 @@ private fun ViewerOverlay(
                 }
             }
 
-            if (panels.resize) {
-                Surface(color = Color.Black.copy(alpha = 0.75f)) {
-                    Column(modifier = Modifier.padding(12.dp)) {
+            // Transient feedback, mirroring the web lightbox toast.
+            toast?.let {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.7f),
+                        shape = MaterialTheme.shapes.small
+                    ) {
                         Text(
-                            "目标宽度（px，等比缩放）",
+                            it,
                             color = Color.White,
-                            style = MaterialTheme.typography.bodySmall
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                         )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            OutlinedTextField(
-                                value = panels.widthText,
-                                onValueChange = { v -> panels.widthText = v.filter { it.isDigit() } },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color.White,
-                                    unfocusedBorderColor = Color.LightGray
-                                )
-                            )
-                            Box(modifier = Modifier.padding(start = 8.dp)) {
-                                Button(
-                                    onClick = {
-                                        val w = panels.widthText.toIntOrNull()
-                                        if (w != null && w > 0) {
-                                            panels.resize = false
-                                            onResize(w) { }
-                                        }
-                                    },
-                                    enabled = !busy
-                                ) { Text("缩放") }
-                            }
-                        }
                     }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                color = Color.Black.copy(alpha = 0.45f),
+                shape = MaterialTheme.shapes.extraLarge,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Button(onClick = { panels.info = !panels.info }) { Text("信息") }
-                // Everything below rewrites pixels on the server — photos only.
-                if (!photo.isVideo) {
-                    IconButton(
-                        onClick = { onRotate(270) { } },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "左转", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = { onRotate(90) { } },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "右转", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = { onFlip(false) { } },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.Filled.Flip, contentDescription = "水平翻转", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = { onFlip(true) { } },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = {
-                            panels.widthText = photo.width?.toString() ?: ""
-                            panels.resize = true
-                        },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.Filled.PhotoSizeSelectLarge, contentDescription = "按宽度缩放", tint = Color.White)
-                    }
-                    IconButton(
-                        onClick = { panels.restore = true },
-                        enabled = !busy
-                    ) {
-                        Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(onClick = { panels.info = !panels.info }) { Text("信息") }
+                    // Everything below rewrites pixels on the server — photos only.
+                    if (!photo.isVideo) {
+                        IconButton(
+                            onClick = { onRotate(270) { } },
+                            enabled = !busy
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "左转", tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { onRotate(90) { } },
+                            enabled = !busy
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "右转", tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { onFlip(false) { } },
+                            enabled = !busy
+                        ) {
+                            Icon(Icons.Filled.Flip, contentDescription = "水平翻转", tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { onFlip(true) { } },
+                            enabled = !busy
+                        ) {
+                            Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { panels.restore = true },
+                            enabled = !busy
+                        ) {
+                            Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)
+                        }
                     }
                 }
             }

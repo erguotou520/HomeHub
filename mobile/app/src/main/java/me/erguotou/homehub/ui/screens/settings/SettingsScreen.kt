@@ -65,7 +65,6 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
     var biometric by remember { mutableStateOf(prefs.biometricLock) }
     var deleteAfterUpload by remember { mutableStateOf(prefs.deleteAfterUpload) }
     var duplicatePolicy by remember { mutableStateOf(prefs.duplicatePolicy) }
-    var amapKey by remember { mutableStateOf(prefs.amapKey) }
     var status by remember { mutableStateOf<String?>(null) }
 
     Scaffold(topBar = { TopAppBar(title = { Text("设置") }) }) { padding ->
@@ -162,33 +161,6 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 }
-            }
-
-            SettingsSection(
-                title = "地图（高德）",
-                icon = Icons.Outlined.Map,
-                description = "相册「地点」视图使用高德地图 Android SDK 渲染服务端聚合的 GPS 数据。" +
-                    "Key 保存在加密存储中，运行时通过 MapsInitializer 注入，不写入 APK。"
-            ) {
-                OutlinedTextField(
-                    value = amapKey,
-                    onValueChange = { amapKey = it },
-                    label = { Text("高德 Android SDK Key") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        autoCorrect = false,
-                        keyboardType = KeyboardType.Ascii,
-                        imeAction = ImeAction.Done
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(
-                    onClick = {
-                        prefs.amapKey = amapKey
-                        status = "高德 Key 已保存"
-                    },
-                    modifier = Modifier.padding(top = 8.dp)
-                ) { Text("保存 Key") }
             }
 
             SettingsSection(

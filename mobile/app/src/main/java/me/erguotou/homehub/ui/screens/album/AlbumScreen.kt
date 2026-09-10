@@ -270,7 +270,6 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                 mediaUrlResolver = { id -> repository.mediaUrl(id) },
                 onRotate = { p, angle, done -> vm.rotate(p, angle, done) },
                 onFlip = { p, vertical, done -> vm.flip(p, vertical, done) },
-                onResize = { p, width, done -> vm.resize(p, width, done) },
                 onRestore = { p, done -> vm.restore(p, done) },
                 onDismiss = { viewerPhoto = null }
             )

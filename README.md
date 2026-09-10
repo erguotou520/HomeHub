@@ -86,5 +86,5 @@ PRD 中的 M1（服务端核心）、M2（管理后台）、M3（手机端基础
 | 监控播放 | 预留入口，不实现 |
 | 地图渲染（Android / PC） | Android 用高德 SDK、PC 用 Leaflet + 高德瓦片；两端各自把 WGS-84 转 GCJ-02 |
 
-地图需要**高德 Key**：Android 在 App「设置 → 地图」填写（存加密存储，运行时注入 SDK）；
+地图需要**高德 Key**：Android 端的 Key 已内置在构建中（`buildConfigField`，运行时注入 SDK），用户无需配置；
 PC 端直接取高德公开瓦片，无需 Key。详见 [mobile/README.md](mobile/README.md#地图高德)。

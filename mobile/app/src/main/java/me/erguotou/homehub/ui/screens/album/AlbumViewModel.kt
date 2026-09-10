@@ -229,14 +229,6 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         editImage(photo, listOf(ImageOp(op = op)), onDone)
     }
 
-    fun resize(photo: PhotoItem, width: Int, onDone: (Boolean) -> Unit) {
-        editImage(
-            photo,
-            listOf(ImageOp(op = "resize", width = width, quality = 85)),
-            onDone
-        )
-    }
-
     fun restore(photo: PhotoItem, onDone: (Boolean) -> Unit) {
         viewModelScope.launch {
             val result = repository.restoreImage(photo)

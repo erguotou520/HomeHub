@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -460,16 +461,22 @@ private fun ViewerOverlay(
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .padding(8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onClose) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
             }
-            Text(
-                "${page + 1} / $total",
-                color = Color.White,
-                modifier = Modifier.padding(16.dp)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { panels.info = !panels.info }) {
+                    Icon(Icons.Outlined.Info, contentDescription = "信息", tint = Color.White)
+                }
+                Text(
+                    "${page + 1} / $total",
+                    color = Color.White,
+                    modifier = Modifier.padding(start = 4.dp, end = 12.dp)
+                )
+            }
         }
 
         Column(
@@ -560,19 +567,21 @@ private fun ViewerOverlay(
                 }
             }
 
-            Surface(
-                color = Color.Black.copy(alpha = 0.45f),
-                shape = MaterialTheme.shapes.extraLarge,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
+            // Photos get the edit toolbar pinned to the bottom edge. Videos get
+            // no bottom chrome at all: their only useful action (信息) now lives
+            // in the top bar, and the Media3 controller owns the bottom edge —
+            // a floating bar there sat right on top of its seek bar.
+            if (!photo.isVideo) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.45f),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Button(onClick = { panels.info = !panels.info }) { Text("信息") }
-                    // Everything below rewrites pixels on the server — photos only.
-                    if (!photo.isVideo) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         IconButton(
                             onClick = { onRotate(270) { } },
                             enabled = !busy

@@ -1,16 +1,24 @@
 package me.erguotou.homehub.ui.screens.album
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.LayoutInflater
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -45,15 +53,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import me.erguotou.homehub.R
 import me.erguotou.homehub.data.PhotoItem
 import me.erguotou.homehub.util.formatBytes
 import me.erguotou.homehub.util.formatDateTime
@@ -63,6 +75,12 @@ import me.erguotou.homehub.util.formatDuration
  * Full screen viewer for photos AND videos, following the system gallery:
  * swipe between media, images pinch/double-tap zoom, videos play in place
  * with the Media3 controller. Rotation (server rewrite) is photo-only.
+ *
+ * It is an in-place overlay rather than a Dialog. Root's Scaffold no longer
+ * contributes the status-bar inset (`contentWindowInsets = WindowInsets(0)`)
+ * and the bottom bar is hidden while the viewer is open, so this Box really
+ * does span the whole screen — including behind the status bar, which is
+ * flipped to white icons so the black backdrop reads as one surface.
  */
 @Composable
 fun PhotoViewerScreen(
@@ -82,6 +100,7 @@ fun PhotoViewerScreen(
     var revision by remember { mutableLongStateOf(0L) }
     var busy by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
+    val panels = remember { ViewerPanels() }
 
     // Auto-clear the toast like the web lightbox does.
     LaunchedEffect(toast) {
@@ -105,6 +124,26 @@ fun PhotoViewerScreen(
         }
     }
 
+    // Back closes the open panel first, then the viewer — never the activity.
+    BackHandler {
+        if (panels.anyOpen) panels.closeAll() else onDismiss()
+    }
+
+    val view = LocalView.current
+    val darkTheme = isSystemInDarkTheme()
+    DisposableEffect(view) {
+        val controller = view.context.findActivity()?.window
+            ?.let { WindowCompat.getInsetsController(it, view) }
+        // White icons over the black backdrop.
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            // Hand the bars back to the app's own theme.
+            controller?.isAppearanceLightStatusBars = !darkTheme
+            controller?.isAppearanceLightNavigationBars = !darkTheme
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(
             state = pagerState,
@@ -122,7 +161,7 @@ fun PhotoViewerScreen(
             } else {
                 ImagePage(
                     photo = photo,
-                    url = urlResolver(photo.url) + "&rev=$revision",
+                    url = withRevision(urlResolver(photo.url), revision),
                     onZoomChanged = { pageZoomed = it }
                 )
             }
@@ -138,6 +177,7 @@ fun PhotoViewerScreen(
             total = photos.size,
             busy = busy,
             toast = toast,
+            panels = panels,
             onClose = onDismiss,
             onRotate = { angle, done ->
                 runEdit(
@@ -171,7 +211,46 @@ fun PhotoViewerScreen(
     }
 }
 
-/** Zoomable still image — same gestures as before. */
+/**
+ * Append a cache-busting revision. Photo URLs carry no query string, so a
+ * blind `&rev=` would end up inside the path and 404 — pick the separator.
+ */
+private fun withRevision(url: String, rev: Long): String =
+    url + if (url.contains('?')) "&rev=$rev" else "?rev=$rev"
+
+/** Unwrap the hosting Activity from a Compose view's (possibly wrapped) context. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/** Panels the overlay can open; back closes these before leaving the viewer. */
+private class ViewerPanels {
+    var info by mutableStateOf(false)
+    var resize by mutableStateOf(false)
+    var restore by mutableStateOf(false)
+    var widthText by mutableStateOf("")
+
+    val anyOpen: Boolean get() = info || resize || restore
+
+    fun closeAll() {
+        info = false
+        resize = false
+        restore = false
+    }
+}
+
+/**
+ * Zoomable still image.
+ *
+ * The gesture loop deliberately only consumes when it is actually zooming
+ * (two fingers) or already zoomed in. A single-finger drag at 1x is left
+ * unconsumed so the surrounding pager can page between photos — the previous
+ * version attached both `transformable` and `detectTransformGestures` to the
+ * full-size box, which swallowed every drag and fought each other, so paging
+ * and pinch-zoom were both dead.
+ */
 @Composable
 private fun ImagePage(
     photo: PhotoItem,
@@ -187,16 +266,9 @@ private fun ImagePage(
     }
     LaunchedEffect(scale) { onZoomChanged(scale > 1.05f) }
 
-    val state = rememberTransformableState { zoomChange, panChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 6f)
-        offsetX += panChange.x
-        offsetY += panChange.y
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .transformable(state = state)
             .pointerInput(photo.id) {
                 detectTapGestures(
                     onDoubleTap = { tapOffset ->
@@ -213,16 +285,31 @@ private fun ImagePage(
                 )
             }
             .pointerInput(photo.id) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val next = (scale * zoom).coerceIn(1f, 6f)
-                    if (next != 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f
-                        offsetY = 0f
-                    }
-                    scale = next
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var multiTouch = false
+                    do {
+                        val event = awaitPointerEvent()
+                        if (event.changes.size > 1) multiTouch = true
+                        // Consume only when we are really transforming, so the
+                        // pager still receives plain single-finger swipes.
+                        if (multiTouch || scale > 1.01f) {
+                            val next = (scale * event.calculateZoom()).coerceIn(1f, 6f)
+                            if (next <= 1.01f) {
+                                scale = 1f
+                                offsetX = 0f
+                                offsetY = 0f
+                            } else {
+                                scale = next
+                                val pan = event.calculatePan()
+                                val maxX = size.width * (scale - 1f) / 2f
+                                val maxY = size.height * (scale - 1f) / 2f
+                                offsetX = (offsetX + pan.x).coerceIn(-maxX, maxX)
+                                offsetY = (offsetY + pan.y).coerceIn(-maxY, maxY)
+                            }
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             },
         contentAlignment = Alignment.Center
@@ -247,6 +334,10 @@ private fun ImagePage(
  * Inline video player (Media3/ExoPlayer). The PlayerView controller offers
  * play/pause, seek bar and time; playback pauses when swiped away and the
  * player is released when the page leaves composition.
+ *
+ * Pinch-to-zoom is supported: PlayerView is inflated from a TextureView
+ * layout so `graphicsLayer` can scale it. Only two-finger gestures are
+ * consumed, leaving taps and seek-bar drags to the controller.
  */
 @Composable
 private fun VideoPage(
@@ -256,6 +347,9 @@ private fun VideoPage(
 ) {
     val context = LocalContext.current
     var playbackError by remember(photo.id) { mutableStateOf<String?>(null) }
+    var scale by remember(photo.id) { mutableFloatStateOf(1f) }
+    var offsetX by remember(photo.id) { mutableFloatStateOf(0f) }
+    var offsetY by remember(photo.id) { mutableFloatStateOf(0f) }
 
     val player = remember(photo.id) {
         ExoPlayer.Builder(context).build().apply {
@@ -275,20 +369,65 @@ private fun VideoPage(
     }
 
     // Swipe away pauses; coming back keeps the position (doesn't auto-resume,
-    // mirroring the system gallery's manual-play behaviour).
+    // mirroring the system gallery's manual-play behaviour). Zoom resets too.
     LaunchedEffect(isCurrentPage) {
-        if (!isCurrentPage && player.isPlaying) player.pause()
+        if (!isCurrentPage) {
+            if (player.isPlaying) player.pause()
+            scale = 1f
+            offsetX = 0f
+            offsetY = 0f
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
-                    this.player = player
-                    useController = true
-                }
+                LayoutInflater.from(ctx).inflate(R.layout.hh_player_view, null) as PlayerView
             },
-            modifier = Modifier.fillMaxSize()
+            update = { view -> view.player = player },
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX = scale,
+                    scaleY = scale,
+                    translationX = offsetX,
+                    translationY = offsetY
+                )
+        )
+        // The gesture layer sits ABOVE the player. PlayerView consumes touches
+        // for its controller, and Compose's calculateZoom() bails out on already
+        // consumed changes, so a pinch has to be seen before the interop view.
+        // Single-finger drags are never consumed here, so the seek bar and the
+        // tap-to-show controller keep working.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(photo.id) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var multiTouch = false
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.size > 1) multiTouch = true
+                            if (multiTouch || scale > 1.01f) {
+                                val next = (scale * event.calculateZoom()).coerceIn(1f, 6f)
+                                if (next <= 1.01f) {
+                                    scale = 1f
+                                    offsetX = 0f
+                                    offsetY = 0f
+                                } else {
+                                    scale = next
+                                    val pan = event.calculatePan()
+                                    val maxX = size.width * (scale - 1f) / 2f
+                                    val maxY = size.height * (scale - 1f) / 2f
+                                    offsetX = (offsetX + pan.x).coerceIn(-maxX, maxX)
+                                    offsetY = (offsetY + pan.y).coerceIn(-maxY, maxY)
+                                }
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
         )
         playbackError?.let { err ->
             Surface(color = Color.Black.copy(alpha = 0.7f)) {
@@ -310,17 +449,13 @@ private fun ViewerOverlay(
     total: Int,
     busy: Boolean,
     toast: String?,
+    panels: ViewerPanels,
     onClose: () -> Unit,
     onRotate: (Int, (Boolean) -> Unit) -> Unit,
     onFlip: (Boolean, (Boolean) -> Unit) -> Unit,
     onResize: (Int, (Boolean) -> Unit) -> Unit,
     onRestore: ((Boolean) -> Unit) -> Unit
 ) {
-    var showInfo by remember { mutableStateOf(false) }
-    var showRestoreConfirm by remember { mutableStateOf(false) }
-    var showResize by remember { mutableStateOf(false) }
-    var widthText by remember { mutableStateOf("") }
-
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -358,8 +493,13 @@ private fun ViewerOverlay(
             }
         }
 
-        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-            if (showInfo) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(12.dp)
+        ) {
+            if (panels.info) {
                 Surface(color = Color.Black.copy(alpha = 0.55f)) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         InfoLine("文件", photo.name)
@@ -391,7 +531,7 @@ private fun ViewerOverlay(
                 }
             }
 
-            if (showRestoreConfirm) {
+            if (panels.restore) {
                 Surface(color = Color.Black.copy(alpha = 0.75f)) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
@@ -403,11 +543,11 @@ private fun ViewerOverlay(
                             horizontalArrangement = Arrangement.End,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Button(onClick = { showRestoreConfirm = false }) { Text("取消") }
+                            Button(onClick = { panels.restore = false }) { Text("取消") }
                             Box(modifier = Modifier.padding(start = 8.dp)) {
                                 Button(
                                     onClick = {
-                                        showRestoreConfirm = false
+                                        panels.restore = false
                                         onRestore { }
                                     },
                                     enabled = !busy
@@ -418,7 +558,7 @@ private fun ViewerOverlay(
                 }
             }
 
-            if (showResize) {
+            if (panels.resize) {
                 Surface(color = Color.Black.copy(alpha = 0.75f)) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
@@ -431,8 +571,8 @@ private fun ViewerOverlay(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             OutlinedTextField(
-                                value = widthText,
-                                onValueChange = { v -> widthText = v.filter { it.isDigit() } },
+                                value = panels.widthText,
+                                onValueChange = { v -> panels.widthText = v.filter { it.isDigit() } },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f),
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -445,9 +585,9 @@ private fun ViewerOverlay(
                             Box(modifier = Modifier.padding(start = 8.dp)) {
                                 Button(
                                     onClick = {
-                                        val w = widthText.toIntOrNull()
+                                        val w = panels.widthText.toIntOrNull()
                                         if (w != null && w > 0) {
-                                            showResize = false
+                                            panels.resize = false
                                             onResize(w) { }
                                         }
                                     },
@@ -464,7 +604,7 @@ private fun ViewerOverlay(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(onClick = { showInfo = !showInfo }) { Text("信息") }
+                Button(onClick = { panels.info = !panels.info }) { Text("信息") }
                 // Everything below rewrites pixels on the server — photos only.
                 if (!photo.isVideo) {
                     IconButton(
@@ -492,13 +632,16 @@ private fun ViewerOverlay(
                         Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
                     }
                     IconButton(
-                        onClick = { widthText = photo.width?.toString() ?: ""; showResize = true },
+                        onClick = {
+                            panels.widthText = photo.width?.toString() ?: ""
+                            panels.resize = true
+                        },
                         enabled = !busy
                     ) {
                         Icon(Icons.Filled.PhotoSizeSelectLarge, contentDescription = "按宽度缩放", tint = Color.White)
                     }
                     IconButton(
-                        onClick = { showRestoreConfirm = true },
+                        onClick = { panels.restore = true },
                         enabled = !busy
                     ) {
                         Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)

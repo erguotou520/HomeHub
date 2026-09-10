@@ -25,6 +25,20 @@ enum class MediaKind(val apiValue: String?, val label: String) {
     VIDEOS("video", "视频")
 }
 
+/**
+ * One level of the 目录 drill-down.
+ *
+ * The server's `tree` listing is flat — each [TreeGroup] is keyed by
+ * (dir_name, folder-path-inside-that-dir) — so the hierarchy is rebuilt here
+ * rather than adding another endpoint. [path] "" means the dir's own root.
+ */
+data class TreeNode(
+    val label: String,
+    val dirName: String,
+    val path: String,
+    val count: Int
+)
+
 data class AlbumUiState(
     val view: AlbumView = AlbumView.TIMELINE,
     val loading: Boolean = false,
@@ -36,8 +50,51 @@ data class AlbumUiState(
     val people: List<PersonGroup> = emptyList(),
     val points: List<GeoPoint> = emptyList(),
     val filtered: List<PhotoItem> = emptyList(),
-    val activeFilter: String? = null
-)
+    val activeFilter: String? = null,
+    /** Breadcrumb of the 目录 view; empty = the list of album dirs. */
+    val treeStack: List<TreeNode> = emptyList()
+) {
+    /** Child folders of the current 目录 level. */
+    val treeFolders: List<TreeNode> get() = childrenOf(trees, treeStack)
+
+    /** Photos that sit directly in the current 目录 level. */
+    val treePhotos: List<PhotoItem> get() = photosAt(trees, treeStack)
+}
+
+/**
+ * Folders one level below [stack].
+ *
+ * With an empty stack this is the list of configured album dirs; otherwise the
+ * direct child folders of `stack.last()`. A folder's count aggregates every
+ * photo at or below it, so the number stays meaningful before drilling in.
+ */
+private fun childrenOf(trees: List<TreeGroup>, stack: List<TreeNode>): List<TreeNode> {
+    if (stack.isEmpty()) {
+        return trees.groupBy { it.dirName }
+            .map { (dir, groups) ->
+                TreeNode(dir, dir, "", groups.sumOf { it.count.toInt() })
+            }
+            .sortedBy { it.label }
+    }
+    val cur = stack.last()
+    val prefix = if (cur.path.isEmpty()) "" else cur.path + "/"
+    val counts = linkedMapOf<String, Int>()
+    trees.filter { it.dirName == cur.dirName && it.path.startsWith(prefix) && it.path != cur.path }
+        .forEach { group ->
+            val segment = group.path.removePrefix(prefix).substringBefore('/')
+            if (segment.isNotEmpty()) counts[segment] = (counts[segment] ?: 0) + group.count.toInt()
+        }
+    return counts.map { (segment, count) ->
+        TreeNode(segment, cur.dirName, if (cur.path.isEmpty()) segment else "${cur.path}/$segment", count)
+    }
+}
+
+/** Photos stored directly in the current 目录 level. */
+private fun photosAt(trees: List<TreeGroup>, stack: List<TreeNode>): List<PhotoItem> {
+    if (stack.isEmpty()) return emptyList()
+    val cur = stack.last()
+    return trees.firstOrNull { it.dirName == cur.dirName && it.path == cur.path }?.items ?: emptyList()
+}
 
 class AlbumViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -113,6 +170,19 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         block = { repository.geo() },
         apply = { _state.value = _state.value.copy(points = it) }
     )
+
+    /** Drill into a folder in the 目录 view. */
+    fun treeEnter(node: TreeNode) {
+        _state.value = _state.value.copy(treeStack = _state.value.treeStack + node)
+    }
+
+    /** Go up one folder. Returns false when already at the top level. */
+    fun treeUp(): Boolean {
+        val stack = _state.value.treeStack
+        if (stack.isEmpty()) return false
+        _state.value = _state.value.copy(treeStack = stack.dropLast(1))
+        return true
+    }
 
     fun filterByTag(tag: String) {
         _state.value = _state.value.copy(activeFilter = tag)

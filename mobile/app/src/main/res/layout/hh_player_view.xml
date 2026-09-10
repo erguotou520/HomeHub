@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PlayerView with a TextureView instead of the default SurfaceView.
+
+  The album viewer scales the video with Modifier.graphicsLayer for pinch-zoom.
+  A SurfaceView is composited by the system into its own surface, so
+  graphicsLayer transforms have no effect on it; a TextureView is drawn
+  through the normal view hierarchy and transforms correctly.
+-->
+<androidx.media3.ui.PlayerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/hh_player"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:resize_mode="fit"
+    app:surface_type="texture_view"
+    app:use_controller="true" />

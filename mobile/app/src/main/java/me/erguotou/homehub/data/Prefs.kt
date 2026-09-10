@@ -3,6 +3,8 @@
 package me.erguotou.homehub.data
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import org.json.JSONObject
@@ -21,17 +23,7 @@ import org.json.JSONObject
 @Suppress("DEPRECATION")
 class Prefs(context: Context) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        FILE_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    private val prefs: SharedPreferences = openStore(context)
 
     // ─────────────────────────── server ────────────────────────────
 
@@ -197,7 +189,59 @@ class Prefs(context: Context) {
 
     fun clearAll() = prefs.edit().clear().apply()
 
+    /**
+     * Open the encrypted store, rebuilding it if it cannot be read.
+     *
+     * The Keystore master key and the encrypted keyset beside it can drift
+     * apart — reinstalling over restored data, a Keystore reset, or a restore
+     * from a backup onto a new device all leave a file that nothing can
+     * decrypt. `EncryptedSharedPreferences.create` throws when that happens,
+     * and because this runs in `onCreate` the app used to crash on every
+     * launch with no way out. Wiping both halves and retrying keeps the app
+     * reachable; the credentials are re-entered through 设置 like on a fresh
+     * install.
+     */
+    private fun openStore(context: Context): SharedPreferences {
+        try {
+            return createEncrypted(context)
+        } catch (e: Exception) {
+            Log.w(TAG, "encrypted preferences unreadable, rebuilding", e)
+        }
+        runCatching { context.deleteSharedPreferences(FILE_NAME) }
+        runCatching { deleteMasterKey() }
+        try {
+            return createEncrypted(context)
+        } catch (e: Exception) {
+            // Last resort: stay usable rather than crash-looping at launch.
+            Log.w(TAG, "encrypted preferences unavailable, using plain storage", e)
+        }
+        return context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createEncrypted(context: Context): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            context,
+            FILE_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    /** Drop the Keystore entry so a fresh one is generated on the retry. */
+    @Suppress("DEPRECATION")
+    private fun deleteMasterKey() {
+        java.security.KeyStore.getInstance("AndroidKeyStore")
+            .apply { load(null) }
+            .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+    }
+
     companion object {
+        private const val TAG = "HomeHubPrefs"
         private const val FILE_NAME = "homehub_secure_prefs"
 
         private const val KEY_SERVER_ADDRESS = "server_address"

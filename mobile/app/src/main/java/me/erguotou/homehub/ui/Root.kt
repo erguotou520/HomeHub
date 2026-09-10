@@ -1,6 +1,7 @@
 package me.erguotou.homehub.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -79,7 +80,13 @@ fun HomeHubRoot() {
                 }
                 }
             }
-        }
+        },
+        // Every screen owns a Scaffold + TopAppBar, and those already apply the
+        // status-bar inset themselves. Leaving the default (systemBars) here
+        // would inset the content twice and — more importantly — make it
+        // impossible for the album's fullscreen viewer overlay to reach the
+        // status bar. The bottom inset is still contributed by the bottom bar.
+        contentWindowInsets = WindowInsets(0)
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             NavHost(navController = navController, startDestination = Tab.Album.route) {

@@ -1,10 +1,12 @@
 package me.erguotou.homehub.ui.screens.album
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,15 +17,14 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
@@ -57,9 +58,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -84,6 +86,11 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
 
     var viewerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var viewerList by remember { mutableStateOf(listOf<PhotoItem>()) }
+
+    // In the 目录 view back goes up one folder; only the top level leaves the app.
+    BackHandler(enabled = state.view == AlbumView.TREE && state.treeStack.isNotEmpty()) {
+        vm.treeUp()
+    }
 
     var showUpload by remember { mutableStateOf(false) }
     var uploadDirs by remember { mutableStateOf<List<DirEntry>>(emptyList()) }
@@ -202,7 +209,18 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                             viewerList = list
                             viewerPhoto = photo
                         }
-                        AlbumView.TREE -> TreeList(state.trees, vm::url, vm::filterByTree)
+                        AlbumView.TREE -> FolderBrowser(
+                            stack = state.treeStack,
+                            folders = state.treeFolders,
+                            photos = state.treePhotos,
+                            urlResolver = vm::url,
+                            onOpenFolder = { vm.treeEnter(it) },
+                            onGoUp = { vm.treeUp() },
+                            onOpenPhoto = { photo, list ->
+                                viewerList = list
+                                viewerPhoto = photo
+                            }
+                        )
                         AlbumView.TAGS -> TagList(state.tags, vm::url, vm::filterByTag)
                         AlbumView.PEOPLE -> PeopleList(state.people, vm::url) { p ->
                             vm.filterByPerson(p.id, p.name)
@@ -424,46 +442,97 @@ private fun TimelineGrid(
     }
 }
 
+/**
+ * Hierarchical 目录 browser: one level at a time, with a breadcrumb and an
+ * "up" affordance instead of the old flat list of every folder on the server.
+ * A rightward drag anywhere in the list goes up a level too.
+ */
 @Composable
-private fun TreeList(
-    trees: List<me.erguotou.homehub.data.TreeGroup>,
+private fun FolderBrowser(
+    stack: List<TreeNode>,
+    folders: List<TreeNode>,
+    photos: List<PhotoItem>,
     urlResolver: (String) -> String,
-    onOpen: (me.erguotou.homehub.data.TreeGroup) -> Unit
+    onOpenFolder: (TreeNode) -> Unit,
+    onGoUp: () -> Unit,
+    onOpenPhoto: (PhotoItem, List<PhotoItem>) -> Unit
 ) {
-    if (trees.isEmpty()) {
-        Empty("没有相册目录")
-        return
-    }
-    LazyColumn {
-        items(trees) { group ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-                    .clickable { onOpen(group) }
-            ) {
-                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    group.items.firstOrNull()?.let { photo ->
-                        AsyncImage(
-                            model = urlResolver(photo.thumbUrl),
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(56.dp)
-                                .aspectRatio(1f)
-                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                        )
-                    }
-                    Column(modifier = Modifier.padding(start = 12.dp)) {
-                        Text("${group.dirName}/${group.path}", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "${group.count} 张",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (stack.isNotEmpty()) {
+                IconButton(onClick = onGoUp) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一级")
                 }
             }
+            Text(
+                text = if (stack.isEmpty()) "全部目录" else stack.joinToString(" / ") { it.label },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(start = if (stack.isEmpty()) 10.dp else 0.dp)
+            )
+        }
+
+        if (folders.isEmpty() && photos.isEmpty()) {
+            Empty(if (stack.isEmpty()) "没有相册目录" else "这个目录是空的")
+            return@Column
+        }
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(stack.size) {
+                    var dragged = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragged = 0f },
+                        onDragEnd = { if (dragged > 120f) onGoUp() },
+                        onHorizontalDrag = { _, delta -> dragged += delta }
+                    )
+                }
+        ) {
+            items(folders, key = { "d:${it.dirName}/${it.path}" }, span = { GridItemSpan(maxLineSpan) }) { node ->
+                FolderRow(node) { onOpenFolder(node) }
+            }
+            items(photos, key = { it.id }) { photo ->
+                PhotoTile(photo, urlResolver) { onOpenPhoto(photo, photos) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderRow(node: TreeNode, onOpen: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpen() }
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                node.label,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(start = 12.dp)
+            )
+            Text(
+                "${node.count} 项",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -486,7 +555,9 @@ private fun TagList(
     ) {
         items(tags) { tag ->
             Card(modifier = Modifier.clickable { onOpen(tag.tag) }) {
-                Box {
+                // Caption goes BELOW the cover: overlaying it on the thumbnail
+                // made both the photo and the text unreadable.
+                Column {
                     tag.coverUrl?.let {
                         AsyncImage(
                             model = urlResolver(it),
@@ -495,13 +566,13 @@ private fun TagList(
                             modifier = Modifier.fillMaxWidth().aspectRatio(1f)
                         )
                     }
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth()
-                            .padding(8.dp)
-                    ) {
-                        Text(tag.tag, style = MaterialTheme.typography.bodyMedium)
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+                        Text(
+                            tag.tag,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Text(
                             "${if (tag.kind == "scene") "场景" else "物体"} · ${tag.photoCount}",
                             style = MaterialTheme.typography.bodySmall,
@@ -532,7 +603,7 @@ private fun PeopleList(
     ) {
         items(people) { person ->
             Card(modifier = Modifier.clickable { onOpen(person) }) {
-                Box {
+                Column {
                     person.coverUrl?.let {
                         AsyncImage(
                             model = urlResolver(it),
@@ -543,10 +614,10 @@ private fun PeopleList(
                     }
                     Text(
                         person.name ?: "未命名 #${person.id}",
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(8.dp),
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)
                     )
                 }
             }

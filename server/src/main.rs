@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         // ── data plane ──
         .merge(handlers::photos::routes())
         .merge(handlers::files::routes())
+        .merge(handlers::geo::routes())
         .merge(handlers::images::routes())
         .merge(handlers::trash::routes())
         .merge(handlers::upload::routes())

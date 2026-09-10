@@ -8,6 +8,7 @@ pub mod dedup;
 pub mod dirs;
 pub mod exif;
 pub mod files;
+pub mod geo;
 pub mod hash;
 pub mod image_ops;
 pub mod media_service;

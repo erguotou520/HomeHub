@@ -66,6 +66,15 @@ class Repository(private val context: Context) {
         api().geo(precision).points
     }
 
+    /**
+     * Place name for map coordinates ("北京市 东城区 …"), resolved and
+     * cached by the server. Null label means the provider failed — callers
+     * keep the coordinate fallback.
+     */
+    suspend fun geoReverse(lat: Double, lng: Double): Result<String?> = runCatching {
+        api().geoReverse(lat, lng).label
+    }
+
     suspend fun photos(
         dirId: Long? = null,
         tag: String? = null,

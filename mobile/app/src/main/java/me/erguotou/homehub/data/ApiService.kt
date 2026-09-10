@@ -42,6 +42,13 @@ interface ApiService {
     @GET("api/photos/geo")
     suspend fun geo(@Query("precision") precision: Double? = null): GeoResponse
 
+    /** Reverse-geocode a cluster centre; cached server-side in `geo_places`. */
+    @GET("api/geo/reverse")
+    suspend fun geoReverse(
+        @Query("lat") lat: Double,
+        @Query("lng") lng: Double
+    ): GeoReverseResponse
+
     @GET("api/photos/list")
     suspend fun list(
         @Query("dir_id") dirId: Long? = null,

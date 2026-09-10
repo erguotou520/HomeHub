@@ -235,6 +235,13 @@ data class TreeResponse(val groups: List<TreeGroup> = emptyList())
 data class TagsResponse(val tags: List<TagSummary> = emptyList())
 data class PeopleResponse(val people: List<PersonGroup> = emptyList())
 data class GeoResponse(val points: List<GeoPoint> = emptyList())
+
+/** `GET /api/geo/reverse` — place name for a map cluster centre. */
+data class GeoReverseResponse(
+    /** "北京市 东城区 …"; null when the provider could not resolve it. */
+    @SerializedName("label") val label: String? = null,
+    @SerializedName("cached") val cached: Boolean = false
+)
 data class SearchResponse(val hits: List<SearchHit> = emptyList())
 data class DuplicatesResponse(val groups: List<DuplicateGroup> = emptyList())
 data class TrashResponse(val entries: List<TrashEntry> = emptyList())

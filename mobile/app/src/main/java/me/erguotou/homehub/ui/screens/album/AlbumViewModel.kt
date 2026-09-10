@@ -222,6 +222,24 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
             block = { repository.photos(ids = point.photoIds) },
             apply = { _state.value = _state.value.copy(filtered = it) }
         )
+        // Upgrade the header to a place name once the server resolves it
+        // (cached in its DB, so repeat taps are instant).
+        viewModelScope.launch {
+            repository.geoReverse(point.lat, point.lng).getOrNull()?.let { place ->
+                if (place != null) renameActiveFilter("地点 $place")
+            }
+        }
+    }
+
+    /**
+     * Replace the active filter's label once extra detail arrives — e.g. the
+     * reverse-geocoded place name for a map cluster. No-op when the filter
+     * was already cleared (stale callback).
+     */
+    fun renameActiveFilter(label: String) {
+        if (_state.value.activeFilter != null) {
+            _state.value = _state.value.copy(activeFilter = label)
+        }
     }
 
     fun clearFilter() {

@@ -206,6 +206,14 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+/**
+ * Height the Media3 controller's bottom section occupies (seek bar + time row
+ * + settings button), measured on the realme at 474dpi. Video pages have no
+ * bottom toolbar, so the controller owns that strip and the info panel has to
+ * be lifted clear of it.
+ */
+private val VideoControllerInset = 64.dp
+
 /** Panels the overlay can open; back closes these before leaving the viewer. */
 private class ViewerPanels {
     var info by mutableStateOf(false)
@@ -425,7 +433,13 @@ private fun ViewerOverlay(
                 .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
             if (panels.info) {
-                Surface(color = Color.Black.copy(alpha = 0.55f)) {
+                // On a video page the Media3 controller owns the bottom ~56dp
+                // (seek bar + time row + settings); without this lift the info
+                // panel's last line is drawn straight through the seek bar.
+                Surface(
+                    color = Color.Black.copy(alpha = 0.55f),
+                    modifier = Modifier.padding(bottom = if (photo.isVideo) VideoControllerInset else 0.dp)
+                ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         InfoLine("文件", photo.name)
                         InfoLine("路径", "${photo.dirName}/${photo.relPath}")

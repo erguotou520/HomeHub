@@ -85,10 +85,6 @@ class Repository(private val context: Context) {
 
     suspend fun photoDetail(id: Long): Result<PhotoDetail> = runCatching { api().photoDetail(id) }
 
-    suspend fun rotate(id: Long, angle: Int): Result<PhotoItem> = runCatching {
-        api().rotate(id, RotateRequest(angle)).photo
-    }
-
     // ── file-level image editing ──
     // These take the photo's dir name + dir-relative path, matching every
     // other per-file endpoint (media, documents, files PATCH/DELETE).

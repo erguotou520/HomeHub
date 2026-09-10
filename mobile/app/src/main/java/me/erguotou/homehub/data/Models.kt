@@ -177,8 +177,6 @@ data class MonitorConfig(
 
 data class SimpleResponse(val success: Boolean = false)
 
-data class RotateRequest(val angle: Int)
-
 /** One step of a file-level image edit (`/api/images/transform/...`). */
 data class ImageOp(
     val op: String,
@@ -240,7 +238,6 @@ data class GeoResponse(val points: List<GeoPoint> = emptyList())
 data class SearchResponse(val hits: List<SearchHit> = emptyList())
 data class DuplicatesResponse(val groups: List<DuplicateGroup> = emptyList())
 data class TrashResponse(val entries: List<TrashEntry> = emptyList())
-data class RotateResponse(val photo: PhotoItem)
 data class DocumentResponse(val content: String = "")
 
 data class UploadOffsetResponse(val offset: Long = 0)

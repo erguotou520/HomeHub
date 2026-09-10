@@ -19,10 +19,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.PhotoSizeSelectLarge
+import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +36,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -64,10 +71,39 @@ fun PhotoViewerScreen(
     urlResolver: (String) -> String,
     mediaUrlResolver: (Long) -> String,
     onRotate: (PhotoItem, Int, (Boolean) -> Unit) -> Unit,
+    onFlip: (PhotoItem, Boolean, (Boolean) -> Unit) -> Unit,
+    onResize: (PhotoItem, Int, (Boolean) -> Unit) -> Unit,
+    onRestore: (PhotoItem, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { photos.size })
     var pageZoomed by remember { mutableStateOf(false) }
+    // Bumped after an edit so Coil drops its cached bitmap for that photo.
+    var revision by remember { mutableLongStateOf(0L) }
+    var busy by remember { mutableStateOf(false) }
+    var toast by remember { mutableStateOf<String?>(null) }
+
+    // Auto-clear the toast like the web lightbox does.
+    LaunchedEffect(toast) {
+        if (toast != null) {
+            kotlinx.coroutines.delay(2200)
+            toast = null
+        }
+    }
+
+    fun runEdit(action: ((Boolean) -> Unit) -> Unit, ok: String, fail: String) {
+        if (busy) return
+        busy = true
+        action { success ->
+            busy = false
+            if (success) {
+                revision++
+                toast = ok
+            } else {
+                toast = fail
+            }
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(
@@ -86,7 +122,7 @@ fun PhotoViewerScreen(
             } else {
                 ImagePage(
                     photo = photo,
-                    url = urlResolver(photo.url),
+                    url = urlResolver(photo.url) + "&rev=$revision",
                     onZoomChanged = { pageZoomed = it }
                 )
             }
@@ -100,8 +136,37 @@ fun PhotoViewerScreen(
             photo = currentPhoto,
             page = currentPage,
             total = photos.size,
+            busy = busy,
+            toast = toast,
             onClose = onDismiss,
-            onRotate = { angle -> onRotate(currentPhoto, angle) {} }
+            onRotate = { angle, done ->
+                runEdit(
+                    { cb -> onRotate(currentPhoto, angle) { ok -> cb(ok); done(ok) } },
+                    "已旋转",
+                    "旋转失败"
+                )
+            },
+            onFlip = { vertical, done ->
+                runEdit(
+                    { cb -> onFlip(currentPhoto, vertical) { ok -> cb(ok); done(ok) } },
+                    if (vertical) "已垂直翻转" else "已水平翻转",
+                    "翻转失败"
+                )
+            },
+            onResize = { width, done ->
+                runEdit(
+                    { cb -> onResize(currentPhoto, width) { ok -> cb(ok); done(ok) } },
+                    "已缩放到宽 $width px",
+                    "缩放失败"
+                )
+            },
+            onRestore = { done ->
+                runEdit(
+                    { cb -> onRestore(currentPhoto) { ok -> cb(ok); done(ok) } },
+                    "已还原原图",
+                    "还原失败"
+                )
+            }
         )
     }
 }
@@ -243,11 +308,18 @@ private fun ViewerOverlay(
     photo: PhotoItem,
     page: Int,
     total: Int,
+    busy: Boolean,
+    toast: String?,
     onClose: () -> Unit,
-    onRotate: (Int) -> Unit
+    onRotate: (Int, (Boolean) -> Unit) -> Unit,
+    onFlip: (Boolean, (Boolean) -> Unit) -> Unit,
+    onResize: (Int, (Boolean) -> Unit) -> Unit,
+    onRestore: ((Boolean) -> Unit) -> Unit
 ) {
     var showInfo by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    var showRestoreConfirm by remember { mutableStateOf(false) }
+    var showResize by remember { mutableStateOf(false) }
+    var widthText by remember { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -268,6 +340,23 @@ private fun ViewerOverlay(
         }
 
         Box(modifier = Modifier.weight(1f))
+
+        // Transient feedback, mirroring the web lightbox toast.
+        toast?.let {
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.7f),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        it,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
 
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
             if (showInfo) {
@@ -302,19 +391,117 @@ private fun ViewerOverlay(
                 }
             }
 
+            if (showRestoreConfirm) {
+                Surface(color = Color.Black.copy(alpha = 0.75f)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "确认还原到最近一次编辑前的状态？当前编辑将丢弃。",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.End,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Button(onClick = { showRestoreConfirm = false }) { Text("取消") }
+                            Box(modifier = Modifier.padding(start = 8.dp)) {
+                                Button(
+                                    onClick = {
+                                        showRestoreConfirm = false
+                                        onRestore { }
+                                    },
+                                    enabled = !busy
+                                ) { Text("确认还原") }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (showResize) {
+                Surface(color = Color.Black.copy(alpha = 0.75f)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "目标宽度（px，等比缩放）",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = widthText,
+                                onValueChange = { v -> widthText = v.filter { it.isDigit() } },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = Color.White,
+                                    unfocusedBorderColor = Color.LightGray
+                                )
+                            )
+                            Box(modifier = Modifier.padding(start = 8.dp)) {
+                                Button(
+                                    onClick = {
+                                        val w = widthText.toIntOrNull()
+                                        if (w != null && w > 0) {
+                                            showResize = false
+                                            onResize(w) { }
+                                        }
+                                    },
+                                    enabled = !busy
+                                ) { Text("缩放") }
+                            }
+                        }
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(onClick = { showInfo = !showInfo }) { Text("信息") }
-                // Rotation rewrites pixels on the server — photos only.
+                // Everything below rewrites pixels on the server — photos only.
                 if (!photo.isVideo) {
-                    IconButton(onClick = { busy = true; onRotate(270); busy = false }, enabled = !busy) {
+                    IconButton(
+                        onClick = { onRotate(270) { } },
+                        enabled = !busy
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "左转", tint = Color.White)
                     }
-                    IconButton(onClick = { busy = true; onRotate(90); busy = false }, enabled = !busy) {
+                    IconButton(
+                        onClick = { onRotate(90) { } },
+                        enabled = !busy
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "右转", tint = Color.White)
+                    }
+                    IconButton(
+                        onClick = { onFlip(false) { } },
+                        enabled = !busy
+                    ) {
+                        Icon(Icons.Filled.Flip, contentDescription = "水平翻转", tint = Color.White)
+                    }
+                    IconButton(
+                        onClick = { onFlip(true) { } },
+                        enabled = !busy
+                    ) {
+                        Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
+                    }
+                    IconButton(
+                        onClick = { widthText = photo.width?.toString() ?: ""; showResize = true },
+                        enabled = !busy
+                    ) {
+                        Icon(Icons.Filled.PhotoSizeSelectLarge, contentDescription = "按宽度缩放", tint = Color.White)
+                    }
+                    IconButton(
+                        onClick = { showRestoreConfirm = true },
+                        enabled = !busy
+                    ) {
+                        Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)
                     }
                 }
             }

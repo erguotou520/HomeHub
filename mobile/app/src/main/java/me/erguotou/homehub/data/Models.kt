@@ -179,6 +179,38 @@ data class SimpleResponse(val success: Boolean = false)
 
 data class RotateRequest(val angle: Int)
 
+/** One step of a file-level image edit (`/api/images/transform/...`). */
+data class ImageOp(
+    val op: String,
+    val angle: Int? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val quality: Int? = null
+)
+
+data class TransformRequest(val ops: List<ImageOp>)
+
+data class TransformResult(
+    val width: Int = 0,
+    val height: Int = 0,
+    val size: Long = 0,
+    val lossless: Boolean = false
+)
+
+data class TransformResponse(
+    val success: Boolean = false,
+    val result: TransformResult? = null,
+    @SerializedName("has_original") val hasOriginal: Boolean = false
+)
+
+data class ImageExif(
+    val width: Int = 0,
+    val height: Int = 0,
+    val size: Long = 0,
+    val orientation: Int = 1,
+    @SerializedName("has_original") val hasOriginal: Boolean = false
+)
+
 data class RenameRequest(val name: String)
 
 data class CopyMoveRequest(

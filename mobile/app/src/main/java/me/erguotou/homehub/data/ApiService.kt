@@ -62,6 +62,29 @@ interface ApiService {
     @POST("api/photos/{id}/rotate")
     suspend fun rotate(@Path("id") id: Long, @Body body: RotateRequest): RotateResponse
 
+    // ── file-level image editing ──
+    // The action segment comes BEFORE the directory because the path is a
+    // catch-all, which axum only allows as the final segment.
+
+    @POST("api/images/transform/{dir}/{path}")
+    suspend fun transform(
+        @Path("dir") dir: String,
+        @Path(value = "path", encoded = true) path: String,
+        @Body body: TransformRequest
+    ): TransformResponse
+
+    @POST("api/images/restore/{dir}/{path}")
+    suspend fun restoreImage(
+        @Path("dir") dir: String,
+        @Path(value = "path", encoded = true) path: String
+    ): TransformResponse
+
+    @GET("api/images/exif/{dir}/{path}")
+    suspend fun imageExif(
+        @Path("dir") dir: String,
+        @Path(value = "path", encoded = true) path: String
+    ): ImageExif
+
     @POST("api/photos/people/{id}/rename")
     suspend fun renamePerson(@Path("id") id: Long, @Body body: Map<String, String>): SimpleResponse
 

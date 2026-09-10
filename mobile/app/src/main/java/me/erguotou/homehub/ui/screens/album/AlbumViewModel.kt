@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.data.GeoPoint
+import me.erguotou.homehub.data.ImageOp
 import me.erguotou.homehub.data.PersonGroup
 import me.erguotou.homehub.data.PhotoItem
 import me.erguotou.homehub.data.Repository
@@ -150,8 +151,33 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun rotate(photo: PhotoItem, angle: Int, onDone: (Boolean) -> Unit) {
+        editImage(photo, listOf(ImageOp(op = "rotate", angle = angle)), onDone)
+    }
+
+    fun flip(photo: PhotoItem, vertical: Boolean, onDone: (Boolean) -> Unit) {
+        val op = if (vertical) "flip-v" else "flip-h"
+        editImage(photo, listOf(ImageOp(op = op)), onDone)
+    }
+
+    fun resize(photo: PhotoItem, width: Int, onDone: (Boolean) -> Unit) {
+        editImage(
+            photo,
+            listOf(ImageOp(op = "resize", width = width, quality = 85)),
+            onDone
+        )
+    }
+
+    fun restore(photo: PhotoItem, onDone: (Boolean) -> Unit) {
         viewModelScope.launch {
-            val result = repository.rotate(photo.id, angle)
+            val result = repository.restoreImage(photo)
+            onDone(result.isSuccess)
+            if (result.isSuccess) refresh()
+        }
+    }
+
+    private fun editImage(photo: PhotoItem, ops: List<ImageOp>, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val result = repository.transformImage(photo, ops)
             onDone(result.isSuccess)
             if (result.isSuccess) refresh()
         }

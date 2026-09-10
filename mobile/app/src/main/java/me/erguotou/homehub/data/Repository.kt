@@ -89,6 +89,25 @@ class Repository(private val context: Context) {
         api().rotate(id, RotateRequest(angle)).photo
     }
 
+    // ── file-level image editing ──
+    // These take the photo's dir name + dir-relative path, matching every
+    // other per-file endpoint (media, documents, files PATCH/DELETE).
+
+    /** Apply rotate/flip/resize steps to a photo's bytes on the server. */
+    suspend fun transformImage(photo: PhotoItem, ops: List<ImageOp>): Result<TransformResponse> =
+        runCatching {
+            api().transform(photo.dirName, photo.relPath, TransformRequest(ops))
+        }
+
+    /** Roll the pixels back to the archived pre-edit original. */
+    suspend fun restoreImage(photo: PhotoItem): Result<TransformResponse> = runCatching {
+        api().restoreImage(photo.dirName, photo.relPath)
+    }
+
+    suspend fun imageExif(photo: PhotoItem): Result<ImageExif> = runCatching {
+        api().imageExif(photo.dirName, photo.relPath)
+    }
+
     suspend fun renamePerson(id: Long, name: String): Result<Unit> = runCatching {
         api().renamePerson(id, mapOf("name" to name))
     }

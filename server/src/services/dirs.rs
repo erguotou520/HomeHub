@@ -107,19 +107,7 @@ impl DirRegistry {
 
     /// True when a relative path hits one of the directory ignore rules.
     pub fn is_ignored(&self, dir: &DirRecord, rel_path: &str) -> bool {
-        let rel = normalize_rel(rel_path);
-        if rel.is_empty() {
-            return false;
-        }
-        dir.ignore_list().iter().any(|rule| {
-            let rule = rule.trim().trim_end_matches('/');
-            if rule.is_empty() {
-                return false;
-            }
-            rel == rule
-                || rel.starts_with(&format!("{}/", rule))
-                || rel.split('/').any(|part| part == rule)
-        })
+        path_is_ignored(&dir.ignore_list(), rel_path)
     }
 
     // ───────────────────────────── CRUD ────────────────────────────────
@@ -230,5 +218,82 @@ impl DirRegistry {
             });
         }
         Ok(stats)
+    }
+}
+
+/// Does `rel_path` fall under any of the ignore `rules`?
+///
+/// A rule matches when it equals a whole path segment, names a parent
+/// directory, or — with a leading `*` — matches the *suffix* of a single
+/// segment. The wildcard form exists for macOS photo library packages, whose
+/// names are user-chosen (`Photos Library.photoslibrary`), so a fixed rule can
+/// never catch them.
+pub fn path_is_ignored(rules: &[String], rel_path: &str) -> bool {
+    let rel = normalize_rel(rel_path);
+    if rel.is_empty() {
+        return false;
+    }
+    rules.iter().any(|rule| {
+        let rule = rule.trim().trim_end_matches('/');
+        if rule.is_empty() {
+            return false;
+        }
+        let suffix = rule.strip_prefix('*');
+        let matches_segment = |part: &str| match suffix {
+            Some(s) if !s.is_empty() => part.ends_with(s),
+            _ => part == rule,
+        };
+        rel == rule
+            || rel.starts_with(&format!("{}/", rule))
+            || rel.split('/').any(matches_segment)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::dir::DirRecord;
+
+    fn dir_with(ignore: &str) -> DirRecord {
+        DirRecord {
+            id: 1,
+            name: "test".into(),
+            path: "/tmp".into(),
+            marks: "album".into(),
+            ignore_rules: ignore.into(),
+            enabled: 1,
+            created_at: 0,
+        }
+    }
+
+    fn ignored(rules: &str, rel: &str) -> bool {
+        path_is_ignored(&dir_with(rules).ignore_list(), rel)
+    }
+
+    #[test]
+    fn exact_segment_rule_matches_whole_subtree() {
+        assert!(ignored(".thumbnails", ".thumbnails"));
+        assert!(ignored(".thumbnails", ".thumbnails/2025/a.jpg"));
+        assert!(ignored(".thumbnails", "2025/.thumbnails/a.jpg"));
+        assert!(!ignored(".thumbnails", "2025/thumbnails/a.jpg"));
+    }
+
+    /// The bug this guards: a macOS photo library lives in a package named
+    /// `Photos Library.photoslibrary`, so a plain `.photoslibrary` rule never
+    /// matched and the album imported the entire library (78 derived files).
+    #[test]
+    fn wildcard_rule_matches_the_package_segment() {
+        assert!(ignored("*.photoslibrary", "Photos Library.photoslibrary"));
+        assert!(ignored(
+            "*.photoslibrary",
+            "Photos Library.photoslibrary/resources/derivatives/B/x_1_105_c.jpeg"
+        ));
+        assert!(!ignored("*.photoslibrary", "2025/beach.jpg"));
+        assert!(!ignored("*.photoslibrary", "Pictures/photoslibrary-notes.txt"));
+    }
+
+    #[test]
+    fn empty_rules_ignore_nothing() {
+        assert!(!ignored("", "anything/at/all.png"));
     }
 }

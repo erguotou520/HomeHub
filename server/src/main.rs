@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let registry = DirRegistry::bootstrap(pool.clone(), &config).await?;
     tracing::info!("registered {} directories", registry.all().len());
 
-    let detector = services::ml::build(&config.runtime.ml);
+    let detector = services::ml::build(&config.runtime.ml, &config.global.data_dir);
     let queue = TaskQueue::new(pool.clone(), registry.clone(), store.clone(), detector);
 
     let audit_writer = services::audit::spawn(pool.clone(), &config);

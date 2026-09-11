@@ -915,6 +915,12 @@ pub fn default_ignore_rules() -> Vec<String> {
         "#recycle".into(),
         ".stfolder".into(),
         ".originals".into(),
+        // macOS Photos / iPhoto libraries are *packages*: their insides are
+        // derived thumbnails, edit sessions and databases, not photos the user
+        // put in the folder. Pointing an album at `~/Pictures` used to index
+        // every derivative and re-import the whole library on each edit.
+        "*.photoslibrary".into(),
+        "*.photolibrary".into(),
     ]
 }
 

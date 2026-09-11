@@ -16,6 +16,7 @@ pub mod onnx;
 
 use anyhow::Result;
 use image::DynamicImage;
+use std::path::{Path, PathBuf};
 
 use crate::config::MlConfig;
 
@@ -51,11 +52,14 @@ pub trait Detector: Send + Sync {
 }
 
 /// Build the detector described by the configuration.
-pub fn build(config: &MlConfig) -> std::sync::Arc<dyn Detector> {
+///
+/// `data_dir` is the configured `global.data-dir`; relative model paths resolve
+/// against it (see [`resolve_model_path`]).
+pub fn build(config: &MlConfig, data_dir: &str) -> std::sync::Arc<dyn Detector> {
     #[cfg(feature = "onnx")]
     {
         if config.backend == "onnx" {
-            match onnx::OnnxDetector::new(config) {
+            match onnx::OnnxDetector::new(config, Path::new(data_dir)) {
                 Ok(d) => {
                     tracing::info!("ml backend: onnx");
                     return std::sync::Arc::new(d);
@@ -64,11 +68,49 @@ pub fn build(config: &MlConfig) -> std::sync::Arc<dyn Detector> {
             }
         }
     }
+    #[cfg(not(feature = "onnx"))]
+    {
+        let _ = data_dir;
+    }
     if config.backend == "onnx" {
         tracing::warn!("ml backend 'onnx' requested but the `onnx` feature is not compiled in");
     }
     std::sync::Arc::new(stub::StubDetector)
 }
+
+/// Resolve a configured model path.
+///
+/// Absolute paths are used as-is. Relative paths are resolved against the
+/// configured `data-dir` first — this is what the docs promise — falling back
+/// to the `DATA_DIR` environment variable (the Docker image sets it) and
+/// finally to the process working directory. The `data-dir` candidate is
+/// returned even when nothing exists, so the resulting error message points at
+/// the place the operator was told to put the file.
+pub fn resolve_model_path(path: &str, data_dir: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    let primary = if data_dir.as_os_str().is_empty() {
+        p.to_path_buf()
+    } else {
+        data_dir.join(p)
+    };
+    if primary.exists() {
+        return primary;
+    }
+    if let Ok(env_dir) = std::env::var("DATA_DIR") {
+        let alt = Path::new(&env_dir).join(p);
+        if alt.exists() {
+            return alt;
+        }
+    }
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    primary
+}
+
 
 /// Filter out labels below the threshold, excluded labels, and duplicates.
 pub fn sanitize(
@@ -99,4 +141,52 @@ pub fn sanitize(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_model_path_is_untouched() {
+        let got = resolve_model_path("/opt/models/yolov8n.onnx", Path::new("/data"));
+        assert_eq!(got, PathBuf::from("/opt/models/yolov8n.onnx"));
+    }
+
+    /// The regression this guards: relative paths used to resolve against the
+    /// `DATA_DIR` env var / cwd, so a model placed in the directory the config
+    /// actually points at (`data-dir`) was reported as missing.
+    #[test]
+    fn relative_model_path_resolves_against_data_dir() {
+        let tmp = std::env::temp_dir().join(format!("hh-ml-{}", std::process::id()));
+        let models = tmp.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("scene.onnx"), b"x").unwrap();
+
+        let got = resolve_model_path("models/scene.onnx", &tmp);
+        assert_eq!(got, models.join("scene.onnx"));
+        assert!(got.exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn missing_model_reports_the_configured_location() {
+        let got = resolve_model_path("models/nope.onnx", Path::new("/data"));
+        assert_eq!(got, PathBuf::from("/data/models/nope.onnx"));
+        assert!(!got.exists());
+    }
+
+    #[test]
+    fn sanitize_drops_low_confidence_excluded_and_duplicates() {
+        let dets = vec![
+            Detection { tag: "Person".into(), confidence: 0.9 },
+            Detection { tag: "person".into(), confidence: 0.8 },
+            Detection { tag: "dog".into(), confidence: 0.1 },
+            Detection { tag: "tv".into(), confidence: 0.7 },
+        ];
+        let out = sanitize(dets, 0.35, &["tv".to_string()], 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tag, "person");
+    }
 }

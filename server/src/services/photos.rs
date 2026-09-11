@@ -543,7 +543,9 @@ pub async fn geo(db: &Db, registry: &DirRegistry, precision: f64) -> Result<Vec<
             photo_ids: Vec::new(),
         });
         entry.count += 1;
-        if entry.photo_ids.len() < 50 {
+        // Cap matches the `ids` filter in the list endpoint (take(1000)), so a
+        // cluster click can always reveal every photo the map claimed.
+        if entry.photo_ids.len() < 1000 {
             entry.photo_ids.push(id);
         }
     }

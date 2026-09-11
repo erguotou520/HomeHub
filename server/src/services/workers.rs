@@ -144,6 +144,7 @@ pub async fn run_detection(
         match kind {
             TaskKind::DetectObject => {
                 if ml.object.enabled {
+                    outcome.ran = true;
                     outcome.tags = crate::services::ml::sanitize(
                         detector.detect_objects(&img)?,
                         ml.object.threshold,
@@ -154,6 +155,7 @@ pub async fn run_detection(
             }
             TaskKind::DetectScene => {
                 if ml.scene.enabled {
+                    outcome.ran = true;
                     outcome.tags = crate::services::ml::sanitize(
                         detector.detect_scenes(&img)?,
                         ml.scene.threshold,
@@ -164,6 +166,7 @@ pub async fn run_detection(
             }
             TaskKind::DetectFace => {
                 if ml.face.enabled {
+                    outcome.ran = true;
                     outcome.faces = detector.detect_faces(&img)?;
                 }
             }
@@ -179,7 +182,10 @@ pub async fn run_detection(
         _ => "face",
     };
 
-    if !outcome.tags.is_empty() {
+    // Replace unconditionally once the pass actually ran: guarding this on
+    // `!tags.is_empty()` meant a new model that finds nothing left the previous
+    // model's tags in place forever, so switching backends never took effect.
+    if outcome.ran {
         let tags: Vec<(String, f64)> = outcome
             .tags
             .into_iter()
@@ -188,7 +194,10 @@ pub async fn run_detection(
         crate::services::photos::replace_tags(queue.db(), asset.id, kind_str, &tags).await?;
     }
 
-    if !outcome.faces.is_empty() {
+    // Same reasoning as the tags above: a re-run with a better face model must
+    // be able to *remove* faces it no longer finds, otherwise the old boxes
+    // (and the person groups built from them) linger forever.
+    if kind_str == "face" && outcome.ran {
         let db = queue.db().clone();
         let face_cfg = ml.face.clone();
         let faces = outcome.faces;
@@ -235,6 +244,10 @@ pub async fn run_detection(
 struct DetectionOutcome {
     tags: Vec<crate::services::ml::Detection>,
     faces: Vec<crate::services::ml::FaceBox>,
+    /// True when the detector actually executed — distinguishes "ran and found
+    /// nothing" (must clear stored results) from "skipped / disabled" (must
+    /// leave them alone).
+    ran: bool,
 }
 
 /// Lossless compression pass.

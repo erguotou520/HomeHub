@@ -32,6 +32,8 @@ import com.amap.api.maps.model.MarkerOptions
 import me.erguotou.homehub.BuildConfig
 import me.erguotou.homehub.data.GeoPoint
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * AMap (高德) map rendering the server-side geo aggregation.
@@ -41,7 +43,11 @@ import java.util.Locale
  *   through [MapsInitializer.setApiKey] — the map is part of the product, so
  *   there is nothing for the user to configure;
  * * EXIF GPS is WGS-84 while AMap draws in GCJ-02, so every cluster is
- *   converted with [CoordinateConverter] before it becomes a marker.
+ *   converted with [CoordinateConverter] before it becomes a marker;
+ * * the server buckets photos on a fixed 0.02° grid, so one neighbourhood can
+ *   still arrive as several neighbouring points. These are re-clustered on
+ *   the device by SCREEN distance: zoomed out they merge into one badge
+ *   (tapping it shows every photo behind it), zooming in splits them apart.
  */
 @Composable
 fun AMapView(
@@ -84,32 +90,17 @@ fun AMapView(
         map = mapView.map
     }
 
-    // Redraw markers whenever the aggregation changes.
+    // Fit the camera ONCE per data set; later moves belong to the user.
     LaunchedEffect(points, map) {
         val aMap = map ?: return@LaunchedEffect
-        aMap.clear()
         if (points.isEmpty()) return@LaunchedEffect
-
         val builder = LatLngBounds.Builder()
-        val max = points.maxOf { it.count.coerceAtLeast(1) }
-        points.forEach { point ->
-            val gcj = toGcj02(context, point.lat, point.lng)
-            builder.include(gcj)
-            val hue = when {
-                point.count.toFloat() / max > 0.66f -> BitmapDescriptorFactory.HUE_RED
-                point.count.toFloat() / max > 0.33f -> BitmapDescriptorFactory.HUE_ORANGE
-                else -> BitmapDescriptorFactory.HUE_BLUE
-            }
-            aMap.addMarker(
-                MarkerOptions()
-                    .position(gcj)
-                    .title("${point.count} 张")
-                    .snippet(String.format(Locale.US, "%.5f, %.5f", point.lat, point.lng))
-                    .icon(countBadge(context, point.count, hue))
-                    .anchor(0.5f, 0.5f)
-            )?.setObject(point)
-        }
+        points.forEach { builder.include(toGcj02(context, it.lat, it.lng)) }
+        aMap.moveCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 80))
+    }
 
+    LaunchedEffect(map) {
+        val aMap = map ?: return@LaunchedEffect
         aMap.setOnMarkerClickListener { marker ->
             val point = marker.`object` as? GeoPoint
             if (point != null) {
@@ -119,10 +110,118 @@ fun AMapView(
                 false
             }
         }
-        aMap.moveCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 80))
     }
 
-    AndroidView(factory = { mapView }, modifier = modifier.fillMaxSize())
+    AndroidView(
+        factory = { mapView },
+        modifier = modifier.fillMaxSize(),
+        onReset = { /* keep the single MapView instance */ }
+    ) { _ ->
+        // Marker clustering runs on every camera settle — AndroidView update
+        // is invoked on recomposition, and the camera listener below triggers
+        // redraws directly (Compose state stays out of the hot path).
+    }
+
+    // Recompute clusters whenever the data or the zoom level changes.
+    DisposableEffect(points, map) {
+        val aMap = map ?: return@DisposableEffect onDispose { }
+        var lastSignature = ""
+
+        fun redraw() {
+            val signature = "${points.size}@${(aMap.cameraPosition.zoom * 10).roundToInt()}"
+            if (signature == lastSignature) return
+            lastSignature = signature
+            aMap.clear()
+            if (points.isEmpty()) return
+            val clusters = clusterOnScreen(context, aMap, points)
+            val max = clusters.maxOf { it.count.coerceAtLeast(1) }
+            clusters.forEach { c ->
+                val hue = when {
+                    c.count.toFloat() / max > 0.66f -> BitmapDescriptorFactory.HUE_RED
+                    c.count.toFloat() / max > 0.33f -> BitmapDescriptorFactory.HUE_ORANGE
+                    else -> BitmapDescriptorFactory.HUE_BLUE
+                }
+                aMap.addMarker(
+                    MarkerOptions()
+                        .position(toGcj02(context, c.lat, c.lng))
+                        .title("${c.count} 张")
+                        .snippet(String.format(Locale.US, "%.5f, %.5f", c.lat, c.lng))
+                        .icon(countBadge(context, c.count, hue))
+                        .anchor(0.5f, 0.5f)
+                )?.setObject(c)
+            }
+        }
+
+        val cameraListener = object : AMap.OnCameraChangeListener {
+            override fun onCameraChange(position: com.amap.api.maps.model.CameraPosition) {}
+            override fun onCameraChangeFinish(position: com.amap.api.maps.model.CameraPosition) {
+                redraw()
+            }
+        }
+        aMap.setOnCameraChangeListener(cameraListener)
+        // First draw happens once the map engine is ready (projection needs it).
+        aMap.setOnMapLoadedListener { redraw() }
+        redraw()
+        onDispose {
+            runCatching { aMap.setOnCameraChangeListener(null) }
+            runCatching { aMap.setOnMapLoadedListener(null) }
+        }
+    }
+}
+
+/**
+ * Greedy screen-distance clustering: every not-yet-clustered point opens a
+ * cluster that swallows all points within [MERGE_RADIUS_PX] pixels. The
+ * cluster carries the merged photo ids (so tapping it filters all of them)
+ * and the member-weighted mean coordinate (used for the reverse geocode).
+ */
+private const val MERGE_RADIUS_PX = 64f
+
+private fun clusterOnScreen(context: Context, aMap: AMap, points: List<GeoPoint>): List<GeoPoint> {
+    if (points.isEmpty()) return points
+    val projection = aMap.projection ?: return points
+    data class Slot(val point: GeoPoint, val screen: android.graphics.Point)
+
+    val slots = points.mapNotNull { p ->
+        // Cluster on the same GCJ-02 coordinates the markers are drawn at,
+        // so screen distance matches what the user sees.
+        val gcj = toGcj02(context, p.lat, p.lng)
+        runCatching { projection.toScreenLocation(gcj) }.getOrNull()?.let { Slot(p, it) }
+    }
+    val used = BooleanArray(slots.size)
+    val out = ArrayList<GeoPoint>()
+    for (i in slots.indices) {
+        if (used[i]) continue
+        used[i] = true
+        var members = listOf(slots[i])
+        for (j in i + 1 until slots.size) {
+            if (used[j]) continue
+            val head = members.first().screen
+            if (abs(slots[j].screen.x - head.x) <= MERGE_RADIUS_PX &&
+                abs(slots[j].screen.y - head.y) <= MERGE_RADIUS_PX
+            ) {
+                used[j] = true
+                members = members + slots[j]
+            }
+        }
+        if (members.size == 1) {
+            out.add(slots[i].point)
+        } else {
+            val total = members.sumOf { it.point.count }
+            val lat = members.sumOf { it.point.lat * it.point.count } / total
+            val lng = members.sumOf { it.point.lng * it.point.count } / total
+            out.add(
+                GeoPoint(
+                    lat = lat,
+                    lng = lng,
+                    count = total,
+                    thumbUrl = members.first().point.thumbUrl,
+                    photoIds = members.flatMap { it.point.photoIds }
+                )
+            )
+        }
+    }
+    return out
 }
 
 /** WGS-84 -> GCJ-02 through the SDK converter (falls back to the raw point). */

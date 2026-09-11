@@ -389,12 +389,15 @@ private fun labelOf(view: AlbumView) = when (view) {
 
 @Composable
 private fun FilterHeader(filter: String, onClear: () -> Unit) {
+    // 地点筛选自带前缀，读作「地点：上海市 …」；其余仍用「筛选：xxx」。
+    val text = if (filter.startsWith("地点 ")) "地点：" + filter.removePrefix("地点 ")
+    else "筛选：$filter"
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            "筛选：$filter",
+            text,
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant

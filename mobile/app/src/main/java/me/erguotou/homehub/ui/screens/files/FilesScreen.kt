@@ -1,10 +1,13 @@
 package me.erguotou.homehub.ui.screens.files
 
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,14 +23,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.TextSnippet
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
@@ -38,6 +47,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -59,6 +69,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -66,6 +78,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.data.FileEntry
+import me.erguotou.homehub.data.Prefs
 import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
@@ -77,6 +90,9 @@ import me.erguotou.homehub.util.formatDateTime
 /** A pending 复制到 / 移动到 for one or more entries. */
 private data class CopyMovePlan(val entries: List<FileEntry>, val op: String)
 
+/** Horizontal drag that counts as a "swipe back to the parent folder", in px. */
+private const val SwipeBackThreshold = 120f
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FilesScreen(
@@ -87,9 +103,18 @@ fun FilesScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val prefs = remember { Prefs(context) }
+    // Root's back stack carries the tab history, so a system back while the
+    // 文件 tab sits at its root returns to the previously visited tab.
+    val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
 
-    var showNewDir by remember { mutableStateOf(false) }
-    var showUpload by remember { mutableStateOf(false) }
+    // 系统返回键/侧滑手势：在子目录里先回上一级目录，只有根目录才真正退出。
+    BackHandler(enabled = state.currentPath.isNotBlank()) { vm.navigateUp() }
+
+    var showUploadPicker by remember { mutableStateOf(false) }
+    var showUploadConfirm by remember { mutableStateOf(false) }
+    var uploadTargetDir by remember { mutableStateOf<String?>(null) }
+    var uploadTargetPath by remember { mutableStateOf("") }
     var menuExpanded by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<List<FileEntry>?>(null) }
     var pendingUris by remember { mutableStateOf<List<android.net.Uri>>(emptyList()) }
@@ -123,7 +148,7 @@ fun FilesScreen(
     ) { uris ->
         if (uris.isNotEmpty()) {
             pendingUris = uris
-            showUpload = true
+            showUploadConfirm = true
         }
     }
 
@@ -156,6 +181,7 @@ fun FilesScreen(
         Scaffold(
             snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
+                Column {
                 TopAppBar(
                     title = {
                         Text(state.currentDir?.let { "$it/${state.currentPath}" } ?: "文件")
@@ -194,18 +220,21 @@ fun FilesScreen(
                         }
                     }
                 )
+                    if (state.uploadActive) {
+                        LinearProgressIndicator(
+                            progress = {
+                                if (state.uploadTotal > 0)
+                                    state.uploadIndex.toFloat() / state.uploadTotal
+                                else 0f
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
             },
             floatingActionButton = {
-                Row {
-                    androidx.compose.material3.FloatingActionButton(onClick = { showNewDir = true }) {
-                        Icon(Icons.Default.Add, contentDescription = "新建目录")
-                    }
-                    androidx.compose.material3.SmallFloatingActionButton(
-                        onClick = { pickFiles.launch("*/*") },
-                        modifier = Modifier.padding(start = 8.dp)
-                    ) {
-                        Icon(Icons.Default.Upload, contentDescription = "上传")
-                    }
+                androidx.compose.material3.FloatingActionButton(onClick = { showUploadPicker = true }) {
+                    Icon(Icons.Default.Upload, contentDescription = "上传")
                 }
             }
         ) { padding ->
@@ -222,7 +251,29 @@ fun FilesScreen(
                     )
                 }
 
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        // 右滑回到上一级目录，和相册的目录浏览保持一致；已经在根
+                        // 目录时没有上一级可回，就交给系统返回。
+                        .pointerInput(state.currentPath) {
+                            var dragged = 0f
+                            detectHorizontalDragGestures(
+                                onDragStart = { dragged = 0f },
+                                onDragEnd = {
+                                    if (dragged > SwipeBackThreshold) {
+                                        if (state.currentPath.isNotBlank()) {
+                                            vm.navigateUp()
+                                        } else {
+                                            backDispatcher?.onBackPressed()
+                                        }
+                                    }
+                                },
+                                onHorizontalDrag = { _, delta -> dragged += delta }
+                            )
+                        }
+                ) {
                     when {
                         state.loading && state.entries.isEmpty() -> Loading()
                         state.error != null && state.entries.isEmpty() ->
@@ -309,37 +360,71 @@ fun FilesScreen(
         }
     }
 
-    if (showNewDir) {
-        NameDialog("新建目录", "") { name ->
-            showNewDir = false
-            if (name.isNotBlank()) vm.mkdir(name)
-        }
+    // 上传 reuses the same directory browser as 复制到 / 移动到: the target
+    // folder is chosen first — defaulting to the one you are standing in — and
+    // the system file picker only opens once the destination is settled.
+    if (showUploadPicker) {
+        val currentDir = state.currentDir
+        DirectoryPickerDialog(
+            title = "上传到",
+            dirs = state.dirs,
+            // Default to where the user already is; fall back to the last
+            // upload target only when the current folder is unknown.
+            initialDir = currentDir ?: prefs.lastUploadDir.ifBlank { null },
+            initialPath = if (currentDir != null) state.currentPath else prefs.lastUploadPath,
+            confirmLabel = "上传到这里",
+            listFiles = { dir, path -> vm.listAt(dir, path) },
+            createDir = { dir, path, name -> vm.createDirAt(dir, path, name) },
+            onConfirm = { dir, path ->
+                uploadTargetDir = dir
+                uploadTargetPath = path
+                prefs.rememberUploadTarget(dir, path)
+                showUploadPicker = false
+                pickFiles.launch("*/*")
+            },
+            onDismiss = { showUploadPicker = false }
+        )
     }
 
-    if (showUpload && pendingUris.isNotEmpty()) {
+    if (showUploadConfirm && pendingUris.isNotEmpty()) {
         var deleteLocal by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = {
-                showUpload = false
+                showUploadConfirm = false
                 pendingUris = emptyList()
             },
             title = { Text("上传 ${pendingUris.size} 个文件") },
             text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = deleteLocal, onCheckedChange = { deleteLocal = it })
-                    Text("上传完成后删除本地副本", modifier = Modifier.padding(start = 8.dp))
+                Column {
+                    Text(
+                        "目标：" + (uploadTargetDir?.let { d ->
+                            if (uploadTargetPath.isBlank()) d else "$d/$uploadTargetPath"
+                        } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Checkbox(checked = deleteLocal, onCheckedChange = { deleteLocal = it })
+                        Text("上传完成后删除本地副本", modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.upload(pendingUris, deleteLocal)
-                    showUpload = false
+                    val dir = uploadTargetDir
+                    if (dir != null) {
+                        vm.upload(dir, uploadTargetPath, pendingUris, deleteLocal)
+                    }
+                    showUploadConfirm = false
                     pendingUris = emptyList()
                 }) { Text("开始上传") }
             },
             dismissButton = {
                 TextButton(onClick = {
-                    showUpload = false
+                    showUploadConfirm = false
                     pendingUris = emptyList()
                 }) { Text("取消") }
             }
@@ -524,19 +609,17 @@ private fun FileRow(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            when {
-                entry.isDir -> Icons.Default.Folder
-                kind == FileKind.IMAGE -> Icons.Default.Image
-                else -> Icons.Default.Description
-            },
-            contentDescription = null,
-            tint = if (entry.isDir) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-        )
+        val (icon, tint) = when {
+            entry.isDir -> Icons.Default.Folder to Color(0xFF5B9BD5)          // 蓝：文件夹
+            kind == FileKind.IMAGE -> Icons.Default.Image to Color(0xFFE8710A) // 橙：图片
+            kind == FileKind.VIDEO -> Icons.Default.VideoFile to Color(0xFF8E44AD) // 紫：视频
+            kind == FileKind.AUDIO -> Icons.Default.AudioFile to Color(0xFF16A34A) // 绿：音频
+            kind == FileKind.PDF -> Icons.Default.PictureAsPdf to Color(0xFFDC2626) // 红：PDF
+            kind == FileKind.OFFICE -> Icons.Default.TableChart to Color(0xFF0F766E) // 青绿：文档
+            kind == FileKind.TEXT -> Icons.Default.TextSnippet to Color(0xFF64748B) // 灰蓝：文本
+            else -> Icons.Default.InsertDriveFile to Color(0xFF9CA3AF)        // 浅灰：其他
+        }
+        Icon(icon, contentDescription = null, tint = tint)
         Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(
                 entry.name,
@@ -559,16 +642,17 @@ private fun FileRow(
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 if (!entry.isDir) {
                     DropdownMenuItem(
-                        text = { Text(if (kind == FileKind.OTHER) "用其他应用打开" else "打开") },
+                        text = { Text("打开") },
                         onClick = { menuOpen = false; onOpen() }
                     )
-                    if (kind != FileKind.OTHER) {
-                        DropdownMenuItem(
-                            text = { Text("用其他应用打开") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
-                            onClick = { menuOpen = false; onOpenExternal(entry) }
-                        )
-                    }
+                    // Always offered: an unfamiliar extension may well have been
+                    // probed into the text reader, and this is the way out to a
+                    // purpose-built app for it.
+                    DropdownMenuItem(
+                        text = { Text("用其他应用打开") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
+                        onClick = { menuOpen = false; onOpenExternal(entry) }
+                    )
                     DropdownMenuItem(
                         text = { Text("下载到本机") },
                         leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },

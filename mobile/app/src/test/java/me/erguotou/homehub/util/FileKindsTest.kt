@@ -99,4 +99,22 @@ class FileKindsTest {
             assertEquals(kind != FileKind.OTHER, kind.viewable)
         }
     }
+
+    /**
+     * The sniff is what lets a `*.dat` / `*.bak` / bare `notes` open in the text
+     * reader instead of the system hand-off, so it must not call real text
+     * binary — nor wave a genuine binary through.
+     */
+    @Test
+    fun `binary sniff separates text from bytes`() {
+        assertFalse(FileKinds.looksBinary(""))
+        assertFalse(FileKinds.looksBinary("# 笔记\n周末买菜\n"))
+        assertFalse(FileKinds.looksBinary("{\"a\": 1}\n[server]\nhost = nas\n"))
+        // `from_utf8_lossy` turns every undecodable byte into U+FFFD, so a body
+        // that is mostly replacement characters is not something to render.
+        assertTrue(FileKinds.looksBinary("\uFFFD".repeat(200)))
+        assertTrue(FileKinds.looksBinary("PK\u0003\u0004" + "\u0000".repeat(200)))
+        // A lone NUL in an otherwise fine text file stays text.
+        assertFalse(FileKinds.looksBinary("hello\n".repeat(200) + "\u0000"))
+    }
 }

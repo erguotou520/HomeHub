@@ -127,6 +127,22 @@ object FileKinds {
     fun canExtractOfficeText(name: String): Boolean = ext(name) in OOXML
 
     /**
+     * Cheap binary sniff for a decoded body.
+     *
+     * The server hands text back through `String::from_utf8_lossy`, so every
+     * byte that is not valid UTF-8 turns into U+FFFD. A body where those (plus
+     * NULs) make up more than ~2% of the head is not something a reader should
+     * show. Shared by the text page and by the unknown-extension probe — the
+     * probe uses it to decide *whether* to open the reader at all.
+     */
+    fun looksBinary(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val probe = text.take(4096)
+        val bad = probe.count { it == '\uFFFD' || it.code == 0 }
+        return bad * 50 > probe.length
+    }
+
+    /**
      * MIME type for an `ACTION_VIEW` hand-off: the server's value when it has
      * one, otherwise a guess from the extension so office apps accept the file.
      */

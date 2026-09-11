@@ -12,11 +12,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
@@ -108,6 +111,13 @@ import java.io.File
  * rotate/flip/restore toolbar — those endpoints are file-address based, so they
  * work for any image in a registered directory.
  */
+/**
+ * Height of the translucent bar floating over the viewer (back arrow, file
+ * name, page counter, actions). Text-ish pages inset their content by this
+ * much below the status bar so the first line never hides under it.
+ */
+private val ViewerTopBarHeight = 56.dp
+
 @Composable
 fun FileViewerScreen(
     items: List<ViewerItem>,
@@ -342,7 +352,7 @@ private fun TextPage(item: ViewerItem, load: suspend (ViewerItem) -> String?) {
         val text = load(item)
         state = when {
             text == null -> Load.Failed("读取失败，请检查网络或改用其他应用打开")
-            looksBinary(text) -> Load.Failed("这看起来是二进制文件，无法作为文本显示")
+            FileKinds.looksBinary(text) -> Load.Failed("这看起来是二进制文件，无法作为文本显示")
             else -> Load.Ready(text)
         }
     }
@@ -360,20 +370,18 @@ private fun TextPage(item: ViewerItem, load: suspend (ViewerItem) -> String?) {
                     lineHeight = 19.sp,
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 14.dp, end = 14.dp, top = 64.dp, bottom = 100.dp)
+                        .statusBarsPadding()
+                        .padding(
+                            start = 14.dp,
+                            end = 14.dp,
+                            top = ViewerTopBarHeight,
+                            bottom = 100.dp
+                        )
                         .verticalScroll(rememberScrollState())
                 )
             }
         }
     }
-}
-
-/** Cheap binary sniff: lots of U+FFFD means `from_utf8_lossy` mangled it. */
-private fun looksBinary(text: String): Boolean {
-    if (text.isEmpty()) return false
-    val probe = text.take(4096)
-    val bad = probe.count { it == '\uFFFD' || it.code == 0 }
-    return bad * 50 > probe.length
 }
 
 // ────────────────────────────────── pdf ───────────────────────────────────
@@ -442,9 +450,16 @@ private fun PdfPages(file: File, onError: (String) -> Unit) {
     val targetWidthPx = with(density) { (screenWidthDp.dp.toPx() * 2f).toInt() }.coerceAtLeast(720)
     val mutex = remember(file) { Mutex() }
 
+    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = 56.dp, bottom = 96.dp, start = 6.dp, end = 6.dp),
+        contentPadding = PaddingValues(
+            top = topInset + ViewerTopBarHeight,
+            bottom = 96.dp,
+            start = 6.dp,
+            end = 6.dp
+        ),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         items(count = renderer.pageCount) { index ->
@@ -555,7 +570,12 @@ private fun OfficePage(
                 )
             }
             is Load.Failed -> MessageBlock(s.message, onOpenExternal)
-            is Load.Ready -> Column(modifier = Modifier.fillMaxSize()) {
+            is Load.Ready -> Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(top = ViewerTopBarHeight)
+            ) {
                 Surface(color = Color.Black.copy(alpha = 0.55f)) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),

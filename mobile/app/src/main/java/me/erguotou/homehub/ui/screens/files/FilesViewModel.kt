@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.data.DirEntry
 import me.erguotou.homehub.data.FileEntry
@@ -31,10 +33,15 @@ fun kindOf(entry: FileEntry): FileKind =
 data class ViewerItem(
     val dir: String,
     val relPath: String,
-    val entry: FileEntry
+    val entry: FileEntry,
+    /**
+     * Set when the viewer was opened with a kind worked out at open time rather
+     * than from the name — an unknown extension we just proved to be text.
+     */
+    val overrideKind: FileKind? = null
 ) {
     val name: String get() = entry.name
-    val kind: FileKind get() = kindOf(entry)
+    val kind: FileKind get() = overrideKind ?: kindOf(entry)
 }
 
 /**
@@ -66,7 +73,12 @@ data class FilesUiState(
      * Bumped after a server-side image edit. Raw URLs carry it as `?v=`, the
      * only way to make Coil/ExoPlayer forget the pre-edit bytes.
      */
-    val version: Long = 0
+    val version: Long = 0,
+    /** A background upload (WorkManager tag "upload") is running. */
+    val uploadActive: Boolean = false,
+    /** Progress of that upload: file `uploadIndex` of `uploadTotal`. */
+    val uploadIndex: Int = 0,
+    val uploadTotal: Int = 0
 )
 
 class FilesViewModel(app: Application) : AndroidViewModel(app) {
@@ -84,6 +96,47 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
             }.onFailure { e ->
                 _state.value = _state.value.copy(error = e.message)
             }
+        }
+        observeUploads()
+    }
+
+    /**
+     * The uploader runs in WorkManager, out of this screen's lifetime. Mirror
+     * its per-file progress into the UI, and when the last worker finishes,
+     * refresh the listing so freshly uploaded files show up without the user
+     * pulling the folder open again.
+     */
+    private fun observeUploads() {
+        viewModelScope.launch {
+            WorkManager.getInstance(getApplication())
+                .getWorkInfosByTagFlow("upload")
+                .collect { infos ->
+                    val active = infos.filter { !it.state.isFinished }
+                    val running = active.firstOrNull()
+                    val progress = running?.progress
+                    val wasActive = _state.value.uploadActive
+                    _state.value = _state.value.copy(
+                        uploadActive = active.isNotEmpty(),
+                        uploadIndex = progress?.getInt(UploadWorker.KEY_PROGRESS_INDEX, 0) ?: 0,
+                        uploadTotal = progress?.getInt(UploadWorker.KEY_PROGRESS_TOTAL, 0) ?: 0
+                    )
+                    if (wasActive && active.isEmpty()) {
+                        val done = infos.firstOrNull { it.state == WorkInfo.State.SUCCEEDED }
+                        val out = done?.outputData
+                        val uploaded = out?.getInt(UploadWorker.KEY_RESULT_UPLOADED, 0) ?: 0
+                        val dup = out?.getInt(UploadWorker.KEY_RESULT_DUPLICATES, 0) ?: 0
+                        val failed = out?.getInt(UploadWorker.KEY_RESULT_FAILURES, 0) ?: 0
+                        _state.value = _state.value.copy(
+                            message = "上传完成 $uploaded 项" +
+                                (if (dup > 0) " · 重复 $dup" else "") +
+                                (if (failed > 0) " · 失败 $failed" else "")
+                        )
+                        // Re-list whatever folder is on screen now.
+                        _state.value.currentDir?.let { d ->
+                            open(d, _state.value.currentPath)
+                        }
+                    }
+                }
         }
     }
 
@@ -141,24 +194,66 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         when (kindOf(entry)) {
-            FileKind.OTHER -> openExternally(entry)
+            FileKind.OTHER -> openUnknown(entry)
             else -> openViewer(entry)
         }
     }
 
-    /** Open the full screen viewer on [entry], paging over its siblings. */
-    fun openViewer(entry: FileEntry) {
+    /**
+     * An extension we do not recognise is not automatically a binary: `*.dat`,
+     * `*.bak`, a bare `notes` or a `.conf` on a NAS are plain text more often
+     * than not. Take one look before giving up — read the head, and if it
+     * decodes cleanly open the same text reader `*.txt` gets. Anything else
+     * still goes to the system app, exactly as before.
+     */
+    private fun openUnknown(entry: FileEntry) {
+        val dir = _state.value.currentDir ?: return
+        val rel = relPath(entry)
+        // The server's /api/documents preview stops at 1 MiB, so a bigger file
+        // could never be shown in full. Don't spend a request on it.
+        if ((entry.size ?: 0) > MaxTextPreviewBytes) {
+            openExternally(entry)
+            return
+        }
+        viewModelScope.launch {
+            val text = readDocument(dir, rel)
+            if (text != null &&
+                _state.value.currentDir == dir &&
+                !FileKinds.looksBinary(text) &&
+                text.isNotBlank()
+            ) {
+                openViewer(entry, textRead = true)
+            } else {
+                openExternally(entry)
+            }
+        }
+    }
+
+    /**
+     * Open the full screen viewer on [entry], paging over its siblings. When
+     * [textRead] is set the entry joins the pager as a text page even though
+     * its extension would normally rule it out — see [openUnknown].
+     */
+    fun openViewer(entry: FileEntry, textRead: Boolean = false) {
         val dir = _state.value.currentDir ?: return
         val base = _state.value.currentPath
         val items = _state.value.entries
-            .filter { !it.isDir && kindOf(it).viewable }
-            .map { ViewerItem(dir, relOf(base, it.name), it) }
+            .filter { !it.isDir && (kindOf(it).viewable || (textRead && it.path == entry.path)) }
+            .map { e ->
+                ViewerItem(
+                    dir = dir,
+                    relPath = relOf(base, e.name),
+                    entry = e,
+                    overrideKind = if (textRead && e.path == entry.path) FileKind.TEXT else null
+                )
+            }
         if (items.isEmpty()) return
         val index = items.indexOfFirst { it.entry.path == entry.path }.coerceAtLeast(0)
         _state.value = _state.value.copy(viewer = ViewerSession(items, index))
     }
 
     fun dismissViewer() {
+        textCache.clear()
         _state.value = _state.value.copy(viewer = null)
         // The viewer's own scratch copies (PDF/Office) are nobody else's
         // business — drop them now. Hand-off copies are aged out instead.
@@ -166,7 +261,21 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun loadText(item: ViewerItem): String? =
-        repository.readDocument(item.dir, item.relPath).getOrNull()
+        readDocument(item.dir, item.relPath)
+
+    /**
+     * `/api/documents` body, memoised per path: a probed file is fetched once to
+     * decide it is text and again to render it, which this collapses into one.
+     */
+    private val textCache = mutableMapOf<String, String>()
+
+    private suspend fun readDocument(dir: String, rel: String): String? {
+        val key = "$dir/$rel"
+        textCache[key]?.let { return it }
+        val text = repository.readDocument(dir, rel).getOrNull() ?: return null
+        textCache[key] = text
+        return text
+    }
 
     /**
      * Bytes for the parses that need random access (PDF, Office). Bounded by
@@ -321,17 +430,6 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
 
     // ─────────────────────────── mutations ───────────────────────────
 
-    fun mkdir(name: String) {
-        val dir = _state.value.currentDir ?: return
-        viewModelScope.launch {
-            repository.mkdir(dir, _state.value.currentPath, name)
-                .onSuccess { open(dir, _state.value.currentPath) }
-                .onFailure { e ->
-                    _state.value = _state.value.copy(message = e.message ?: "新建目录失败")
-                }
-        }
-    }
-
     fun rename(entry: FileEntry, newName: String) {
         val dir = _state.value.currentDir ?: return
         val source = relPath(entry)
@@ -401,10 +499,20 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
 
     // ─────────────────────────── misc ───────────────────────────
 
-    /** Kick off the WorkManager uploader for the picked URIs. */
-    fun upload(uris: List<Uri>, deleteLocal: Boolean) {
-        val dir = _state.value.currentDir ?: return
-        UploadWorker.enqueue(getApplication(), dir, _state.value.currentPath, uris, deleteLocal)
+    /**
+     * Kick off the WorkManager uploader for the picked URIs into `dir/path`.
+     * The target comes from the directory picker, which defaults to the folder
+     * the user is standing in but lets them drop the files anywhere.
+     */
+    fun upload(dir: String, path: String, uris: List<Uri>, deleteLocal: Boolean) {
+        if (dir.isBlank() || uris.isEmpty()) return
+        UploadWorker.enqueue(
+            getApplication(),
+            dir,
+            path.trim().trim('/'),
+            uris,
+            deleteLocal
+        )
     }
 
     /** Fetch the file bytes so the UI can write them through the SAF. */
@@ -425,5 +533,8 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         /** Above this a whole-file byte array is not safe to hold in memory. */
         const val MaxHandoffBytes = 80L * 1024 * 1024
+
+        /** Mirror of the server's `/api/documents` preview cap. */
+        const val MaxTextPreviewBytes = 1L * 1024 * 1024
     }
 }

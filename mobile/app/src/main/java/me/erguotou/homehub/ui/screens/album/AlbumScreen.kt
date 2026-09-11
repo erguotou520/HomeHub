@@ -31,16 +31,12 @@ import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -69,7 +65,9 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.data.DirEntry
 import me.erguotou.homehub.data.PhotoItem
+import me.erguotou.homehub.data.Prefs
 import me.erguotou.homehub.data.Repository
+import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
@@ -82,8 +80,9 @@ import me.erguotou.homehub.work.UploadWorker
 fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel = viewModel()) {
     val state by vm.state.collectAsState()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val repository = remember { Repository(context) }
+    val prefs = remember { Prefs(context) }
+    val scope = rememberCoroutineScope()
 
     var viewerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var viewerList by remember { mutableStateOf(listOf<PhotoItem>()) }
@@ -109,7 +108,7 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
     var showUpload by remember { mutableStateOf(false) }
     var uploadDirs by remember { mutableStateOf<List<DirEntry>>(emptyList()) }
     var uploadDir by remember { mutableStateOf<String?>(null) }
-    var uploadSubdir by remember { mutableStateOf("") }
+    var uploadPath by remember { mutableStateOf("") }
     var pendingUploadUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showUploadConfirm by remember { mutableStateOf(false) }
     var uploadDeleteLocal by remember { mutableStateOf(false) }
@@ -140,14 +139,16 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
             },
             floatingActionButton = {
                 FloatingActionButton(onClick = {
+                    // Only album-marked directories are valid photo
+                    // destinations; the picker browses inside them.
                     scope.launch {
-                        repository.dirs().onSuccess { list ->
-                            val albumDirs = list.filter { it.marks.contains("album") }.ifEmpty { list }
-                            uploadDirs = albumDirs
-                            uploadDir = albumDirs.firstOrNull()?.name
-                            uploadSubdir = ""
-                            showUpload = true
-                        }
+                        repository.dirs().fold(
+                            onSuccess = { list ->
+                                uploadDirs = list.filter { it.marks.contains("album") }.ifEmpty { list }
+                            },
+                            onFailure = { uploadDirs = emptyList() }
+                        )
+                        showUpload = true
                     }
                 }) {
                     Icon(Icons.Default.Upload, contentDescription = "上传")
@@ -279,18 +280,25 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
     }
 
     if (showUpload) {
-        UploadTargetDialog(
+        // Exactly the same directory browser as 复制/移动到 in the 文件 tab:
+        // drill into any sub-folder (creating one inline if needed) and see
+        // what is already there before the system picker opens.
+        DirectoryPickerDialog(
+            title = "上传到相册目录",
             dirs = uploadDirs,
-            selectedDir = uploadDir,
-            subdir = uploadSubdir,
-            onDirChange = { uploadDir = it },
-            onSubdirChange = { uploadSubdir = it },
-            onConfirm = {
-                if (uploadDir != null) {
-                    showUpload = false
-                    // Photos and videos both belong in the album.
-                    pickImages.launch("image/* video/*")
-                }
+            // Reopen where the last upload landed, if anywhere.
+            initialDir = prefs.lastUploadDir.ifBlank { null },
+            initialPath = prefs.lastUploadPath,
+            confirmLabel = "选择照片/视频",
+            listFiles = { dir, path -> repository.listFiles(dir, path).getOrNull() },
+            createDir = { dir, path, name -> repository.mkdir(dir, path, name).isSuccess },
+            onConfirm = { dir, path ->
+                uploadDir = dir
+                uploadPath = path
+                prefs.rememberUploadTarget(dir, path)
+                showUpload = false
+                // Photos and videos both belong in the album.
+                pickImages.launch("image/* video/*")
             },
             onDismiss = { showUpload = false }
         )
@@ -304,9 +312,18 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
             },
             title = { Text("上传 ${pendingUploadUris.size} 个文件") },
             text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = uploadDeleteLocal, onCheckedChange = { uploadDeleteLocal = it })
-                    Text("上传完成后删除本地副本", modifier = Modifier.padding(start = 8.dp))
+                Column {
+                    Text(
+                        "目标：" + (uploadDir?.let { d -> if (uploadPath.isBlank()) d else "$d/$uploadPath" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Checkbox(checked = uploadDeleteLocal, onCheckedChange = { uploadDeleteLocal = it })
+                        Text("上传完成后删除本地副本", modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
             },
             confirmButton = {
@@ -316,7 +333,7 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                         UploadWorker.enqueue(
                             context,
                             dir,
-                            uploadSubdir.trim().trim('/'),
+                            uploadPath.trim().trim('/'),
                             pendingUploadUris,
                             uploadDeleteLocal
                         )
@@ -334,49 +351,6 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
             }
         )
     }
-}
-
-@Composable
-private fun UploadTargetDialog(
-    dirs: List<DirEntry>,
-    selectedDir: String?,
-    subdir: String,
-    onDirChange: (String) -> Unit,
-    onSubdirChange: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    var dirMenu by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("上传到相册目录") },
-        text = {
-            Column {
-                Box {
-                    OutlinedButton(onClick = { dirMenu = true }) {
-                        Text(selectedDir ?: "选择目录")
-                    }
-                    DropdownMenu(expanded = dirMenu, onDismissRequest = { dirMenu = false }) {
-                        dirs.forEach { d ->
-                            DropdownMenuItem(
-                                text = { Text(d.name) },
-                                onClick = { onDirChange(d.name); dirMenu = false }
-                            )
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = subdir,
-                    onValueChange = onSubdirChange,
-                    label = { Text("子目录（可选，自动新建）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("选择照片/视频") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
 }
 
 private fun labelOf(view: AlbumView) = when (view) {

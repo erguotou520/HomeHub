@@ -57,6 +57,20 @@
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
 
+        <!-- "用其他应用打开": a temporarily downloaded copy (cache/preview, see
+             util/TempFiles.kt) is handed out as a content:// URI, so office
+             apps and WPS can read it without any storage permission and
+             without the cache folder being world-accessible. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <service
             android:name="com.wireguard.android.backend.GoBackend$VpnService"
             android:exported="true"

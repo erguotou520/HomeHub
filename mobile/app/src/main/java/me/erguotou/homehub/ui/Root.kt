@@ -91,7 +91,7 @@ fun HomeHubRoot() {
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             NavHost(navController = navController, startDestination = Tab.Album.route) {
                 composable(Tab.Album.route) { AlbumScreen(onFullscreenChange = { fullscreen = it }) }
-                composable(Tab.Files.route) { FilesScreen() }
+                composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }
                 composable(Tab.Monitor.route) { MonitorScreen() }
                 composable(Tab.Settings.route) {
                     SettingsScreen(onOpenSetup = { navController.navigate("setup") })

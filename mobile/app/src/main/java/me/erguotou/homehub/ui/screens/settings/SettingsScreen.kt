@@ -65,6 +65,7 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
     var biometric by remember { mutableStateOf(prefs.biometricLock) }
     var deleteAfterUpload by remember { mutableStateOf(prefs.deleteAfterUpload) }
     var duplicatePolicy by remember { mutableStateOf(prefs.duplicatePolicy) }
+    var uploadTarget by remember { mutableStateOf(prefs.uploadTargetLabel()) }
     var status by remember { mutableStateOf<String?>(null) }
 
     Scaffold(topBar = { TopAppBar(title = { Text("设置") }) }) { padding ->
@@ -133,6 +134,28 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
                         onClick = { duplicatePolicy = "skip" },
                         label = { Text("跳过") }
                     )
+                }
+                // Where the last upload landed — the picker reopens here.
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "上次上传目录",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        uploadTarget.ifBlank { "未记录" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (uploadTarget.isNotBlank()) {
+                        TextButton(onClick = {
+                            prefs.forgetUploadTarget()
+                            uploadTarget = ""
+                        }) { Text("清除") }
+                    }
                 }
                 Button(
                     onClick = {

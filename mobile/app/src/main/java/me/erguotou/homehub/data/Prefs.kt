@@ -69,6 +69,35 @@ class Prefs(context: Context) {
         get() = prefs.getString(KEY_LAST_UPLOAD_DIR, "") ?: ""
         set(value) = prefs.edit().putString(KEY_LAST_UPLOAD_DIR, value).apply()
 
+    /** Sub-path inside [lastUploadDir], empty when the root itself was picked. */
+    var lastUploadPath: String
+        get() = prefs.getString(KEY_LAST_UPLOAD_PATH, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LAST_UPLOAD_PATH, value.trim('/')).apply()
+
+    /**
+     * Remember where the last upload landed, so the picker can open there next
+     * time. Passing a blank [dir] forgets the target entirely.
+     */
+    fun rememberUploadTarget(dir: String, path: String) {
+        lastUploadDir = dir.trim()
+        lastUploadPath = path
+    }
+
+    fun forgetUploadTarget() {
+        prefs.edit()
+            .remove(KEY_LAST_UPLOAD_DIR)
+            .remove(KEY_LAST_UPLOAD_PATH)
+            .apply()
+    }
+
+    /** "相册/2024/春节" style label for the remembered target; "" when unset. */
+    fun uploadTargetLabel(): String {
+        val dir = lastUploadDir
+        if (dir.isBlank()) return ""
+        val path = lastUploadPath
+        return if (path.isBlank()) dir else "$dir/$path"
+    }
+
     var frigateUrl: String
         get() = prefs.getString(KEY_FRIGATE_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_FRIGATE_URL, value.trim()).apply()
@@ -244,6 +273,7 @@ class Prefs(context: Context) {
         private const val KEY_DELETE_AFTER_UPLOAD = "delete_after_upload"
         private const val KEY_DUPLICATE_POLICY = "duplicate_policy"
         private const val KEY_LAST_UPLOAD_DIR = "last_upload_dir"
+        private const val KEY_LAST_UPLOAD_PATH = "last_upload_path"
         private const val KEY_FRIGATE_URL = "frigate_url"
 
         private const val WG_PRIVATE_KEY = "wg_private_key"

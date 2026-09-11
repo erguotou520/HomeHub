@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths the FileProvider may hand to another app.
+
+  Only the scratch folder of util/TempFiles.kt is exposed: a file opened with
+  "用其他应用打开" is written to cache/preview/handoff (never into the shared
+  Downloads) and copies are reclaimed by age (six hours) — see TempFiles.sweep.
+  cache/preview/viewer holds the in-app viewer's own PDF/Office copies and is
+  deleted as soon as the viewer closes.
+-->
+<paths>
+    <cache-path name="preview" path="preview/" />
+</paths>

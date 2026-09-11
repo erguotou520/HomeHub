@@ -4,12 +4,16 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import me.erguotou.homehub.util.TempFiles
 
 class HomeHubApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
+        // Scratch copies handed to other apps ("用其他应用打开") never outlive
+        // a session by much — reclaim whatever a kill or crash left behind.
+        TempFiles.sweep(this)
     }
 
     private fun createChannels() {

@@ -100,17 +100,32 @@ class Repository(private val context: Context) {
 
     /** Apply rotate/flip steps to a photo's bytes on the server. */
     suspend fun transformImage(photo: PhotoItem, ops: List<ImageOp>): Result<TransformResponse> =
-        runCatching {
-            api().transform(photo.dirName, photo.relPath, TransformRequest(ops))
-        }
+        transformFile(photo.dirName, photo.relPath, ops)
 
     /** Roll the pixels back to the archived pre-edit original. */
-    suspend fun restoreImage(photo: PhotoItem): Result<TransformResponse> = runCatching {
-        api().restoreImage(photo.dirName, photo.relPath)
+    suspend fun restoreImage(photo: PhotoItem): Result<TransformResponse> =
+        restoreFile(photo.dirName, photo.relPath)
+
+    suspend fun imageExif(photo: PhotoItem): Result<ImageExif> =
+        imageExifAt(photo.dirName, photo.relPath)
+
+    // The same endpoints address *any* image in a registered directory, so the
+    // 文件 tab's viewer edits files that were never indexed as album photos.
+
+    suspend fun transformFile(
+        dir: String,
+        path: String,
+        ops: List<ImageOp>
+    ): Result<TransformResponse> = runCatching {
+        api().transform(dir, path, TransformRequest(ops))
     }
 
-    suspend fun imageExif(photo: PhotoItem): Result<ImageExif> = runCatching {
-        api().imageExif(photo.dirName, photo.relPath)
+    suspend fun restoreFile(dir: String, path: String): Result<TransformResponse> = runCatching {
+        api().restoreImage(dir, path)
+    }
+
+    suspend fun imageExifAt(dir: String, path: String): Result<ImageExif> = runCatching {
+        api().imageExif(dir, path)
     }
 
     suspend fun renamePerson(id: Long, name: String): Result<Unit> = runCatching {

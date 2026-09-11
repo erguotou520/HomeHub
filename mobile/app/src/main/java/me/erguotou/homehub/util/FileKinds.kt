@@ -113,6 +113,8 @@ object FileKinds {
         }
         mimeType?.let { mime ->
             if (mime.startsWith("text/")) return FileKind.TEXT
+            // JSON/XML variants (+json, +xml) are text too.
+            if (mime.contains("json") || mime.contains("xml")) return FileKind.TEXT
             if (mime == "application/pdf") return FileKind.PDF
             if (mime.startsWith("image/")) return FileKind.IMAGE
             if (mime.startsWith("video/")) return FileKind.VIDEO

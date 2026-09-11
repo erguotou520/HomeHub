@@ -125,16 +125,23 @@ class ViewerGestureTest {
     }
 
     /**
-     * Pinch must be recognised on the video page too. PlayerView consumes its
-     * own touches, so the gesture layer sits above it; once zoomed it consumes
-     * the drag and the pager stays put.
+     * The video page deliberately has NO Compose gesture layer over the
+     * PlayerView: a full-size `pointerInput` box wins the hit test against an
+     * `AndroidView`, so every tap on the controller (play, seek bar, settings)
+     * was swallowed and videos looked unplayable. Pinch zoom is therefore a
+     * photo-only affordance, and a pinch over the video must NOT lock the
+     * pager — otherwise the swipe below would land on 1 / 2.
+     *
+     * This is the inverse of the old `pinchZoomLocksPagingOnVideo`, which
+     * asserted the pre-`e1e6c1a` behaviour and had been failing ever since the
+     * layer was removed to unbreak playback.
      */
     @Test
-    fun pinchZoomLocksPagingOnVideo() {
+    fun pinchOnVideoDoesNotLockPaging() {
         show(listOf(video(0), photo(1)))
         rule.onRoot().pinchOut()
         rule.onRoot().performTouchInput { swipeLeft() }
         rule.waitForIdle()
-        rule.onNodeWithText("1 / 2").assertIsDisplayed()
+        rule.onNodeWithText("2 / 2").assertIsDisplayed()
     }
 }

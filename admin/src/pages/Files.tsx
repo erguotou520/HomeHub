@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { DirStat, FileEntry } from '../api/types'
+import Icon from '../components/Icon'
 import ImageEditor from '../components/ImageEditor'
 
 type SortKey = 'name' | 'mtime' | 'size'
@@ -69,6 +70,9 @@ const TEXT_EXTS = new Set([
   'ts', 'tsx', 'js', 'jsx', 'rs', 'py', 'go', 'sh', 'html', 'css', 'xml', 'srt', 'ass',
 ])
 
+/** Browser-native iframe preview (served inline by the media endpoint). */
+const IFRAME_EXTS = new Set(['pdf'])
+
 function extOf(name: string): string {
   const i = name.lastIndexOf('.')
   return i >= 0 ? name.slice(i + 1).toLowerCase() : ''
@@ -77,6 +81,7 @@ function extOf(name: string): string {
 type Preview =
   | { kind: 'video'; entry: FileEntry }
   | { kind: 'audio'; entry: FileEntry }
+  | { kind: 'pdf'; entry: FileEntry }
   | { kind: 'text'; entry: FileEntry; content: string }
   | { kind: 'other'; entry: FileEntry }
 
@@ -410,6 +415,7 @@ export default function Files() {
     }
     else if (entry.media_kind === 'video') setPreview({ kind: 'video', entry })
     else if (entry.media_kind === 'music') setPreview({ kind: 'audio', entry })
+    else if (IFRAME_EXTS.has(ext)) setPreview({ kind: 'pdf', entry })
     else if (TEXT_EXTS.has(ext)) {
       api
         .get<{ content: string }>(`/api/documents/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`)
@@ -633,7 +639,7 @@ export default function Files() {
             {filtered.map((en) => (
               <button
                 key={en.path}
-                className={`file-tile${selMode && sel.has(en.path) ? ' selected' : ''}`}
+                className={`file-tile${en.is_dir ? ' dir' : ''}${selMode && sel.has(en.path) ? ' selected' : ''}`}
                 onClick={() => (selMode && !en.is_dir ? toggleSel(en.path) : open(en))}
                 title={en.name}
               >
@@ -645,7 +651,9 @@ export default function Files() {
                   )}
                 </span>
                 {selMode && !en.is_dir && (
-                  <span className="tile-check" aria-hidden="true">{sel.has(en.path) ? '✓' : ''}</span>
+                  <span className="tile-check" aria-hidden="true">
+                    {sel.has(en.path) && <Icon name="check" size={13} strokeWidth={2.6} />}
+                  </span>
                 )}
                 <span className="file-name">{en.name}</span>
                 {!en.is_dir && (
@@ -679,7 +687,7 @@ export default function Files() {
                 {filtered.map((en, idx) => (
                   <tr
                     key={en.path}
-                    className={`${selMode && sel.has(en.path) ? 'row-sel' : ''} ${idx === activeIdx ? 'row-active' : ''}`.trim() || undefined}
+                    className={`${en.is_dir ? 'row-dir' : ''} ${selMode && sel.has(en.path) ? 'row-sel' : ''} ${idx === activeIdx ? 'row-active' : ''}`.trim() || undefined}
                   >
                     {selMode && (
                       <td className="chk">
@@ -903,7 +911,11 @@ function UploadQueuePanel({
         {items.map((i) => (
           <li key={i.id} className={`up-item st-${i.status}`}>
             <span className="up-icon" aria-hidden="true">
-              {i.status === 'done' ? '✓' : i.status === 'skipped' ? '⏭' : i.status === 'error' ? '✕' : '↑'}
+              {i.status === 'done' && <Icon name="check" size={12} strokeWidth={2.4} />}
+              {i.status === 'skipped' && <Icon name="skip" size={12} strokeWidth={2.4} />}
+              {i.status === 'error' && <Icon name="x" size={12} strokeWidth={2.4} />}
+              {i.status === 'uploading' && <Icon name="upload" size={12} strokeWidth={2.4} />}
+              {i.status === 'pending' && <Icon name="clock" size={12} strokeWidth={2.4} />}
             </span>
             <span className="up-body">
               <span className="up-name truncate">{i.file.name}</span>
@@ -924,7 +936,9 @@ function UploadQueuePanel({
               <button className="op" onClick={() => onRetry(i.id)}>重试</button>
             )}
             {i.status !== 'uploading' && (
-              <button className="op" aria-label={`移除 ${i.file.name}`} onClick={() => onRemove(i.id)}>✕</button>
+              <button className="op" aria-label={`移除 ${i.file.name}`} onClick={() => onRemove(i.id)}>
+                <Icon name="x" size={13} />
+              </button>
             )}
           </li>
         ))}
@@ -942,12 +956,13 @@ const MARK_ZH: Record<string, string> = {
 }
 
 function KindIcon({ entry, small }: { entry: FileEntry; small?: boolean }) {
-  const cls = small ? 'kind kind-sm' : 'kind'
-  if (entry.is_dir) return <span className={cls} aria-hidden="true">📁</span>
-  if (entry.media_kind === 'image') return <span className={cls} aria-hidden="true">🖼️</span>
-  if (entry.media_kind === 'video') return <span className={cls} aria-hidden="true">🎬</span>
-  if (entry.media_kind === 'music') return <span className={cls} aria-hidden="true">🎵</span>
-  return <span className={cls} aria-hidden="true">📄</span>
+  const size = small ? 15 : 28
+  const cls = `${small ? 'kind kind-sm' : 'kind'}${entry.is_dir ? ' kind-dir' : ''}`
+  if (entry.is_dir) return <Icon name="folder" size={size} className={cls} />
+  if (entry.media_kind === 'image') return <Icon name="image" size={size} className={cls} />
+  if (entry.media_kind === 'video') return <Icon name="video" size={size} className={cls} />
+  if (entry.media_kind === 'music') return <Icon name="music" size={size} className={cls} />
+  return <Icon name="file" size={size} className={cls} />
 }
 
 function PreviewModal({
@@ -1009,6 +1024,13 @@ function PreviewModal({
           )}
           {preview.kind === 'audio' && (
             <audio src={mediaUrl(dir, rel(entry, dir))} controls style={{ width: '100%' }} />
+          )}
+          {preview.kind === 'pdf' && (
+            <iframe
+              src={mediaUrl(dir, rel(entry, dir))}
+              title={entry.name}
+              className="pdf-frame"
+            />
           )}
           {preview.kind === 'text' && (
             <textarea

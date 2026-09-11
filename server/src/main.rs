@@ -142,6 +142,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the admin SPA directory: `ADMIN_DIST` env wins, otherwise probe
+/// both repo layouts — started from `server/` (`../admin/dist`) or from the
+/// repo root (`admin/dist`).
+fn admin_dist() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("ADMIN_DIST") {
+        return std::path::PathBuf::from(dir);
+    }
+    for cand in ["../admin/dist", "admin/dist"] {
+        let p = std::path::PathBuf::from(cand);
+        if p.join("index.html").is_file() {
+            return p;
+        }
+    }
+    std::path::PathBuf::from("../admin/dist")
+}
+
 /// Serve the built admin SPA (single-container deployment).
 ///
 /// Set `ADMIN_DIST` to the `admin/dist` directory; when it is missing the
@@ -150,9 +166,7 @@ async fn spa_fallback(uri: axum::http::Uri) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let dist = std::path::PathBuf::from(
-        std::env::var("ADMIN_DIST").unwrap_or_else(|_| "../admin/dist".to_string()),
-    );
+    let dist = admin_dist();
     let requested = uri.path().trim_start_matches('/');
     let target = if requested.is_empty() {
         dist.join("index.html")

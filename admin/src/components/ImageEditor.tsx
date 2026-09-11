@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { FileEntry } from '../api/types'
+import Icon from './Icon'
 
 /** Encode each path segment individually so "/" separators survive. */
 function enc(path: string): string {
@@ -185,17 +186,17 @@ export default function ImageEditor({
               onClick={() => (confirmRestore ? doRestore() : setConfirmRestore(true))}
               disabled={busy}
             >
-              ↺
+              <Icon name="retry" size={15} />
             </button>
           )}
           <button className={`icon-btn${showInfo ? ' on' : ''}`} title="属性 / EXIF (I)" aria-label="属性信息" onClick={loadInfo} disabled={busy}>
-            ⓘ
+            <Icon name="info" size={15} />
           </button>
           <a className="icon-btn" href={rawUrl(dir, rel(entry, dir))} download={entry.name} title="下载" aria-label="下载原图">
-            ↓
+            <Icon name="download" size={15} />
           </a>
           <button className="icon-btn" title="关闭 (Esc)" aria-label="关闭" onClick={onClose}>
-            ✕
+            <Icon name="x" size={15} />
           </button>
         </div>
       </div>
@@ -239,15 +240,29 @@ export default function ImageEditor({
       )}
 
       <div className="viewer-bar">
-        <button onClick={() => index > 0 && onIndexChange(index - 1)} disabled={index === 0} aria-label="上一张">‹</button>
+        <button onClick={() => index > 0 && onIndexChange(index - 1)} disabled={index === 0} aria-label="上一张">
+          <Icon name="chevronRight" size={13} style={{ transform: 'rotate(180deg)' }} />
+        </button>
         <div className="zoom-group">
-          <button title="逆时针 (H)" aria-label="水平翻转" onClick={() => transform([{ op: 'flip-h' }], '已水平翻转')} disabled={busy}>⇋</button>
-          <button title="旋转 90° (R)" aria-label="旋转 90 度" onClick={() => rotate(90)} disabled={busy}>⟳</button>
-          <button title="逆时针 90°" aria-label="逆时针旋转" onClick={() => rotate(-90)} disabled={busy}>⟲</button>
-          <button title="垂直翻转 (V)" aria-label="垂直翻转" onClick={() => transform([{ op: 'flip-v' }], '已垂直翻转')} disabled={busy}>⇅</button>
-          <button title="按宽度缩放" aria-label="按宽度缩放" onClick={() => setResizeOpen(true)} disabled={busy}>⤢</button>
+          <button title="逆时针 (H)" aria-label="水平翻转" onClick={() => transform([{ op: 'flip-h' }], '已水平翻转')} disabled={busy}>
+            <Icon name="flipH" size={13} />
+          </button>
+          <button title="旋转 90° (R)" aria-label="旋转 90 度" onClick={() => rotate(90)} disabled={busy}>
+            <Icon name="rotateRight" size={13} />
+          </button>
+          <button title="逆时针 90°" aria-label="逆时针旋转" onClick={() => rotate(-90)} disabled={busy}>
+            <Icon name="rotateLeft" size={13} />
+          </button>
+          <button title="垂直翻转 (V)" aria-label="垂直翻转" onClick={() => transform([{ op: 'flip-v' }], '已垂直翻转')} disabled={busy}>
+            <Icon name="flipV" size={13} />
+          </button>
+          <button title="按宽度缩放" aria-label="按宽度缩放" onClick={() => setResizeOpen(true)} disabled={busy}>
+            <Icon name="resize" size={13} />
+          </button>
         </div>
-        <button onClick={() => index < entries.length - 1 && onIndexChange(index + 1)} disabled={index === entries.length - 1} aria-label="下一张">›</button>
+        <button onClick={() => index < entries.length - 1 && onIndexChange(index + 1)} disabled={index === entries.length - 1} aria-label="下一张">
+          <Icon name="chevronRight" size={13} />
+        </button>
       </div>
 
       {showInfo && exif && (

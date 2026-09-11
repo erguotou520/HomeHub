@@ -1,22 +1,65 @@
 :root {
   color-scheme: dark;
+
+  /* ── color: surfaces (blue-tinted graphite, never pure black) ── */
   --bg: #0d1017;
   --bg-soft: #12161f;
   --panel: #171c27;
   --panel-hover: #1c2230;
   --border: #232a3a;
   --border-soft: #1c2230;
+
+  /* ── color: ink ── */
   --text: #e8ebf2;
   --muted: #8f99ad;
+  --text-muted: var(--muted);
+
+  /* ── color: brand & status ── */
   --accent: #5b8cff;
   --accent-2: #8b5bff;
   --accent-soft: rgba(91, 140, 255, 0.14);
   --ok: #3ecf8e;
   --warn: #ffb020;
   --err: #ff5c5c;
-  --radius: 12px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  --danger: #e5484d;
   --grad: linear-gradient(135deg, #5b8cff 0%, #8b5bff 100%);
+
+  /* ── spacing scale (4px base) ── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ── radius scale ── */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --radius: var(--r-lg);
+
+  /* ── elevation ── */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.28);
+
+  /* ── type scale ── */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fs-num: 24px;
+
+  /* ── controls ── */
+  --ctl-h: 32px;
+  --ctl-h-sm: 26px;
+  --surface-2: rgba(127, 127, 127, 0.08);
+
+  /* ── motion ── */
+  --t-fast: 0.15s;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -190,8 +233,8 @@ a {
   background: var(--panel);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
-  padding: 18px;
-  margin-bottom: 16px;
+  padding: 14px;
+  margin-bottom: 14px;
   box-shadow: var(--shadow);
 }
 
@@ -354,9 +397,9 @@ table {
 th,
 td {
   text-align: left;
-  padding: 10px 10px;
+  padding: 5px 8px;
   border-bottom: 1px solid var(--border-soft);
-  font-size: 13px;
+  font-size: var(--fs-md);
   vertical-align: middle;
 }
 
@@ -522,9 +565,9 @@ label {
 
 .toolbar {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
   flex-wrap: wrap;
 }
 
@@ -563,6 +606,49 @@ label {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Person group tile: a neutral wrapper holding the thumb button + rename. */
+.person-tile {
+  position: relative;
+}
+
+.person-tile .person-thumb {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.person-rename {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--r-xs);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+  z-index: 2;
+}
+
+.person-tile:hover .person-rename,
+.person-rename:focus-visible {
+  opacity: 1;
+}
+
+.person-rename:hover {
+  background: var(--accent);
 }
 
 .section-title {
@@ -697,6 +783,21 @@ label {
   border: 1px solid var(--border-soft);
 }
 
+/* Permanent count badge on geo cluster circles. */
+.geo-count {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  padding: 0;
+}
+.geo-count::before {
+  display: none;
+}
+
 .empty {
   padding: 36px;
   text-align: center;
@@ -760,15 +861,15 @@ button:focus:not(:focus-visible) {
 
 .files-layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 16px;
+  grid-template-columns: 216px 1fr;
+  gap: var(--sp-3);
   align-items: start;
 }
 
 .files-side {
   position: sticky;
   top: 16px;
-  padding: 14px 10px;
+  padding: 12px 8px;
 }
 
 .files-side h2 {
@@ -783,11 +884,11 @@ button:focus:not(:focus-visible) {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 5px;
+  gap: 4px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 7px 10px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text);
   text-align: left;
@@ -878,14 +979,72 @@ button:focus:not(:focus-visible) {
   white-space: nowrap;
 }
 
+/* Type glyphs: SVG icons tinted by media context, dimmed for plain files. */
 .kind {
-  font-size: 18px;
-  line-height: 1;
+  display: inline-flex;
+  color: var(--muted);
   flex: 0 0 auto;
 }
 
 .kind-sm {
-  font-size: 15px;
+  color: var(--muted);
+}
+
+/* Directories read as warm amber against cool blue media glyphs. */
+.kind-dir {
+  color: var(--warn);
+}
+
+/* Directory rows: bolder name, faint tint to separate from files. */
+tr.row-dir .file-link {
+  font-weight: 600;
+  color: var(--text);
+}
+
+tr.row-dir td:first-child {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+/* Grid view: directory tiles get the warm treatment too. */
+.file-tile.dir .file-thumb {
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-soft));
+  color: var(--warn);
+}
+
+.file-tile.dir .file-thumb .kind {
+  color: var(--warn);
+}
+
+.file-tile.dir .file-name {
+  font-weight: 600;
+}
+
+.file-tile.dir:hover {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.file-link:hover .kind {
+  color: var(--accent);
+}
+
+.file-link:hover .kind-dir {
+  color: var(--warn);
+}
+
+/* Grid tiles give the glyph a quiet stage instead of an emoji blob. */
+.file-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-soft));
+  overflow: hidden;
+  color: var(--accent);
+}
+
+.file-thumb .kind {
+  color: color-mix(in srgb, var(--accent) 72%, var(--muted));
 }
 
 td.num,
@@ -927,16 +1086,16 @@ th.ops {
 .files-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .file-tile {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
+  gap: 5px;
+  padding: 6px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-md);
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
@@ -948,17 +1107,6 @@ th.ops {
   border-color: var(--accent);
   box-shadow: var(--shadow);
   transform: translateY(-1px);
-}
-
-.file-thumb {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  aspect-ratio: 1;
-  border-radius: 8px;
-  background: var(--bg-soft);
-  overflow: hidden;
-  font-size: 30px;
 }
 
 .file-thumb img {
@@ -1016,11 +1164,14 @@ th.ops {
   position: absolute;
   left: 6px;
   bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: rgba(0, 0, 0, 0.72);
   color: #fff;
   font-size: 11px;
   padding: 2px 7px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
@@ -1130,7 +1281,17 @@ button.danger {
 .preview-body video {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+}
+
+/* PDF iframe fills the whole preview body. */
+.pdf-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: #fff;
 }
 
 .preview-body textarea {
@@ -1426,10 +1587,10 @@ button.danger {
   position: absolute;
   right: 2px;
   bottom: 2px;
-  font-size: 9px;
-  line-height: 1;
-  padding: 2px 3px;
-  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  padding: 3px 4px;
+  border-radius: var(--r-xs);
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
 }
@@ -1919,14 +2080,14 @@ input[type='radio'] {
 /* ─────────────────────── files page enhancements ─────────────────────── */
 
 .toolbar .search-input {
-  width: 180px;
-  height: 30px;
+  width: 170px;
+  height: var(--ctl-h);
   padding: 0 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
   color: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
 }
 

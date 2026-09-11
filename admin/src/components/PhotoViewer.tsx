@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { PhotoItem } from '../api/types'
+import Icon from './Icon'
 
 interface Props {
   items: PhotoItem[]
@@ -371,7 +372,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
               aria-label={slideshow ? '停止播放' : '自动播放'}
               title={slideshow ? '停止播放' : '自动播放'}
             >
-              {slideshow ? '⏸' : '▶'}
+              <Icon name={slideshow ? 'pause' : 'play'} size={14} />
             </button>
           )}
           <button
@@ -380,7 +381,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
             aria-label="切换信息面板"
             title="信息 (I)"
           >
-            ⓘ
+            <Icon name="info" size={14} />
           </button>
           <button
             className={`icon-btn${showFilm ? ' on' : ''}`}
@@ -388,13 +389,13 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
             aria-label="切换缩略图条"
             title="缩略图条"
           >
-            ▤
+            <Icon name="filmstrip" size={14} />
           </button>
           <button className="icon-btn" onClick={() => void toggleFullscreen()} aria-label="全屏" title="全屏 (F)">
-            ⛶
+            <Icon name="fullscreen" size={14} />
           </button>
           <button className="icon-btn" onClick={onClose} aria-label="关闭查看器" title="关闭 (Esc)">
-            ×
+            <Icon name="x" size={14} />
           </button>
         </div>
       </div>
@@ -409,7 +410,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
           }}
           aria-label="上一张"
         >
-          ‹
+          <Icon name="chevronRight" size={22} style={{ transform: 'rotate(180deg)' }} />
         </button>
       )}
       {safeIndex < items.length - 1 && (
@@ -421,7 +422,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
           }}
           aria-label="下一张"
         >
-          ›
+          <Icon name="chevronRight" size={22} />
         </button>
       )}
 
@@ -548,7 +549,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
               aria-label="缩小"
               title="缩小 (-)"
             >
-              −
+              <Icon name="zoomOut" size={13} />
             </button>
             <button className="zoom-value" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }) }} title="重置 (0)">
               {Math.round(zoom * 100)}%
@@ -558,25 +559,35 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
               aria-label="放大"
               title="放大 (+)"
             >
-              +
+              <Icon name="zoomIn" size={13} />
             </button>
           </div>
         )}
 
         {!isVideo && (
           <>
-            <button onClick={() => rotate(270)} disabled={busy} title="向左旋转">↺ 左转</button>
-            <button onClick={() => rotate(90)} disabled={busy} title="向右旋转 (R)">↻ 右转</button>
-            <button onClick={() => transform([{ op: 'flip-h' }], '已水平翻转')} disabled={busy} title="水平翻转 (H)">⇋</button>
-            <button onClick={() => transform([{ op: 'flip-v' }], '已垂直翻转')} disabled={busy} title="垂直翻转 (V)">⇅</button>
-            <button onClick={() => setResizeOpen(true)} disabled={busy} title="按宽度缩放">⤢</button>
+            <button onClick={() => rotate(270)} disabled={busy} title="向左旋转">
+              <Icon name="rotateLeft" size={13} /> 左转
+            </button>
+            <button onClick={() => rotate(90)} disabled={busy} title="向右旋转 (R)">
+              <Icon name="rotateRight" size={13} /> 右转
+            </button>
+            <button onClick={() => transform([{ op: 'flip-h' }], '已水平翻转')} disabled={busy} title="水平翻转 (H)">
+              <Icon name="flipH" size={13} />
+            </button>
+            <button onClick={() => transform([{ op: 'flip-v' }], '已垂直翻转')} disabled={busy} title="垂直翻转 (V)">
+              <Icon name="flipV" size={13} />
+            </button>
+            <button onClick={() => setResizeOpen(true)} disabled={busy} title="按宽度缩放">
+              <Icon name="resize" size={13} />
+            </button>
             {hasOriginal && (
               <button
                 onClick={() => (confirmRestore ? doRestore() : setConfirmRestore(true))}
                 disabled={busy}
                 title="还原原图"
               >
-                ↺ 还原
+                <Icon name="rotateLeft" size={13} /> 还原
               </button>
             )}
           </>
@@ -605,7 +616,11 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
               aria-current={i === safeIndex}
             >
               <img src={absolute(p.thumb_url)} alt={p.name} loading="lazy" />
-              {p.media_kind === 'video' && <span className="film-badge">▶</span>}
+              {p.media_kind === 'video' && (
+                <span className="film-badge">
+                  <Icon name="play" size={9} strokeWidth={2.2} />
+                </span>
+              )}
             </button>
           ))}
         </div>

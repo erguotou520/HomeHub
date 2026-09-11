@@ -40,7 +40,7 @@ function transformLng(x: number, y: number): number {
   let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x))
   ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0
   ret += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0
-  ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0
+  ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0
   return ret
 }
 
@@ -58,16 +58,46 @@ export function wgs84ToGcj02(lat: number, lng: number): [number, number] {
   return [lat + dLat, lng + dLng]
 }
 
-interface GeoMapProps {
-  points: GeoPoint[]
-  onSelect: (point: GeoPoint) => void
+/**
+ * Map zoom -> server aggregation grid, in degrees (~0.01° ≈ 1 km).
+ * Each step keeps roughly one cluster per few screen tiles, so zooming in
+ * progressively splits merged counts into finer groups.
+ */
+function precisionForZoom(zoom: number): number {
+  if (zoom <= 3) return 0.5
+  if (zoom <= 5) return 0.2
+  if (zoom <= 7) return 0.1
+  if (zoom <= 9) return 0.05
+  if (zoom <= 11) return 0.02
+  if (zoom <= 13) return 0.005
+  return 0.001
 }
 
-export default function GeoMap({ points, onSelect }: GeoMapProps) {
+interface GeoMapProps {
+  points: GeoPoint[]
+  /** Current aggregation grid; the parent refetches when it changes. */
+  precision: number
+  onSelect: (point: GeoPoint) => void
+  onPrecisionChange: (precision: number) => void
+}
+
+export default function GeoMap({ points, precision, onSelect, onPrecisionChange }: GeoMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
+  /** Fit bounds only on the very first load — never fight the user's zoom. */
+  const didFitRef = useRef(false)
+  /** Latest values for the zoom handler, so it never needs re-binding. */
+  const precisionRef = useRef(precision)
+  const onPrecisionChangeRef = useRef(onPrecisionChange)
   const [style, setStyle] = useState<'road' | 'satellite'>('road')
+
+  useEffect(() => {
+    precisionRef.current = precision
+  }, [precision])
+  useEffect(() => {
+    onPrecisionChangeRef.current = onPrecisionChange
+  }, [onPrecisionChange])
 
   // Create the map once.
   useEffect(() => {
@@ -75,10 +105,17 @@ export default function GeoMap({ points, onSelect }: GeoMapProps) {
     const map = L.map(containerRef.current, { zoomControl: true }).setView([35.0, 105.0], 4)
     mapRef.current = map
     layerRef.current = L.layerGroup().addTo(map)
+    // Crossing a precision step while zooming asks the parent to re-aggregate.
+    const syncPrecision = () => {
+      const next = precisionForZoom(map.getZoom())
+      if (next !== precisionRef.current) onPrecisionChangeRef.current(next)
+    }
+    map.on('zoomend', syncPrecision)
     return () => {
       map.remove()
       mapRef.current = null
       layerRef.current = null
+      didFitRef.current = false
     }
   }, [])
 
@@ -98,7 +135,8 @@ export default function GeoMap({ points, onSelect }: GeoMapProps) {
     }
   }, [style])
 
-  // Redraw the aggregated markers.
+  // Redraw the aggregated markers. Each circle always shows its merged
+  // count; zooming in refetches at a finer grid so counts split apart.
   useEffect(() => {
     const map = mapRef.current
     const layer = layerRef.current
@@ -109,7 +147,7 @@ export default function GeoMap({ points, onSelect }: GeoMapProps) {
     const bounds = L.latLngBounds([])
     for (const point of points) {
       const [lat, lng] = wgs84ToGcj02(point.lat, point.lng)
-      const radius = 10 + 14 * Math.sqrt(point.count / max)
+      const radius = 13 + 15 * Math.sqrt(point.count / max)
       const marker = L.circleMarker([lat, lng], {
         radius,
         color: '#4f8cff',
@@ -117,15 +155,17 @@ export default function GeoMap({ points, onSelect }: GeoMapProps) {
         fillColor: '#4f8cff',
         fillOpacity: 0.35,
       })
-      marker.bindTooltip(
-        `${point.lat.toFixed(4)}, ${point.lng.toFixed(4)}<br/>${point.count} 张`,
-        { direction: 'top' },
-      )
+      marker.bindTooltip(String(point.count), {
+        permanent: true,
+        direction: 'center',
+        className: 'geo-count',
+      })
       marker.on('click', () => onSelect(point))
       marker.addTo(layer)
       bounds.extend([lat, lng])
     }
-    if (points.length > 0) {
+    if (points.length > 0 && !didFitRef.current) {
+      didFitRef.current = true
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 })
     }
   }, [points, onSelect])
@@ -143,7 +183,7 @@ export default function GeoMap({ points, onSelect }: GeoMapProps) {
           </button>
         ))}
         <span className="muted" style={{ fontSize: 12 }}>
-          点击圆点查看该地点的照片（共 {points.length} 个地点）
+          共 {points.length} 个地点 · 聚合粒度约 {(precision * 111).toFixed(0)} 公里，缩放地图自动展开
         </span>
       </div>
       <div className="map" ref={containerRef} />

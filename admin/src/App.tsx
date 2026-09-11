@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useAuth } from './state/auth'
 import { useAutoLabelIds } from './hooks/useAutoLabelIds'
+import Icon, { type IconName } from './components/Icon'
 import Login from './pages/Login'
 import Home from './pages/Home'
 import Dirs from './pages/Dirs'
@@ -14,36 +15,17 @@ import Trash from './pages/Trash'
 import Monitor from './pages/Monitor'
 import SystemPage from './pages/System'
 
-function Ico({ d }: { d: string }) {
-  return (
-    <svg
-      className="nav-ico"
-      viewBox="0 0 24 24"
-      width="17"
-      height="17"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d={d} />
-    </svg>
-  )
-}
-
-const NAV = [
-  { to: '/', label: '概览', ico: 'M3 12l9-8 9 8M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10' },
-  { to: '/album', label: '相册', ico: 'M4 5h16v14H4zM4 15l4-4 3 3 4-5 5 6M8.5 8.5h.01' },
-  { to: '/files', label: '文件管理', ico: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5M9 13h6M9 17h4' },
-  { to: '/search', label: '全局搜索', ico: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5' },
-  { to: '/dirs', label: '目录管理', ico: 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z' },
-  { to: '/tasks', label: '任务中心', ico: 'M4 6h16M4 12h16M4 18h10' },
-  { to: '/peers', label: '身份审计', ico: 'M12 3a5 5 0 100 10 5 5 0 000-10zM4 21c0-4 3.5-6 8-6s8 2 8 6' },
-  { to: '/trash', label: '回收站', ico: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6' },
-  { to: '/monitor', label: '监控', ico: 'M2 8a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2zM18 10l4-3v10l-4-3' },
-  { to: '/system', label: '系统信息', ico: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 8h.01M11 12h1v4h1' },
+const NAV: { to: string; label: string; ico: IconName }[] = [
+  { to: '/', label: '概览', ico: 'home' },
+  { to: '/album', label: '相册', ico: 'image' },
+  { to: '/files', label: '文件管理', ico: 'folder' },
+  { to: '/search', label: '全局搜索', ico: 'search' },
+  { to: '/dirs', label: '目录管理', ico: 'folderTree' },
+  { to: '/tasks', label: '任务中心', ico: 'tasks' },
+  { to: '/peers', label: '身份审计', ico: 'users' },
+  { to: '/trash', label: '回收站', ico: 'trash' },
+  { to: '/monitor', label: '监控', ico: 'monitor' },
+  { to: '/system', label: '系统信息', ico: 'info' },
 ]
 
 const TITLES: Record<string, string> = {
@@ -91,7 +73,7 @@ export default function App() {
               end={item.to === '/'}
               className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
             >
-              <Ico d={item.ico} />
+              <Icon name={item.ico} size={17} className="nav-ico" />
               {item.label}
             </NavLink>
           ))}

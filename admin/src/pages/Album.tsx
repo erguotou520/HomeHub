@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, formatBytes } from '../api/client'
 import type { DirStat, GeoPoint, PhotoItem, Stats, TimelineGroup } from '../api/types'
+import Icon from '../components/Icon'
 import { PhotoViewer } from '../components/PhotoViewer'
 import GeoMap from '../components/GeoMap'
 
@@ -40,6 +41,8 @@ export default function Album() {
   const [dirs, setDirs] = useState<DirStat[]>([])
   const [items, setItems] = useState<PhotoItem[]>([])
   const [points, setPoints] = useState<GeoPoint[]>([])
+  /** Server aggregation grid for the geo view; the map bumps it while zooming. */
+  const [geoPrecision, setGeoPrecision] = useState(0.02)
   const [tag, setTag] = useState<string | null>(null)
   const [personId, setPersonId] = useState<number | null>(null)
   const [dirId, setDirId] = useState<number | null>(null)
@@ -130,6 +133,19 @@ export default function Album() {
     [loadList],
   )
 
+  /** Rename a person group in place; reloads the list so the caption updates. */
+  async function renamePerson(p: { id: number; name?: string | null }) {
+    const name = window.prompt('分组名称', p.name ?? '')
+    if (!name?.trim()) return
+    try {
+      await api.post(`/api/photos/people/${p.id}/rename`, { name: name.trim() })
+      const res = await api.get<{ people: typeof people }>('/api/photos/people')
+      setPeople(res.people)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '重命名失败')
+    }
+  }
+
   useEffect(() => {
     setError(null)
     if (view === 'timeline') {
@@ -155,13 +171,17 @@ export default function Album() {
         .get<{ dirs: DirStat[] }>('/api/admin/dirs')
         .then((r) => setDirs(r.dirs))
         .catch((e: Error) => setError(e.message))
-    } else if (view === 'geo') {
-      api
-        .get<{ points: GeoPoint[] }>('/api/photos/geo', { precision: 0.02 })
-        .then((r) => setPoints(r.points))
-        .catch((e: Error) => setError(e.message))
     }
   }, [view])
+
+  /** Geo view refetches on its own: every precision change (map zoom) re-aggregates. */
+  useEffect(() => {
+    if (view !== 'geo') return
+    api
+      .get<{ points: GeoPoint[] }>('/api/photos/geo', { precision: geoPrecision })
+      .then((r) => setPoints(r.points))
+      .catch((e: Error) => setError(e.message))
+  }, [view, geoPrecision])
 
   useEffect(() => {
     api
@@ -320,22 +340,31 @@ export default function Album() {
           {people.length === 0 && <div className="empty">还没有人脸分组</div>}
           <div className="photo-grid">
             {people.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className="tile"
-                onClick={() => setPersonId(p.id)}
-                aria-label={`人物 ${p.name ?? p.id}，${p.photo_count} 张`}
-              >
-                {p.cover_url ? (
-                  <img src={p.cover_url} alt="" loading="lazy" />
-                ) : (
-                  <span className="empty">无封面</span>
-                )}
-                <span className="tile-caption">
-                  {p.name ?? `未命名 ${p.id}`} · {p.photo_count}
-                </span>
-              </button>
+              <div key={p.id} className="person-tile">
+                <button
+                  type="button"
+                  className="tile person-thumb"
+                  onClick={() => setPersonId(p.id)}
+                  aria-label={`人物 ${p.name ?? p.id}，${p.photo_count} 张`}
+                >
+                  {p.cover_url ? (
+                    <img src={p.cover_url} alt="" loading="lazy" />
+                  ) : (
+                    <span className="empty">无封面</span>
+                  )}
+                  <span className="tile-caption">
+                    {p.name ?? `未命名 ${p.id}`} · {p.photo_count}
+                  </span>
+                </button>
+                <button
+                  className="person-rename"
+                  onClick={() => void renamePerson(p)}
+                  title="重命名分组"
+                  aria-label={`重命名 ${p.name ?? `未命名 ${p.id}`}`}
+                >
+                  <Icon name="edit" size={12} />
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -347,7 +376,14 @@ export default function Album() {
           {points.length === 0 && !loading && (
             <div className="empty">没有带 GPS 信息的照片</div>
           )}
-          {points.length > 0 && <GeoMap points={points} onSelect={showGeo} />}
+          {points.length > 0 && (
+            <GeoMap
+              points={points}
+              precision={geoPrecision}
+              onSelect={showGeo}
+              onPrecisionChange={setGeoPrecision}
+            />
+          )}
         </div>
       )}
 
@@ -433,7 +469,7 @@ export function PhotoGrid({ items, onOpen }: { items: PhotoItem[]; onOpen: (i: n
           <img src={p.thumb_url} alt={p.name} loading="lazy" width="256" height="256" />
           {p.media_kind === 'video' && (
             <span className="tile-video" aria-hidden="true">
-              ▶ {formatDuration(p.duration_ms)}
+              <Icon name="play" size={10} strokeWidth={2.2} /> {formatDuration(p.duration_ms)}
             </span>
           )}
         </button>

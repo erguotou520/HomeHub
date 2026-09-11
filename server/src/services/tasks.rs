@@ -604,12 +604,27 @@ impl TaskQueue {
     }
 
     /// Re-run every failed task.
+    ///
+    /// Failed rows can pile up as duplicates (same kind + payload) when a file
+    /// keeps failing across scans, and flipping them all to `pending` in one
+    /// UPDATE would collide with the partial unique index
+    /// `idx_tasks_dedup (kind, payload) WHERE status IN ('pending','running')`.
+    /// Deduplicate first — keeping the newest row per (kind, payload) — then
+    /// flip the survivors, in one transaction.
     pub async fn retry_failed(&self) -> Result<u64> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            "DELETE FROM tasks WHERE status = 'failed' AND id NOT IN \
+             (SELECT MAX(id) FROM tasks WHERE status = 'failed' GROUP BY kind, payload)",
+        )
+        .execute(&mut *tx)
+        .await?;
         let res = sqlx::query(
             "UPDATE tasks SET status = 'pending', attempts = 0, error = NULL, scheduled_at = 0 WHERE status = 'failed'",
         )
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         self.wake.notify_one();
         Ok(res.rows_affected())
     }

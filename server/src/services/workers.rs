@@ -226,6 +226,15 @@ pub async fn run_detection(
                     .await?;
             }
         }
+        // The DELETE above can orphan groups: either all their faces are gone,
+        // or only their representative face (stale `representative_face_id`
+        // dangling). Sweep them so the people view stays free of empty shells.
+        sqlx::query(
+            "DELETE FROM person_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM faces WHERE group_id IS NOT NULL) \
+             OR representative_face_id NOT IN (SELECT id FROM faces)",
+        )
+        .execute(&db)
+        .await?;
     }
 
     if let Some(updated) = crate::services::photos::get(queue.db(), asset.id).await? {

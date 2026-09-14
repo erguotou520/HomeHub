@@ -46,6 +46,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.erguotou.homehub.data.Prefs
 import me.erguotou.homehub.security.AppLock
+import me.erguotou.homehub.security.GatePolicy
 import me.erguotou.homehub.ui.HomeHubRoot
 import me.erguotou.homehub.ui.screens.setup.SetupScreen
 import me.erguotou.homehub.ui.theme.HomeHubTheme
@@ -139,22 +140,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Re-lock once the app has been in the background for longer than
-     * [LOCK_GRACE_MS]. The grace window keeps short hops (file picker, share
-     * sheet, permission dialog) from locking the user out mid-task.
+     * Re-lock once the app has been in the background for longer than the
+     * grace window. All the deciding happens in [GatePolicy] so the rule can
+     * be tested without a fingerprint; this only feeds it the clock and the
+     * lifecycle callbacks.
      */
     private fun observeForegroundRelock() {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 val since = backgroundedAt
                 backgroundedAt = 0L
-                if (since > 0L && prefs.biometricLock && !AppLock.locked &&
-                    // Answering the prompt can itself outlast the grace
-                    // window, and the prompt can push the Activity to the
-                    // background. A fresh unlock always beats the timestamp
-                    // taken on the way out, so the user is never asked twice.
-                    since >= AppLock.lastUnlockAt() &&
-                    SystemClock.elapsedRealtime() - since >= LOCK_GRACE_MS
+                if (GatePolicy.shouldRelockOnReturn(
+                        backgroundedAt = since,
+                        lastUnlockAt = AppLock.lastUnlockAt(),
+                        now = SystemClock.elapsedRealtime(),
+                        gateEnabled = prefs.biometricLock,
+                        alreadyLocked = AppLock.locked
+                    )
                 ) {
                     AppLock.lock()
                 }
@@ -218,11 +220,6 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-    }
-
-    private companion object {
-        /** How long the app may sit in the background before it re-locks. */
-        const val LOCK_GRACE_MS = 10_000L
     }
 }
 

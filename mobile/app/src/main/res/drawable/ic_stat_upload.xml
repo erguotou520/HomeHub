@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 状态栏/通知小图标：单色上传箭头（系统会按通知样式着色） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M11,16V7.83L8.41,10.41L7,9L12,4L17,9L15.59,10.41L13,7.83V16H11Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M5,18H19V20H5Z" />
+</vector>

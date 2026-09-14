@@ -150,7 +150,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
     private fun createForegroundInfo(current: Int, total: Int): ForegroundInfo {
         ensureChannel()
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_upload)
             .setContentTitle("正在上传照片")
             .setContentText("$current / $total")
             .setOngoing(true)
@@ -177,7 +177,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
             (if (duplicates > 0) " · 重复 $duplicates 项" else "") +
             (if (failures > 0) " · 失败 $failures 项" else "")
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_upload)
             .setContentTitle("上传结束")
             .setContentText(text)
             .setAutoCancel(true)

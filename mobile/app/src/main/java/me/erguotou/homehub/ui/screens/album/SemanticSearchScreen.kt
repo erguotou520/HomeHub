@@ -172,6 +172,21 @@ fun SemanticSearchScreen(
                                 photo = photo,
                                 urlResolver = vm::url
                             ) { onOpen(photo, state.results) }
+                            if (photo.mediaKind == "video") {
+                                val label = photo.durationMs?.let { ms ->
+                                    val s = (ms / 1000).toInt()
+                                    "${s / 60}:${String.format(java.util.Locale.US, "%02d", s % 60)}"
+                                } ?: "视频"
+                                Text(
+                                    text = label,
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(4.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                             state.scores[photo.id.toString()]?.let { s ->
                                 Text(
                                     text = s,

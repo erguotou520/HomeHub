@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -77,7 +78,11 @@ import me.erguotou.homehub.work.UploadWorker
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel = viewModel()) {
+fun AlbumScreen(
+    onFullscreenChange: (Boolean) -> Unit = {},
+    onOpenSemantic: () -> Unit = {},
+    vm: AlbumViewModel = viewModel()
+) {
     val state by vm.state.collectAsState()
     val context = LocalContext.current
     val repository = remember { Repository(context) }
@@ -135,6 +140,9 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
                 TopAppBar(
                     title = { Text("相册") },
                     actions = {
+                        IconButton(onClick = onOpenSemantic) {
+                            Icon(Icons.Default.Search, contentDescription = "语义搜索")
+                        }
                         IconButton(onClick = { vm.refresh() }) {
                             Icon(Icons.Default.Refresh, contentDescription = "刷新")
                         }
@@ -629,7 +637,7 @@ private fun PeopleList(
     onOpen: (me.erguotou.homehub.data.PersonGroup) -> Unit
 ) {
     if (people.isEmpty()) {
-        Empty("还没有人脸分组")
+        Empty("还没有人像分组")
         return
     }
     LazyVerticalGrid(

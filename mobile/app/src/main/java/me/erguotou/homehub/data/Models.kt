@@ -230,6 +230,14 @@ data class PhotoListResponse(
     val total: Long = 0
 )
 
+/** Natural-language semantic search result (`/api/photos/semantic`). */
+data class SemanticResponse(
+    val items: List<PhotoItem> = emptyList(),
+    val total: Long = 0,
+    /** photo_id -> similarity string (e.g. "0.557"). */
+    val scores: Map<String, String> = emptyMap()
+)
+
 data class TimelineResponse(val groups: List<TimelineGroup> = emptyList())
 data class TreeResponse(val groups: List<TreeGroup> = emptyList())
 data class TagsResponse(val tags: List<TagSummary> = emptyList())

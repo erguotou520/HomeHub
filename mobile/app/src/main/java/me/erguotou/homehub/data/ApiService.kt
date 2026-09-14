@@ -63,6 +63,15 @@ interface ApiService {
         @Query("offset") offset: Int = 0
     ): PhotoListResponse
 
+    /** Natural-language photo search (Chinese-CLIP cosine ranking). */
+    @GET("api/photos/semantic")
+    suspend fun semantic(
+        @Query("q") query: String,
+        @Query("dir_id") dirId: Long? = null,
+        @Query("year") year: Int? = null,
+        @Query("limit") limit: Int = 60
+    ): SemanticResponse
+
     @GET("api/photos/{id}")
     suspend fun photoDetail(@Path("id") id: Long): PhotoDetail
 

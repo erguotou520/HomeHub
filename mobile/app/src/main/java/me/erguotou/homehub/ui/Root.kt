@@ -19,8 +19,11 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -32,6 +35,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import me.erguotou.homehub.ui.screens.album.AlbumScreen
+import me.erguotou.homehub.ui.screens.album.PhotoViewerScreen
+import me.erguotou.homehub.ui.screens.album.SemanticSearchScreen
 import me.erguotou.homehub.ui.screens.files.FilesScreen
 import me.erguotou.homehub.ui.screens.monitor.MonitorScreen
 import me.erguotou.homehub.ui.screens.settings.SettingsScreen
@@ -90,7 +95,44 @@ fun HomeHubRoot() {
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             NavHost(navController = navController, startDestination = Tab.Album.route) {
-                composable(Tab.Album.route) { AlbumScreen(onFullscreenChange = { fullscreen = it }) }
+                composable(Tab.Album.route) {
+                    AlbumScreen(
+                        onFullscreenChange = { fullscreen = it },
+                        onOpenSemantic = { navController.navigate("album/semantic") }
+                    )
+                }
+                composable("album/semantic") {
+                    val semanticVm: me.erguotou.homehub.ui.screens.album.AlbumViewModel =
+                        androidx.lifecycle.viewmodel.compose.viewModel()
+                    var viewerPhoto by remember { mutableStateOf<me.erguotou.homehub.data.PhotoItem?>(null) }
+                    var viewerList by remember { mutableStateOf(listOf<me.erguotou.homehub.data.PhotoItem>()) }
+                    SemanticSearchScreen(
+                        onBack = { navController.popBackStack() },
+                        onFullscreenChange = { fullscreen = it },
+                        onOpen = { photo, list ->
+                            viewerList = list
+                            viewerPhoto = photo
+                        }
+                    )
+                    viewerPhoto?.let { photo ->
+                        val list = viewerList
+                        val index = list.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
+                        LaunchedEffect(photo.id) { fullscreen = true }
+                        DisposableEffect(Unit) {
+                            onDispose { fullscreen = false }
+                        }
+                        PhotoViewerScreen(
+                            photos = list,
+                            initialIndex = index,
+                            urlResolver = { semanticVm.url(it) },
+                            mediaUrlResolver = { id -> semanticVm.url("api/photos/$id/raw") },
+                            onRotate = { p, angle, done -> semanticVm.rotate(p, angle, done) },
+                            onFlip = { p, vertical, done -> semanticVm.flip(p, vertical, done) },
+                            onRestore = { p, done -> semanticVm.restore(p, done) },
+                            onDismiss = { viewerPhoto = null }
+                        )
+                    }
+                }
                 composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }
                 composable(Tab.Monitor.route) { MonitorScreen() }
                 composable(Tab.Settings.route) {

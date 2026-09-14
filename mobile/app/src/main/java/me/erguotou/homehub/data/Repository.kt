@@ -92,6 +92,10 @@ class Repository(private val context: Context) {
     /** Range-streaming URL for video playback (server resolves the path). */
     fun mediaUrl(id: Long): String = absolute("api/photos/$id/raw")
 
+    /** Natural-language semantic photo search (Chinese-CLIP). */
+    suspend fun semantic(query: String, limit: Int = 60): Result<SemanticResponse> =
+        runCatching { api().semantic(query = query, limit = limit) }
+
     suspend fun photoDetail(id: Long): Result<PhotoDetail> = runCatching { api().photoDetail(id) }
 
     // ── file-level image editing ──

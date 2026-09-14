@@ -96,7 +96,7 @@ export default function Home() {
         <Stat label="照片" value={stats.photos} to="/album" />
         <Stat label="视频" value={stats.videos ?? 0} to="/album" />
         <Stat label="已打标" value={stats.tagged} hint="AI 识别覆盖" to="/search" />
-        <Stat label="人物" value={stats.people} hint={`${stats.faces} 张人脸`} to="/album" />
+        <Stat label="人物" value={stats.people} hint={`${stats.faces} 张人像`} to="/album" />
         <Stat
           label="回收站"
           value={stats.trash.count}

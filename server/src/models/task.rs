@@ -16,6 +16,8 @@ pub enum TaskKind {
     DetectScene,
     /// Face detection + clustering.
     DetectFace,
+    /// Chinese-CLIP semantic embedding for natural-language search.
+    ClipEmbed,
     /// Lossless compression.
     Compress,
     /// (Re)read EXIF GPS / time.
@@ -44,6 +46,7 @@ impl TaskKind {
             Self::DetectObject => "detect_object",
             Self::DetectScene => "detect_scene",
             Self::DetectFace => "detect_face",
+            Self::ClipEmbed => "clip_embed",
             Self::Compress => "compress",
             Self::Geo => "geo",
             Self::Probe => "probe",
@@ -63,6 +66,7 @@ impl TaskKind {
             "detect_object" => Some(Self::DetectObject),
             "detect_scene" => Some(Self::DetectScene),
             "detect_face" => Some(Self::DetectFace),
+            "clip_embed" => Some(Self::ClipEmbed),
             "compress" => Some(Self::Compress),
             "geo" => Some(Self::Geo),
             "probe" => Some(Self::Probe),
@@ -80,7 +84,11 @@ impl TaskKind {
     pub fn is_cpu_bound(&self) -> bool {
         matches!(
             self,
-            Self::DetectObject | Self::DetectScene | Self::DetectFace | Self::DedupScan
+            Self::DetectObject
+                | Self::DetectScene
+                | Self::DetectFace
+                | Self::ClipEmbed
+                | Self::DedupScan
         )
     }
 

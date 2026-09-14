@@ -591,7 +591,13 @@ pub async fn merge_people(
     Path(id): Path<i64>,
     Json(body): Json<MergePeopleBody>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let moved = crate::services::ml::cluster::merge_groups(&state.db, body.source_id, id).await?;
+    let moved = crate::services::ml::cluster::merge_groups(
+        &state.db,
+        body.source_id,
+        id,
+        &state.config.get().runtime.ml.face,
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "moved": moved })))
 }
 

@@ -389,6 +389,9 @@ pub struct MlConfig {
     pub scene: MlSceneConfig,
     #[serde(default)]
     pub face: MlFaceConfig,
+    /// Chinese-CLIP for natural-language photo search.
+    #[serde(default)]
+    pub clip: MlClipConfig,
     /// Skip detection for images smaller than this (px, short edge).
     #[serde(rename = "min-image-size", default = "default_min_image_size")]
     pub min_image_size: u32,
@@ -396,6 +399,42 @@ pub struct MlConfig {
     pub exclude_tags: Vec<String>,
     #[serde(rename = "onnx-threads", default = "default_onnx_threads")]
     pub onnx_threads: usize,
+}
+
+/// Chinese-CLIP (RN50) encoders for semantic search: images get a 1024-d
+/// embedding at index time; queries embed text with the same space.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MlClipConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(rename = "image-model", default = "default_clip_image_model")]
+    pub image_model: String,
+    #[serde(rename = "text-model", default = "default_clip_text_model")]
+    pub text_model: String,
+    /// BERT WordPiece vocabulary shared by both encoders.
+    #[serde(default = "default_clip_vocab")]
+    pub vocab: String,
+}
+
+impl Default for MlClipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            image_model: default_clip_image_model(),
+            text_model: default_clip_text_model(),
+            vocab: default_clip_vocab(),
+        }
+    }
+}
+
+fn default_clip_image_model() -> String {
+    "models/clip-rn50-image.onnx".into()
+}
+fn default_clip_text_model() -> String {
+    "models/clip-rn50-text.onnx".into()
+}
+fn default_clip_vocab() -> String {
+    "models/clip-vocab.txt".into()
 }
 
 fn default_ml_backend() -> String {
@@ -487,6 +526,26 @@ pub struct MlFaceConfig {
     /// Max hamming distance (of a 256-bit hash) for two faces to be the same person.
     #[serde(rename = "cluster-threshold", default = "default_cluster_threshold")]
     pub cluster_threshold: u32,
+    /// Recognition model (SFace/MobileFaceNet-style, 112x112 -> embedding);
+    /// empty string disables embedding clustering (phash fallback).
+    #[serde(rename = "recognizer", default)]
+    pub recognizer: String,
+    /// Loose gate: cosine similarity against ANY group member must reach this.
+    /// Calibrated on SFace embeddings (same-person min ≈ 0.41, cross-person
+    /// max ≈ 0.33 on our test set) — do NOT copy numbers from other models
+    /// (InsightFace 512-d embeddings score much higher).
+    #[serde(rename = "match-threshold", default = "default_match_threshold")]
+    pub match_threshold: f32,
+    /// Strict gate: similarity against one of the group's dispersed
+    /// prototypes must ALSO reach this (blocks single-linkage drift).
+    #[serde(rename = "prototype-threshold", default = "default_prototype_threshold")]
+    pub prototype_threshold: f32,
+    /// Max dispersed prototype faces kept per group.
+    #[serde(rename = "prototype-count", default = "default_prototype_count")]
+    pub prototype_count: usize,
+    /// Min cosine distance between two selected prototypes (dispersion).
+    #[serde(rename = "prototype-spread", default = "default_prototype_spread")]
+    pub prototype_spread: f32,
 }
 
 fn default_face_threshold() -> f32 {
@@ -494,6 +553,18 @@ fn default_face_threshold() -> f32 {
 }
 fn default_cluster_threshold() -> u32 {
     48
+}
+fn default_match_threshold() -> f32 {
+    0.40
+}
+fn default_prototype_threshold() -> f32 {
+    0.38
+}
+fn default_prototype_count() -> usize {
+    8
+}
+fn default_prototype_spread() -> f32 {
+    0.15
 }
 
 impl Default for MlFaceConfig {
@@ -503,6 +574,11 @@ impl Default for MlFaceConfig {
             model: default_face_model(),
             threshold: default_face_threshold(),
             cluster_threshold: default_cluster_threshold(),
+            recognizer: String::new(),
+            match_threshold: default_match_threshold(),
+            prototype_threshold: default_prototype_threshold(),
+            prototype_count: default_prototype_count(),
+            prototype_spread: default_prototype_spread(),
         }
     }
 }
@@ -515,6 +591,7 @@ impl Default for MlConfig {
             object: MlModelConfig::default(),
             scene: MlSceneConfig::default(),
             face: MlFaceConfig::default(),
+            clip: MlClipConfig::default(),
             min_image_size: default_min_image_size(),
             exclude_tags: Vec::new(),
             onnx_threads: default_onnx_threads(),

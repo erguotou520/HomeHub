@@ -1,13 +1,42 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { SearchHit } from '../api/types'
+import type { PhotoItem, SearchHit } from '../api/types'
+
+type Mode = 'keyword' | 'semantic'
+
+/** ms → "1:23" style duration for the video badge. */
+function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000)
+  const m = Math.floor(s / 60)
+  return `${m}:${String(s % 60).padStart(2, '0')}`
+}
+
+interface SemanticResult {
+  items: PhotoItem[]
+  total: number
+  scores: Record<string, string>
+}
 
 export default function Search() {
   const [q, setQ] = useState('')
   const [type, setType] = useState('')
+  const [mode, setMode] = useState<Mode>('keyword')
   const [hits, setHits] = useState<SearchHit[] | null>(null)
+  const [semantic, setSemantic] = useState<SemanticResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  async function runKeyword() {
+    const res = await api.get<{ hits: SearchHit[] }>('/api/search', { q, type, limit: 200 })
+    setHits(res.hits)
+    setSemantic(null)
+  }
+
+  async function runSemantic() {
+    const res = await api.get<SemanticResult>('/api/photos/semantic', { q, limit: 60 })
+    setSemantic(res)
+    setHits(null)
+  }
 
   async function run(e?: React.FormEvent) {
     e?.preventDefault()
@@ -15,8 +44,8 @@ export default function Search() {
     setBusy(true)
     setError(null)
     try {
-      const res = await api.get<{ hits: SearchHit[] }>('/api/search', { q, type, limit: 200 })
-      setHits(res.hits)
+      if (mode === 'semantic') await runSemantic()
+      else await runKeyword()
     } catch (err) {
       setError(err instanceof Error ? err.message : '搜索失败')
     } finally {
@@ -25,36 +54,98 @@ export default function Search() {
   }
 
   useEffect(() => {
+    if (!q.trim()) {
+      setHits(null)
+      setSemantic(null)
+      return
+    }
     const t = setTimeout(() => void run(), 350)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, type])
+  }, [q, type, mode])
+
+  const count = mode === 'semantic' ? (semantic?.total ?? 0) : (hits?.length ?? 0)
 
   return (
     <div>
       <form className="toolbar" onSubmit={run}>
+        <div className="seg">
+          <button
+            type="button"
+            className={`seg-btn${mode === 'keyword' ? ' on' : ''}`}
+            onClick={() => setMode('keyword')}
+          >
+            关键字
+          </button>
+          <button
+            type="button"
+            className={`seg-btn${mode === 'semantic' ? ' on' : ''}`}
+            onClick={() => setMode('semantic')}
+          >
+            语义
+          </button>
+        </div>
         <input
           style={{ minWidth: 280 }}
-          placeholder="搜索文件名 / 标签（FTS5 + 子串回退）"
+          placeholder={
+            mode === 'semantic'
+              ? '用自然语言描述照片，如：海边玩水 / 两个白发老人 / 卡通插画'
+              : '搜索文件名 / 标签（FTS5 + 子串回退）'
+          }
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <select value={type} onChange={(e) => setType(e.target.value)}>
-          <option value="">全部</option>
-          <option value="photo">照片</option>
-          <option value="file">文件</option>
-        </select>
+        {mode === 'keyword' && (
+          <select value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="">全部</option>
+            <option value="photo">照片</option>
+            <option value="file">文件</option>
+          </select>
+        )}
         <button type="submit" disabled={busy}>
           搜索
         </button>
-        {hits && <span className="muted">命中 {hits.length} 条</span>}
+        {(hits || semantic) && <span className="muted">命中 {count} 条</span>}
       </form>
 
       {error && <div className="error">{error}</div>}
 
-      {hits && hits.length === 0 && <div className="empty">没有匹配结果</div>}
+      {mode === 'semantic' && semantic && semantic.items.length === 0 && (
+        <div className="empty">没有语义匹配的照片（需要照片先完成语义索引）</div>
+      )}
 
-      {hits && hits.length > 0 && (
+      {mode === 'semantic' && semantic && semantic.items.length > 0 && (
+        <div className="card">
+          <div className="photo-grid">
+            {semantic.items.map((p) => (
+              <div key={p.id} className="person-tile">
+                {p.thumb_url ? (
+                  <img src={p.thumb_url} alt={p.name} loading="lazy" />
+                ) : (
+                  <div className="empty" style={{ aspectRatio: '1' }}>
+                    无缩略图
+                  </div>
+                )}
+                {p.media_kind === 'video' && (
+                  <span className="video-badge">
+                    {p.duration_ms ? formatDuration(p.duration_ms) : '视频'}
+                  </span>
+                )}
+                <span className="tile-caption">
+                  {p.name}
+                  {semantic.scores[p.id] && (
+                    <span className="muted"> · {semantic.scores[p.id]}</span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mode === 'keyword' && hits && hits.length === 0 && <div className="empty">没有匹配结果</div>}
+
+      {mode === 'keyword' && hits && hits.length > 0 && (
         <div className="card">
           <table>
             <thead>
@@ -113,9 +204,8 @@ export default function Search() {
       <div className="card">
         <h2>说明</h2>
         <ul className="muted" style={{ fontSize: 13, lineHeight: 1.9 }}>
-          <li>索引覆盖：照片文件名、标签（物体/场景）、目录名；以及所有已登记目录中的文件名。</li>
-          <li>英文/数字走 FTS5 前缀匹配；中文等无法被 unicode61 分词的场景自动回退为子串匹配。</li>
-          <li>新文件在扫描入库时即写入索引，无需额外操作。</li>
+          <li>关键字：照片文件名、标签（物体/场景）、目录名，以及所有已登记目录中的文件名；英文/数字走 FTS5 前缀匹配，中文自动回退子串匹配。</li>
+          <li>语义：中文自然语言搜照片（Chinese-CLIP），如「海边玩水」「小朋友骑自行车」；新照片入库后由后台生成语义索引。</li>
         </ul>
       </div>
     </div>

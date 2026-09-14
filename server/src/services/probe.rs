@@ -57,7 +57,7 @@ struct FfprobeFormat {
 }
 
 /// Look up a binary from config, falling back to PATH.
-fn resolve(configured: &str, fallback: &str) -> Option<String> {
+pub fn resolve(configured: &str, fallback: &str) -> Option<String> {
     if !configured.is_empty() && which_exists(configured) {
         return Some(configured.to_string());
     }

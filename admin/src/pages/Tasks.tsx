@@ -7,7 +7,7 @@ const KIND_LABEL: Record<string, string> = {
   thumb: '缩略图',
   detect_object: '物体识别',
   detect_scene: '场景识别',
-  detect_face: '人脸检测',
+  detect_face: '人像检测',
   compress: '无损压缩',
   geo: 'EXIF/GPS',
   dedup_scan: '全库去重',

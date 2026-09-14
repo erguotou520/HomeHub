@@ -129,6 +129,17 @@ pub async fn run_detection(
         .width
         .unwrap_or(0)
         .min(asset.height.unwrap_or(0)) as u32;
+    // Cal/deg diagnostics: every early exit below shows up as a "ran but did
+    // nothing" task, which is invisible otherwise.
+    tracing::info!(
+        "run_detection {:?} {}: min_side {}, gate {} (ml.enabled={}, face.enabled={})",
+        kind,
+        payload.rel_path,
+        min_side,
+        ml.min_image_size,
+        ml.enabled,
+        ml.face.enabled
+    );
     if min_side > 0 && min_side < ml.min_image_size {
         return Ok(());
     }
@@ -208,9 +219,13 @@ pub async fn run_detection(
             .await?;
         let now = crate::db::now();
         for face in faces {
+            let emb_blob: Option<Vec<u8>> = face
+                .embedding
+                .as_ref()
+                .map(|v| v.iter().flat_map(|f| f.to_le_bytes()).collect());
             let face_id: i64 = sqlx::query_scalar(
-                "INSERT INTO faces (photo_id, box_x, box_y, box_w, box_h, phash, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO faces (photo_id, box_x, box_y, box_w, box_h, phash, embedding, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(photo_id)
             .bind(face.x as f64)
@@ -218,11 +233,16 @@ pub async fn run_detection(
             .bind(face.w as f64)
             .bind(face.h as f64)
             .bind(&face.hash)
+            .bind(&emb_blob)
             .bind(now)
             .fetch_one(&db)
             .await?;
-            if !face.hash.is_empty() {
-                crate::services::ml::cluster::assign_group(&db, face_id, &face.hash, &face_cfg)
+            if !face.hash.is_empty() || emb_blob.is_some() {
+                let signals = crate::services::ml::cluster::FaceSignals {
+                    phash: if face.hash.is_empty() { None } else { Some(face.hash.clone()) },
+                    embedding: emb_blob,
+                };
+                crate::services::ml::cluster::assign_group(&db, face_id, &signals, &face_cfg)
                     .await?;
             }
         }
@@ -323,5 +343,137 @@ pub async fn run_compression(queue: &TaskQueue, payload: &FileTaskPayload) -> Re
         result.original_size,
         result.new_size
     );
+    Ok(())
+}
+
+/// Extract one representative frame per scene via ffmpeg scene detection:
+/// the very first frame plus the first frame after each detected cut
+/// (`scene > 0.3`), capped at 10 scenes. Photos never reach this path.
+#[cfg(feature = "onnx")]
+fn extract_scene_frames(src: &str, tmp: &std::path::Path, ffmpeg_path: &str) -> Result<Vec<std::path::PathBuf>> {
+    std::fs::create_dir_all(tmp).context("create scene tmp dir")?;
+    let Some(bin) = crate::services::probe::resolve(ffmpeg_path, "ffmpeg") else {
+        anyhow::bail!("ffmpeg not available");
+    };
+    let pattern = tmp.join("scene_%03d.jpg");
+    let output = std::process::Command::new(bin)
+        .args([
+            "-y",
+            "-v", "error",
+            "-i", src,
+            "-vf", "select='eq(n,0)+gt(scene,0.3)',scale='min(480,iw)':-2",
+            "-fps_mode", "vfr",
+            "-frames:v", "10",
+        ])
+        .arg(pattern.to_string_lossy().as_ref())
+        .output()
+        .context("spawn ffmpeg")?;
+    if !output.status.success() {
+        anyhow::bail!("ffmpeg scene extraction failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(tmp)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|e| e == "jpg").unwrap_or(false))
+        .collect();
+    frames.sort();
+    if frames.is_empty() {
+        anyhow::bail!("scene extraction produced no frames");
+    }
+    Ok(frames)
+}
+
+/// Chinese-CLIP semantic embedding: encode one photo, persist it in
+/// `photo_embeddings` and mirror it into the in-memory search store.
+pub async fn run_clip_embed(queue: &TaskQueue, payload: &FileTaskPayload) -> Result<()> {
+    #[cfg(feature = "onnx")]
+    {
+        let Some(clip) = queue.clip.clone() else {
+            return Ok(()); // clip disabled: task should not have been queued
+        };
+        let (_dir, full) = resolve(queue, payload)?;
+        if !full.exists() {
+            anyhow::bail!("file missing: {}", full.display());
+        }
+        let Some(asset) = load_photo(queue, payload).await? else {
+            anyhow::bail!("photo not indexed: {}", payload.rel_path);
+        };
+
+        // Scene-aware path: one embedding per detected scene of a video.
+        if asset.media_kind == "video" {
+            let ffmpeg_path = queue.config().runtime.video.ffmpeg_path.clone();
+            let src = full.to_string_lossy().to_string();
+            let tmp = std::env::temp_dir().join(format!("homehub-scenes-{}", asset.id));
+
+            let clip2 = clip.clone();
+            let tmp2 = tmp.clone();
+            let embs = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
+                let scenes = extract_scene_frames(&src, &tmp2, &ffmpeg_path)?;
+                let mut out = Vec::with_capacity(scenes.len());
+                for frame in scenes {
+                    let img = image::open(&frame).context("decode scene frame")?;
+                    out.push(clip2.embed_image(&img)?);
+                }
+                Ok(out)
+            })
+            .await??;
+
+            // Scene count can change between runs: clear old rows everywhere.
+            sqlx::query("DELETE FROM photo_embeddings WHERE photo_id = ? AND model = ?")
+                .bind(asset.id)
+                .bind(crate::services::embedding_store::MODEL_NAME)
+                .execute(queue.db())
+                .await?;
+            let _ = queue.embeddings.remove_photo(asset.id);
+            let dim = crate::services::embedding_store::EMBED_DIM;
+            for (scene, emb) in embs.iter().enumerate() {
+                let blob: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
+                sqlx::query(
+                    "INSERT INTO photo_embeddings (photo_id, model, dimension, dtype, embedding, scene) \
+                     VALUES (?, ?, ?, 'f32', ?, ?)",
+                )
+                .bind(asset.id)
+                .bind(crate::services::embedding_store::MODEL_NAME)
+                .bind(dim as i64)
+                .bind(&blob)
+                .bind(scene as i64)
+                .execute(queue.db())
+                .await?;
+                if let Err(e) = queue.embeddings.upsert(asset.id, scene, emb) {
+                    tracing::warn!("embedding store upsert failed for {} scene {scene}: {e}", payload.rel_path);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+            tracing::debug!("clip embedded {} ({} scenes)", payload.rel_path, embs.len());
+            return Ok(());
+        }
+
+        let path = full.clone();
+        let orientation = asset.orientation as u32;
+        let (emb, model, dim) = tokio::task::spawn_blocking(move || -> Result<(Vec<f32>, String, usize)> {
+            let img = image::open(&path).context("decode image")?;
+            let img = crate::services::hash::apply_orientation(img, orientation);
+            let emb = clip.embed_image(&img)?;
+            let dim = emb.len();
+            Ok((emb, crate::services::embedding_store::MODEL_NAME.to_string(), dim))
+        })
+        .await??;
+
+        let blob: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
+        sqlx::query(
+            "INSERT INTO photo_embeddings (photo_id, model, dimension, dtype, embedding, scene) \
+             VALUES (?, ?, ?, 'f32', ?, 0) \
+             ON CONFLICT (photo_id, model, scene) DO UPDATE SET dimension = excluded.dimension, embedding = excluded.embedding",
+        )
+        .bind(asset.id)
+        .bind(&model)
+        .bind(dim as i64)
+        .bind(&blob)
+        .execute(queue.db())
+        .await?;
+        if let Err(e) = queue.embeddings.upsert(asset.id, 0, &emb) {
+            tracing::warn!("embedding store upsert failed for {}: {e}", payload.rel_path);
+        }
+        tracing::debug!("clip embedded {} ({}d)", payload.rel_path, dim);
+    }
     Ok(())
 }

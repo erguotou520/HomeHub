@@ -85,7 +85,50 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("registered {} directories", registry.all().len());
 
     let detector = services::ml::build(&config.runtime.ml, &config.global.data_dir);
-    let queue = TaskQueue::new(pool.clone(), registry.clone(), store.clone(), detector);
+
+    // Chinese-CLIP encoders + in-memory embedding store for semantic search.
+    #[cfg(feature = "onnx")]
+    let clip = {
+        let ml = &config.runtime.ml;
+        if ml.clip.enabled {
+            match services::ml::clip::ClipEncoder::new(
+                &ml.clip,
+                ml.onnx_threads,
+                std::path::Path::new(&config.global.data_dir),
+            ) {
+                Ok(c) => {
+                    tracing::info!("clip encoders loaded ({}d)", services::embedding_store::EMBED_DIM);
+                    Some(std::sync::Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!("clip unavailable ({}), semantic search disabled", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    let embeddings = std::sync::Arc::new(services::embedding_store::EmbeddingStore::new(
+        services::embedding_store::EMBED_DIM,
+    ));
+    // Warm the in-memory index from SQLite (persistence layer is not the hot path).
+    match embeddings.preload(&pool).await {
+        Ok(n) if n > 0 => tracing::info!("embedding store preloaded {} vectors", n),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("embedding preload failed: {e}"),
+    }
+
+    let queue = TaskQueue::new(
+        pool.clone(),
+        registry.clone(),
+        store.clone(),
+        detector,
+        #[cfg(feature = "onnx")]
+        clip,
+        embeddings,
+    );
 
     let audit_writer = services::audit::spawn(pool.clone(), &config);
 

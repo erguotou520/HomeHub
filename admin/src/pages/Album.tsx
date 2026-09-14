@@ -47,6 +47,10 @@ export default function Album() {
   const [personId, setPersonId] = useState<number | null>(null)
   const [dirId, setDirId] = useState<number | null>(null)
   const [geoLabel, setGeoLabel] = useState<string | null>(null)
+  /** Person-group rename dialog target (id + current name). */
+  const [renameTarget, setRenameTarget] = useState<{ id: number; name?: string | null } | null>(null)
+  /** Merge dialog: target group absorbing others. */
+  const [mergeTarget, setMergeTarget] = useState<{ id: number; name?: string | null } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [viewer, setViewer] = useState<{ items: PhotoItem[]; index: number } | null>(null)
@@ -133,16 +137,32 @@ export default function Album() {
     [loadList],
   )
 
-  /** Rename a person group in place; reloads the list so the caption updates. */
-  async function renamePerson(p: { id: number; name?: string | null }) {
-    const name = window.prompt('分组名称', p.name ?? '')
-    if (!name?.trim()) return
+  /** Rename a person group via the in-app dialog (not window.prompt). */
+  async function submitRename(id: number, name: string) {
     try {
-      await api.post(`/api/photos/people/${p.id}/rename`, { name: name.trim() })
+      await api.post(`/api/photos/people/${id}/rename`, { name })
       const res = await api.get<{ people: typeof people }>('/api/photos/people')
       setPeople(res.people)
     } catch (e) {
       setError(e instanceof Error ? e.message : '重命名失败')
+    } finally {
+      setRenameTarget(null)
+    }
+  }
+
+  /** Merge `sourceIds` into the target group, then reload the people list. */
+  async function submitMerge(targetId: number, sourceIds: number[]) {
+    try {
+      for (const sid of sourceIds) {
+        if (sid === targetId) continue
+        await api.post(`/api/admin/people/${targetId}/merge`, { source_id: sid })
+      }
+      const res = await api.get<{ people: typeof people }>('/api/photos/people')
+      setPeople(res.people)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '合并失败')
+    } finally {
+      setMergeTarget(null)
     }
   }
 
@@ -337,7 +357,7 @@ export default function Album() {
       {view === 'people' && (
         <div className="card">
           <h2>人物分组</h2>
-          {people.length === 0 && <div className="empty">还没有人脸分组</div>}
+          {people.length === 0 && <div className="empty">还没有人像分组</div>}
           <div className="photo-grid">
             {people.map((p) => (
               <div key={p.id} className="person-tile">
@@ -358,12 +378,22 @@ export default function Album() {
                 </button>
                 <button
                   className="person-rename"
-                  onClick={() => void renamePerson(p)}
+                  onClick={() => setRenameTarget({ id: p.id, name: p.name })}
                   title="重命名分组"
                   aria-label={`重命名 ${p.name ?? `未命名 ${p.id}`}`}
                 >
                   <Icon name="edit" size={12} />
                 </button>
+                {people.length > 1 && (
+                  <button
+                    className="person-merge"
+                    onClick={() => setMergeTarget({ id: p.id, name: p.name })}
+                    title="合并其他分组到此人物"
+                    aria-label={`合并到 ${p.name ?? `未命名 ${p.id}`}`}
+                  >
+                    <Icon name="layers" size={12} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -410,6 +440,23 @@ export default function Album() {
         </div>
       )}
 
+      {renameTarget && (
+        <RenameDialog
+          initial={renameTarget.name ?? ''}
+          onCancel={() => setRenameTarget(null)}
+          onSubmit={(name) => void submitRename(renameTarget.id, name)}
+        />
+      )}
+
+      {mergeTarget && (
+        <MergeDialog
+          groups={people.filter((g) => g.id !== mergeTarget.id)}
+          targetName={mergeTarget.name ?? `未命名 ${mergeTarget.id}`}
+          onCancel={() => setMergeTarget(null)}
+          onSubmit={(ids) => void submitMerge(mergeTarget.id, ids)}
+        />
+      )}
+
       {viewer && viewer.items.length > 0 && (
         <PhotoViewer
           items={viewer.items}
@@ -450,6 +497,108 @@ function Stat({ label, value }: { label: string; value: number | string }) {
     <div className="stat">
       <div className="label">{label}</div>
       <div className="value">{value}</div>
+    </div>
+  )
+}
+
+/** Pick other groups to merge into one person ("宁分勿并"的兜底操作). */
+function MergeDialog({
+  groups,
+  targetName,
+  onCancel,
+  onSubmit,
+}: {
+  groups: { id: number; name?: string | null; photo_count: number }[]
+  targetName: string
+  onCancel: () => void
+  onSubmit: (ids: number[]) => void
+}) {
+  const [picked, setPicked] = useState<Set<number>>(new Set())
+  const toggle = (id: number) =>
+    setPicked((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="合并人物分组"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3>合并到「{targetName}」</h3>
+        <p className="muted" style={{ fontSize: 13 }}>
+          勾选要并入的其他分组（可多选），合并后不可自动撤销。
+        </p>
+        <div className="merge-list">
+          {groups.map((g) => (
+            <label key={g.id} className="merge-item">
+              <input type="checkbox" checked={picked.has(g.id)} onChange={() => toggle(g.id)} />
+              <span>
+                {g.name ?? `未命名 ${g.id}`} · {g.photo_count} 张
+              </span>
+            </label>
+          ))}
+          {groups.length === 0 && <div className="empty">没有其他分组</div>}
+        </div>
+        <div className="modal-foot">
+          <button className="ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button onClick={() => onSubmit([...picked])} disabled={picked.size === 0}>
+            合并 {picked.size > 0 ? `${picked.size} 组` : ''}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** In-app prompt replacement for renaming a person group. */
+function RenameDialog({
+  initial,
+  onCancel,
+  onSubmit,
+}: {
+  initial: string
+  onCancel: () => void
+  onSubmit: (name: string) => void
+}) {
+  const [value, setValue] = useState(initial)
+  const valid = value.trim().length > 0
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="重命名分组"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3>重命名分组</h3>
+        <label className="field">
+          <span>分组名称</span>
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && valid) onSubmit(value.trim())
+            }}
+            autoFocus
+            onFocus={(e) => e.target.select()}
+          />
+        </label>
+        <div className="modal-foot">
+          <button className="ghost" onClick={onCancel}>取消</button>
+          <button onClick={() => onSubmit(value.trim())} disabled={!valid}>
+            保存
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

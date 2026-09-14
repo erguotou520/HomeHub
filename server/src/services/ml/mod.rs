@@ -12,6 +12,8 @@ pub mod cluster;
 pub mod stub;
 
 #[cfg(feature = "onnx")]
+pub mod clip;
+#[cfg(feature = "onnx")]
 pub mod onnx;
 
 use anyhow::Result;
@@ -34,8 +36,12 @@ pub struct FaceBox {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    /// Perceptual hash of the cropped face, used for clustering.
+    /// Perceptual hash of the cropped face (fallback clustering signal).
     pub hash: String,
+    /// Recognition embedding (128-d, unit length not required) when a
+    /// recognizer model is configured; cosine similarity clusters same-person
+    /// faces far more reliably than the phash above.
+    pub embedding: Option<Vec<f32>>,
 }
 
 pub trait Detector: Send + Sync {

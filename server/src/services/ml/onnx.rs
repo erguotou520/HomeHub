@@ -47,6 +47,7 @@ pub struct OnnxDetector {
     object: Option<Mutex<Loaded>>,
     face: Option<Mutex<Loaded>>,
     scene: Option<Mutex<Loaded>>,
+    recognizer: Option<Mutex<Loaded>>,
     labels: Vec<String>,
     scene_labels: Vec<String>,
     /// `runtime.ml.face.threshold` — was previously read from config but never
@@ -76,6 +77,19 @@ impl OnnxDetector {
             config.onnx_threads,
             data_dir,
         )?;
+        // Recognizer (SFace-style 112x112 -> embedding) is optional; missing
+        // model just means clustering falls back to phash.
+        let recognizer = if config.face.recognizer.is_empty() {
+            None
+        } else {
+            match load_session(&config.face.recognizer, true, config.onnx_threads, data_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("face recognizer unavailable ({}); clustering falls back to phash", e);
+                    None
+                }
+            }
+        };
         let mut scene_labels = load_labels(&config.scene.labels, data_dir).unwrap_or_default();
         if scene.is_some() && scene_labels.is_empty() {
             tracing::warn!(
@@ -102,6 +116,7 @@ impl OnnxDetector {
             object: object.map(Mutex::new),
             face: face.map(Mutex::new),
             scene: scene.map(Mutex::new),
+            recognizer: recognizer.map(Mutex::new),
             labels,
             scene_labels,
             face_threshold: config.face.threshold,
@@ -336,16 +351,75 @@ impl Detector for OnnxDetector {
                 continue;
             }
             let crop = crop_normalised(image, &r);
+            let embedding = self
+                .recognizer
+                .as_ref()
+                .and_then(|sess| embed_crop(image, &r.box_x, &r.box_y, &r.box_w, &r.box_h, sess).ok())
+                .flatten();
             faces.push(FaceBox {
                 x: r.box_x,
                 y: r.box_y,
                 w: r.box_w,
                 h: r.box_h,
                 hash: image_hash(&crop, 16),
+                embedding,
             });
         }
         Ok(faces)
     }
+}
+
+/// Square-margin crop around a normalised face box, resized to 112x112 raw
+/// BGR 0-255 (SFace normalises in-graph) and run through the recognizer.
+fn embed_crop(
+    image: &DynamicImage,
+    nx: &f32,
+    ny: &f32,
+    nw: &f32,
+    nh: &f32,
+    session: &Mutex<Loaded>,
+) -> Result<Option<Vec<f32>>> {
+    const EMBED_SIZE: u32 = 112;
+    const MARGIN: f32 = 0.2;
+    let (iw, ih) = image.dimensions();
+    if iw == 0 || ih == 0 {
+        return Ok(None);
+    }
+    let (iwf, ihf) = (iw as f32, ih as f32);
+    let cx = (nx + nw / 2.0) * iwf;
+    let cy = (ny + nh / 2.0) * ihf;
+    let side = (nw * iwf).max(nh * ihf) * (1.0 + MARGIN);
+    if side < 16.0 {
+        return Ok(None);
+    }
+    let l = (cx - side / 2.0).floor().max(0.0) as i64;
+    let t = (cy - side / 2.0).floor().max(0.0) as i64;
+    let r = ((cx + side / 2.0).ceil() as i64).min(iw as i64);
+    let b = ((cy + side / 2.0).ceil() as i64).min(ih as i64);
+    let (cw, ch) = ((r - l) as u32, (b - t) as u32);
+    if cw < 8 || ch < 8 {
+        return Ok(None);
+    }
+    let crop = DynamicImage::ImageRgba8(image.view(l as u32, t as u32, cw, ch).to_image())
+        .resize_exact(EMBED_SIZE, EMBED_SIZE, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+
+    // SFace/MobileFaceNet: raw BGR 0-255, NCHW; (x-127.5)/128 is in-graph.
+    let mut data = vec![0f32; (EMBED_SIZE * EMBED_SIZE * 3) as usize];
+    for (x, y, px) in crop.enumerate_pixels() {
+        let idx = (y * EMBED_SIZE + x) as usize;
+        data[idx] = px[2] as f32; // B
+        data[112 * 112 + idx] = px[1] as f32; // G
+        data[2 * 112 * 112 + idx] = px[0] as f32; // R
+    }
+    let tensor = Tensor::from_array(([1usize, 3, EMBED_SIZE as usize, EMBED_SIZE as usize], data))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (shape, out) = run(&mut *session.lock().map_err(|e| anyhow::anyhow!("{e}"))?, tensor)?;
+    if shape.last() != Some(&128) || out.len() != 128 {
+        // Not the expected recognizer layout; treat as unavailable.
+        return Ok(None);
+    }
+    Ok(Some(out))
 }
 
 struct RawDetection {

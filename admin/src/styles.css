@@ -651,6 +651,73 @@ label {
   background: var(--accent);
 }
 
+/* Semantic-search video badge: duration pill on the tile corner. */
+.video-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.person-merge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--r-xs);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+  z-index: 2;
+}
+
+.person-tile:hover .person-merge,
+.person-merge:focus-visible {
+  opacity: 1;
+}
+
+.person-merge:hover {
+  background: var(--accent-2);
+}
+
+/* Merge-dialog group checklist. */
+.merge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 10px 0;
+}
+
+.merge-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: var(--fs-md);
+}
+
+.merge-item:hover {
+  background: var(--panel-hover);
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -1415,6 +1482,7 @@ button.danger {
 
 .viewer .viewer-top-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex: none;
 }
@@ -1424,11 +1492,15 @@ button.danger {
   height: 34px;
   display: grid;
   place-items: center;
+  /* Kill the global button padding (8px 16px): it crushes the content box of
+     a fixed 34px square to a 2px sliver and the glyph drifts off-centre. */
+  padding: 0;
   border: none;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
   font-size: 15px;
+  line-height: 1;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }

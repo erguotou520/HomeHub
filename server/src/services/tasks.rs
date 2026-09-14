@@ -30,6 +30,11 @@ pub struct TaskQueue {
     db: Db,
     registry: DirRegistry,
     detector: Arc<dyn crate::services::ml::Detector>,
+    /// Chinese-CLIP encoders for semantic search (None when disabled/unavailable).
+    #[cfg(feature = "onnx")]
+    pub clip: Option<Arc<crate::services::ml::clip::ClipEncoder>>,
+    /// In-memory mirror of `photo_embeddings` (hot search path).
+    pub embeddings: Arc<crate::services::embedding_store::EmbeddingStore>,
     store: Arc<crate::config::ConfigStore>,
     /// Per-kind concurrency limiters, created lazily.
     semaphores: Arc<std::sync::RwLock<HashMap<String, Arc<Semaphore>>>>,
@@ -43,12 +48,17 @@ impl TaskQueue {
         registry: DirRegistry,
         store: Arc<crate::config::ConfigStore>,
         detector: Arc<dyn crate::services::ml::Detector>,
+        #[cfg(feature = "onnx")] clip: Option<Arc<crate::services::ml::clip::ClipEncoder>>,
+        embeddings: Arc<crate::services::embedding_store::EmbeddingStore>,
     ) -> Self {
         Self {
             db,
             registry,
             store,
             detector,
+            #[cfg(feature = "onnx")]
+            clip,
+            embeddings,
             semaphores: Arc::new(std::sync::RwLock::new(HashMap::new())),
             running: Arc::new(AtomicU32::new(0)),
             wake: Arc::new(Notify::new()),
@@ -161,13 +171,17 @@ impl TaskQueue {
             TaskKind::DetectObject,
             TaskKind::DetectScene,
             TaskKind::DetectFace,
+            TaskKind::ClipEmbed,
             TaskKind::Compress,
         ] {
             // Detection only makes sense for content that actually changed.
             if !changed
                 && matches!(
                     kind,
-                    TaskKind::DetectObject | TaskKind::DetectScene | TaskKind::DetectFace
+                    TaskKind::DetectObject
+                        | TaskKind::DetectScene
+                        | TaskKind::DetectFace
+                        | TaskKind::ClipEmbed
                 )
             {
                 continue;
@@ -175,10 +189,17 @@ impl TaskQueue {
             if !self.config().runtime.compression.enabled && kind == TaskKind::Compress {
                 continue;
             }
+            // CLIP embedding has its own switch under `ml.clip.enabled`.
+            if kind == TaskKind::ClipEmbed && !self.config().runtime.ml.clip.enabled {
+                continue;
+            }
             if !self.config().runtime.ml.enabled
                 && matches!(
                     kind,
-                    TaskKind::DetectObject | TaskKind::DetectScene | TaskKind::DetectFace
+                    TaskKind::DetectObject
+                        | TaskKind::DetectScene
+                        | TaskKind::DetectFace
+                        | TaskKind::ClipEmbed
                 )
             {
                 continue;
@@ -189,8 +210,10 @@ impl TaskQueue {
         Ok(n)
     }
 
-    /// Enqueue thumb + probe for one video (no detection/compression — the
-    /// YOLO models only understand still images).
+    /// Enqueue thumb + probe (+ semantic embedding) for one video. Detection
+    /// and compression stay photo-only (YOLO models understand stills), but
+    /// the CLIP encoders work on extracted scene frames, so videos with
+    /// `ml.clip.enabled` join the semantic index too.
     pub async fn enqueue_video_pipeline(
         &self,
         dir_id: i64,
@@ -203,7 +226,11 @@ impl TaskQueue {
             priority,
         })?;
         let mut n = 0;
-        for kind in [TaskKind::Thumb, TaskKind::Probe] {
+        let mut kinds = vec![TaskKind::Thumb, TaskKind::Probe];
+        if self.config().runtime.ml.enabled && self.config().runtime.ml.clip.enabled {
+            kinds.push(TaskKind::ClipEmbed);
+        }
+        for kind in kinds {
             self.enqueue(kind, &payload, priority).await?;
             n += 1;
         }
@@ -432,6 +459,10 @@ impl TaskQueue {
             TaskKind::DetectObject | TaskKind::DetectScene | TaskKind::DetectFace => {
                 let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;
                 crate::services::workers::run_detection(self, kind, &payload).await
+            }
+            TaskKind::ClipEmbed => {
+                let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;
+                crate::services::workers::run_clip_embed(self, &payload).await
             }
             TaskKind::Compress => {
                 let payload: FileTaskPayload = serde_json::from_str(&task.payload)?;

@@ -22,6 +22,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/photos/people", get(people))
         .route("/api/photos/geo", get(geo))
         .route("/api/photos/list", get(list))
+        .route("/api/photos/semantic", get(semantic))
         .route("/api/photos/:id", get(detail))
         .route("/api/photos/:id/raw", get(raw))
         .route("/api/photos/:id/rotate", post(rotate))
@@ -175,6 +176,184 @@ pub async fn list(
     )
     .await?;
     Ok(Json(serde_json::json!({ "items": items, "total": total })))
+}
+
+#[derive(Deserialize)]
+pub struct SemanticQuery {
+    /// Natural-language query, e.g. "海边骑自行车".
+    pub q: Option<String>,
+    pub dir_id: Option<i64>,
+    /// EXIF year filter (combined with the CLIP ranking, pre-filter).
+    pub year: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+/// Natural-language photo search: text → Chinese-CLIP embedding → cosine scan
+/// over the in-memory store. `dir_id`/`year` narrow the candidate set first
+/// (EXIF/directory filters), similarity orders the survivors.
+pub async fn semantic(
+    State(state): State<AppState>,
+    Query(q): Query<SemanticQuery>,
+) -> Result<Json<serde_json::Value>, crate::models::AppError> {
+    let query = q.q.unwrap_or_default();
+    if query.trim().is_empty() {
+        return Ok(Json(serde_json::json!({ "items": [], "total": 0, "scores": {} })));
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        return Err(crate::models::AppError::BadRequest(
+            "semantic search requires a build with the `onnx` feature".into(),
+        ));
+    }
+    #[cfg(feature = "onnx")]
+    {
+        use std::collections::HashMap;
+
+        let Some(clip) = state.queue.clip.clone() else {
+            return Err(crate::models::AppError::BadRequest(
+                "semantic search disabled: clip model not loaded (enable ml.clip in settings)".into(),
+            ));
+        };
+
+        // 1. Text embedding (CPU-bound → blocking pool).
+        let text = query.clone();
+        let qvec = tokio::task::spawn_blocking(move || clip.embed_text(&text))
+            .await
+            .map_err(|e| crate::models::AppError::Internal(e.to_string()))?
+            .map_err(|e| crate::models::AppError::Internal(format!("text encode failed: {e}")))?;
+
+        // 2. Candidate filter (EXIF year / directory) before the vector scan.
+        let mut allowed: Option<HashMap<i64, ()>> = None;
+        if q.dir_id.is_some() || q.year.is_some() {
+            let rows: Vec<(i64,)> = match (q.dir_id, q.year) {
+                (Some(dir), Some(year)) => {
+                    let (from, to) = year_bounds(year)?;
+                    sqlx::query_as(
+                        "SELECT id FROM photo_assets WHERE status='ok' AND dir_id=? AND taken_at>=? AND taken_at<?",
+                    )
+                    .bind(dir)
+                    .bind(from)
+                    .bind(to)
+                    .fetch_all(&state.db)
+                    .await?
+                }
+                (Some(dir), None) => {
+                    sqlx::query_as("SELECT id FROM photo_assets WHERE status='ok' AND dir_id=?")
+                        .bind(dir)
+                        .fetch_all(&state.db)
+                        .await?
+                }
+                (None, Some(year)) => {
+                    let (from, to) = year_bounds(year)?;
+                    sqlx::query_as(
+                        "SELECT id FROM photo_assets WHERE status='ok' AND taken_at>=? AND taken_at<?",
+                    )
+                    .bind(from)
+                    .bind(to)
+                    .fetch_all(&state.db)
+                    .await?
+                }
+                (None, None) => unreachable!(),
+            };
+            let map: HashMap<i64, ()> = rows.into_iter().map(|(id,)| (id, ())).collect();
+            if map.is_empty() {
+                return Ok(Json(serde_json::json!({ "items": [], "total": 0, "scores": {} })));
+            }
+            allowed = Some(map);
+        }
+
+        // 3. Cosine scan over the in-memory mirror (SQLite stays cold).
+        let limit = q.limit.unwrap_or(60).clamp(1, 200) as usize;
+        let hits = state
+            .queue
+            .embeddings
+            .search(&qvec, limit, allowed.as_ref())
+            .map_err(crate::models::AppError::BadRequest)?;
+
+        // Adaptive relevance cut: cosine similarity is not calibrated
+        // "confidence" — a batch of loosely-related images clusters around
+        // ~0.45-0.55 and floods the result. Keep only scores up to the first
+        // steep drop from the best (gap > 4%): everything after the cliff is
+        // weak relevance. No absolute floor: true positives (dragonfly 0.557,
+        // einstein 0.56-0.59) sit right next to noise on a small library, so
+        // a hard cutoff would cut real matches — only the cliff is reliable.
+        let hits = {
+            let mut kept = Vec::with_capacity(hits.len());
+            let mut best = None;
+            for (id, s) in &hits {
+                if let Some(b) = best {
+                    if *s < b - 0.04 {
+                        break;
+                    }
+                } else {
+                    best = Some(*s);
+                }
+                kept.push((*id, *s));
+            }
+            kept
+        };
+
+        if hits.is_empty() {
+            return Ok(Json(serde_json::json!({ "items": [], "total": 0, "scores": {} })));
+        }
+
+        // 4. Materialise items in similarity order.
+        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        let score_of: HashMap<i64, f32> = hits.iter().copied().collect();
+        let (items, _) = crate::services::photos::list(
+            &state.db,
+            &state.registry,
+            &PhotoQuery {
+                dir_id: None,
+                tag: None,
+                person_id: None,
+                from: None,
+                to: None,
+                has_gps: None,
+                kind: None,
+                ids: ids.clone(),
+                limit: ids.len() as i64,
+                offset: 0,
+            },
+        )
+        .await?;
+        let mut items = items;
+        items.sort_by(|a, b| {
+            let sa = score_of.get(&a.id).copied().unwrap_or(-1.0);
+            let sb = score_of.get(&b.id).copied().unwrap_or(-1.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let scores: serde_json::Map<String, serde_json::Value> = items
+            .iter()
+            .filter_map(|it| {
+                score_of
+                    .get(&it.id)
+                    .map(|s| (it.id.to_string(), serde_json::json!(format!("{:.3}", s))))
+            })
+            .collect();
+
+        Ok(Json(serde_json::json!({
+            "items": items,
+            "total": items.len(),
+            "scores": scores,
+        })))
+    }
+}
+
+/// Local-time year boundaries as unix seconds for the EXIF `year` filter.
+#[cfg(feature = "onnx")]
+fn year_bounds(year: i64) -> Result<(i64, i64), crate::models::AppError> {
+    use chrono::TimeZone;
+    let start = chrono::Local
+        .with_ymd_and_hms(year as i32, 1, 1, 0, 0, 0)
+        .single()
+        .ok_or_else(|| crate::models::AppError::BadRequest(format!("invalid year: {year}")))?;
+    let end = chrono::Local
+        .with_ymd_and_hms(year as i32 + 1, 1, 1, 0, 0, 0)
+        .single()
+        .ok_or_else(|| crate::models::AppError::BadRequest(format!("invalid year: {year}")))?;
+    Ok((start.timestamp(), end.timestamp()))
 }
 
 pub async fn detail(

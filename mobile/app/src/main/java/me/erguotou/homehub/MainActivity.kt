@@ -81,46 +81,58 @@ class MainActivity : AppCompatActivity() {
                 "peer=${prefs.wgPeerPublicKey.length} ep='${prefs.wgEndpoint}'"
         )
 
+        val canAuthenticate = AppLock.canAuthenticate(this)
+        val unavailableReason = AppLock.unavailableReason(this)
+
         // A lock that can never be satisfied traps the user on the lock screen
         // forever (device lost its fingerprint / lock screen). Turn it off
         // instead of showing a prompt that always fails.
-        if (prefs.biometricLock && !AppLock.canAuthenticate(this)) {
+        if (prefs.biometricLock && !canAuthenticate) {
             prefs.biometricLock = false
         }
-        AppLock.ensureInitialized(prefs.biometricLock)
+        // An enabled gate therefore implies an available authenticator, so it
+        // can open straight into the prompt rather than drawing 已锁定 first.
+        AppLock.ensureInitialized(gateEnabled = prefs.biometricLock)
 
         requestNotificationPermission()
         if (prefs.isWireGuardConfigured()) connectTunnel()
 
         observeForegroundRelock()
 
-        val canAuthenticate = AppLock.canAuthenticate(this)
-        val unavailableReason = AppLock.unavailableReason(this)
-
         setContent {
             HomeHubTheme {
-                val locked by AppLock.locked.collectAsStateWithLifecycle()
+                val gate by AppLock.state.collectAsStateWithLifecycle()
                 // Only the server address is required to enter the app; the
                 // WireGuard tunnel is optional (LAN access works without it)
                 // and can be configured later from 设置 → 编辑配置.
                 var showSetup by remember { mutableStateOf(!prefs.isServerConfigured()) }
 
-                if (locked && canAuthenticate) {
-                    LaunchedEffect(Unit) { authenticate { AppLock.unlock() } }
+                // The prompt is driven by the state instead of being fired
+                // once, so both the retry button and the 设置 toggle come back
+                // through here.
+                LaunchedEffect(gate) {
+                    if (gate == AppLock.State.AUTHENTICATING) {
+                        authenticate(
+                            onSuccess = { AppLock.unlock() },
+                            onDismissed = { AppLock.requireAuthentication() }
+                        )
+                    }
                 }
 
                 when {
                     showSetup -> SetupScreen(onFinished = { showSetup = false })
-                    locked -> LockScreen(
+                    gate == AppLock.State.UNLOCKED -> HomeHubRoot()
+                    // Behind the prompt: wordless, so 已锁定 never flashes.
+                    gate == AppLock.State.AUTHENTICATING -> AuthenticatingGate()
+                    else -> LockScreen(
                         message = unavailableReason ?: "验证指纹、面容或锁屏密码以进入 HomeHub",
                         canAuthenticate = canAuthenticate,
-                        onAuthenticate = { authenticate { AppLock.unlock() } },
+                        onAuthenticate = { AppLock.lock() },
                         onDisable = {
                             prefs.biometricLock = false
                             AppLock.unlock()
                         }
                     )
-                    else -> HomeHubRoot()
                 }
             }
         }
@@ -136,7 +148,12 @@ class MainActivity : AppCompatActivity() {
             override fun onStart(owner: LifecycleOwner) {
                 val since = backgroundedAt
                 backgroundedAt = 0L
-                if (since > 0L && prefs.biometricLock && !AppLock.locked.value &&
+                if (since > 0L && prefs.biometricLock && !AppLock.locked &&
+                    // Answering the prompt can itself outlast the grace
+                    // window, and the prompt can push the Activity to the
+                    // background. A fresh unlock always beats the timestamp
+                    // taken on the way out, so the user is never asked twice.
+                    since >= AppLock.lastUnlockAt() &&
                     SystemClock.elapsedRealtime() - since >= LOCK_GRACE_MS
                 ) {
                     AppLock.lock()
@@ -171,16 +188,22 @@ class MainActivity : AppCompatActivity() {
     /**
      * Biometric gate (PRD M5). Falls back to the device credential.
      *
-     * Cancelling leaves the lock screen up — the screen offers a 验证身份 retry
-     * button, and the system back gesture exits the app.
+     * Dismissing the prompt (system back / 取消) hands control back to the
+     * retry screen. A rejected finger does *not* arrive here — that is
+     * [BiometricPrompt.AuthenticationCallback.onAuthenticationFailed], and the
+     * prompt stays up so the user can simply try again.
      */
-    private fun authenticate(onSuccess: () -> Unit) {
+    private fun authenticate(onSuccess: () -> Unit, onDismissed: () -> Unit) {
         val prompt = BiometricPrompt(
             this,
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    onDismissed()
                 }
             }
         )
@@ -200,6 +223,39 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         /** How long the app may sit in the background before it re-locks. */
         const val LOCK_GRACE_MS = 10_000L
+    }
+}
+
+/**
+ * What sits behind the system prompt.
+ *
+ * Deliberately wordless: the prompt already tells the user what to do, and
+ * drawing 已锁定 here would flash a lock screen in front of it — and then take
+ * it away again the moment the finger lands, which reads as a glitch.
+ */
+@Composable
+private fun AuthenticatingGate() {
+    Scaffold { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+            ) {
+                Box(modifier = Modifier.size(92.dp), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Outlined.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+            }
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 package me.erguotou.homehub.security
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.biometric.BiometricManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -9,18 +10,43 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Process-wide state for the biometric gate.
  *
+ * The gate has three observable states, and keeping them apart is what stops
+ * the 已锁定 screen from flashing in front of the prompt: while the system
+ * prompt is up there is nothing for the user to read yet, so the app shows a
+ * neutral surface, and the retry screen appears only once the prompt has
+ * actually been dismissed. The single boolean this used to be could not
+ * express that difference.
+ *
  * The lock lives outside the Activity so that
  *  * the 设置 screen can lock the app the instant the toggle is flipped
- *    (MainActivity observes [locked] and swaps in the lock screen), and
+ *    (MainActivity observes [state] and swaps in the gate), and
  *  * a configuration change does not re-lock an already unlocked app —
  *    [ensureInitialized] only seeds the state once per process.
  */
 object AppLock {
 
-    private val _locked = MutableStateFlow(false)
-    val locked: StateFlow<Boolean> = _locked.asStateFlow()
+    enum class State {
+        /** Content is on screen. */
+        UNLOCKED,
+
+        /** The system prompt is up; show a neutral surface, not "已锁定". */
+        AUTHENTICATING,
+
+        /** The prompt was dismissed or refused; offer a retry. */
+        LOCKED
+    }
+
+    private val _state = MutableStateFlow(State.UNLOCKED)
+    val state: StateFlow<State> = _state.asStateFlow()
+
+    /** True while the app must not show its content. */
+    val locked: Boolean
+        get() = _state.value != State.UNLOCKED
 
     private var initialized = false
+
+    /** When the user last passed the prompt, on the monotonic clock. */
+    private var lastUnlockAt = 0L
 
     /** Fingerprint/face, or the device PIN/pattern/password as a fallback. */
     private val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or
@@ -47,24 +73,46 @@ object AppLock {
         }
 
     /**
-     * Seed the lock state on the first Activity creation of this process.
-     * Later creations (rotation, dark-mode switch) keep whatever the user has
-     * already unlocked.
+     * Seed the state on the first Activity creation of this process. Later
+     * creations (rotation, dark-mode switch) keep whatever the user has
+     * already reached.
+     *
+     * [gateEnabled] is only ever true when an authenticator is available —
+     * MainActivity clears the preference first — so an enabled gate starts
+     * already in [State.AUTHENTICATING] and goes straight to the prompt
+     * instead of drawing 已锁定 first.
      */
-    fun ensureInitialized(lock: Boolean) {
-        if (!initialized) {
-            _locked.value = lock
-            initialized = true
-        }
+    fun ensureInitialized(gateEnabled: Boolean) {
+        if (initialized) return
+        initialized = true
+        _state.value = if (gateEnabled) State.AUTHENTICATING else State.UNLOCKED
     }
 
+    /**
+     * Arm the gate. The prompt is about to be shown, so skip the retry screen:
+     * used by the 设置 toggle and by the background re-lock.
+     */
     fun lock() {
         initialized = true
-        _locked.value = true
+        _state.value = State.AUTHENTICATING
+    }
+
+    /** The prompt was dismissed or refused — show the retry screen. */
+    fun requireAuthentication() {
+        initialized = true
+        _state.value = State.LOCKED
     }
 
     fun unlock() {
         initialized = true
-        _locked.value = false
+        lastUnlockAt = SystemClock.elapsedRealtime()
+        _state.value = State.UNLOCKED
     }
+
+    /**
+     * When the user last passed the prompt. A return to the foreground must
+     * not re-lock an app the user just unlocked — answering the prompt can
+     * itself take longer than the grace window.
+     */
+    fun lastUnlockAt(): Long = lastUnlockAt
 }

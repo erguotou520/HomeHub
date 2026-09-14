@@ -59,10 +59,10 @@ class Prefs(context: Context) {
 
     /**
      * What to do when the server reports the uploaded photo already exists.
-     * "skip" discards the duplicate, "keep" stores both copies.
+     * "skip" discards the duplicate (the default), "keep" stores both copies.
      */
     var duplicatePolicy: String
-        get() = prefs.getString(KEY_DUPLICATE_POLICY, "keep") ?: "keep"
+        get() = prefs.getString(KEY_DUPLICATE_POLICY, "skip") ?: "skip"
         set(value) = prefs.edit().putString(KEY_DUPLICATE_POLICY, value).apply()
 
     var lastUploadDir: String
@@ -76,26 +76,11 @@ class Prefs(context: Context) {
 
     /**
      * Remember where the last upload landed, so the picker can open there next
-     * time. Passing a blank [dir] forgets the target entirely.
+     * time. Internal convenience only — it is not surfaced in 设置.
      */
     fun rememberUploadTarget(dir: String, path: String) {
         lastUploadDir = dir.trim()
         lastUploadPath = path
-    }
-
-    fun forgetUploadTarget() {
-        prefs.edit()
-            .remove(KEY_LAST_UPLOAD_DIR)
-            .remove(KEY_LAST_UPLOAD_PATH)
-            .apply()
-    }
-
-    /** "相册/2024/春节" style label for the remembered target; "" when unset. */
-    fun uploadTargetLabel(): String {
-        val dir = lastUploadDir
-        if (dir.isBlank()) return ""
-        val path = lastUploadPath
-        return if (path.isBlank()) dir else "$dir/$path"
     }
 
     var frigateUrl: String

@@ -111,13 +111,17 @@ fun AlbumScreen(onFullscreenChange: (Boolean) -> Unit = {}, vm: AlbumViewModel =
     var uploadPath by remember { mutableStateOf("") }
     var pendingUploadUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showUploadConfirm by remember { mutableStateOf(false) }
-    var uploadDeleteLocal by remember { mutableStateOf(false) }
+    // 设置 → 上传 → 上传后删除本地副本 决定确认框里的默认勾选。
+    // 这里只是初值；真正的默认值在每次打开确认框时重读（见 pickImages），
+    // 否则切到设置改完开关再切回来，本页的 remember 还是旧值。
+    var uploadDeleteLocal by remember { mutableStateOf(prefs.deleteAfterUpload) }
 
     val pickImages = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         if (uris.isNotEmpty()) {
             pendingUploadUris = uris
+            uploadDeleteLocal = prefs.deleteAfterUpload
             showUploadConfirm = true
         }
     }

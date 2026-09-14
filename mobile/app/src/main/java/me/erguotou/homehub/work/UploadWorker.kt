@@ -85,7 +85,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
             if (lastError != null) {
                 failures++
             } else {
-                val policy = prefs.duplicatePolicy.ifBlank { "keep" }
+                val policy = prefs.duplicatePolicy.ifBlank { "skip" }
                 val response = repository.uploadComplete(dir, path, fileName, bytes.size.toLong(), policy)
                 val outcome = response.getOrNull()?.uploaded?.firstOrNull()
                 when {

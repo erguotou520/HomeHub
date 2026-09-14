@@ -387,7 +387,8 @@ fun FilesScreen(
     }
 
     if (showUploadConfirm && pendingUris.isNotEmpty()) {
-        var deleteLocal by remember { mutableStateOf(false) }
+        // 设置 → 上传 → 上传后删除本地副本 作为默认勾选状态。
+        var deleteLocal by remember { mutableStateOf(prefs.deleteAfterUpload) }
         AlertDialog(
             onDismissRequest = {
                 showUploadConfirm = false

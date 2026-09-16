@@ -8,7 +8,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -19,10 +19,23 @@ use crate::models::AppError;
 use crate::services::files::UploadOutcome;
 use crate::AppState;
 
+/// Largest single chunk accepted by `/api/upload/chunk`.
+///
+/// Axum's default 2 MiB body limit would reject the Android client's 4 MiB
+/// chunks outright (413), so the route opts into a larger ceiling.
+const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Hard ceiling for one assembled upload. `total` is optional on the wire, so
+/// without this a client could keep appending chunks until the disk filled up.
+const MAX_UPLOAD_TOTAL: u64 = 16 * 1024 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/upload/offset", get(offset))
-        .route("/api/upload/chunk", post(chunk))
+        .route(
+            "/api/upload/chunk",
+            post(chunk).layer(DefaultBodyLimit::max(MAX_CHUNK_BYTES)),
+        )
         .route("/api/upload/complete", post(complete))
 }
 
@@ -87,6 +100,20 @@ pub async fn chunk(
     Query(q): Query<ChunkQuery>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Refuse up front when the declared size or this chunk would blow the cap.
+    if q.total.is_some_and(|t| t > MAX_UPLOAD_TOTAL) {
+        return Err(AppError::BadRequest(format!(
+            "upload exceeds the {} byte limit",
+            MAX_UPLOAD_TOTAL
+        )));
+    }
+    if q.offset.saturating_add(body.len() as u64) > MAX_UPLOAD_TOTAL {
+        return Err(AppError::BadRequest(format!(
+            "upload exceeds the {} byte limit",
+            MAX_UPLOAD_TOTAL
+        )));
+    }
+
     let part = part_path(&state, &q.dir, &q.path, &q.name)?;
     if let Some(parent) = part.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -128,6 +155,12 @@ pub async fn complete(
     State(state): State<AppState>,
     Json(body): Json<CompleteBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    if body.total.is_some_and(|t| t > MAX_UPLOAD_TOTAL) {
+        return Err(AppError::BadRequest(format!(
+            "upload exceeds the {} byte limit",
+            MAX_UPLOAD_TOTAL
+        )));
+    }
     let record = state
         .registry
         .by_name(&body.dir)

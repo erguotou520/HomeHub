@@ -218,7 +218,15 @@ class Prefs(context: Context) {
             return createEncrypted(context)
         } catch (e: Exception) {
             // Last resort: stay usable rather than crash-looping at launch.
-            Log.w(TAG, "encrypted preferences unavailable, using plain storage", e)
+            //
+            // KNOWN RESIDUAL RISK: this store holds the WireGuard private key
+            // and the server credentials in *cleartext*. It is only reached
+            // when the Android Keystore itself is unusable (twice), and the
+            // alternative was an app that could not start at all. Anything
+            // written here must be treated as recoverable by a local attacker
+            // with file access – re-entering the configuration once the
+            // Keystore recovers is what restores the encrypted store.
+            Log.e(TAG, "encrypted preferences unavailable, using PLAIN-TEXT storage", e)
         }
         return context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
     }

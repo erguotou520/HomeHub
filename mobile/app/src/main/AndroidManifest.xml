@@ -9,21 +9,13 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
 
-    <!-- Only needed when "delete local copy after upload" is enabled. -->
-    <uses-permission
-        android:name="android.permission.READ_MEDIA_IMAGES"
-        android:minSdkVersion="33" />
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-
     <!-- WorkManager long-running uploads need a typed foreground service on targetSdk 34+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:name=".HomeHubApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -34,9 +26,11 @@
         android:theme="@style/Theme.HomeHub"
         tools:targetApi="31">
 
-        <!-- The geo view uses the AMap (高德) Android SDK. The key is supplied at
-             runtime from the encrypted prefs via MapsInitializer.setApiKey(), so no
-             key is baked into the APK. To hard-code one instead, declare:
+        <!-- The geo view uses the AMap (高德) Android SDK. The key is injected at
+             runtime with MapsInitializer.setApiKey(BuildConfig.AMAP_KEY); it is a
+             build-time constant declared in app/build.gradle, i.e. it *is* part of
+             the APK and must be treated as extractable. Declaring it here as
+             meta-data is not needed:
              <meta-data android:name="com.amap.api.v2.apikey" android:value="KEY" /> -->
 
         <activity

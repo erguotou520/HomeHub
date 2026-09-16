@@ -34,23 +34,16 @@ impl FromRequestParts<AppState> for Claims {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        let token = if let Some(header) = parts
+        // Header only: a `?token=` fallback used to be accepted here, but URLs
+        // end up in proxy logs, browser history and `Referer` headers, so the
+        // credential had a habit of leaking out of its transport.
+        let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-        {
-            header
-                .strip_prefix("Bearer ")
-                .ok_or(AuthError::InvalidToken)?
-                .to_string()
-        } else {
-            let query = parts.uri.query().unwrap_or("");
-            query
-                .split('&')
-                .find_map(|p| p.strip_prefix("token="))
-                .map(|s| s.to_string())
-                .ok_or(AuthError::MissingToken)?
-        };
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(|s| s.to_string())
+            .ok_or(AuthError::MissingToken)?;
 
         decode::<Claims>(
             &token,

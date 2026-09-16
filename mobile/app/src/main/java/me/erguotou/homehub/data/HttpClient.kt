@@ -1,6 +1,5 @@
 package me.erguotou.homehub.data
 
-import android.annotation.SuppressLint
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -78,14 +77,4 @@ object HttpClientFactory {
             null to null
         }
     }
-
-    /** Debug-only helper; never used in the app flow. */
-    @SuppressLint("CustomX509TrustManager")
-    val trustAll: Array<javax.net.ssl.TrustManager> = arrayOf(
-        object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        }
-    )
 }

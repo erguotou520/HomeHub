@@ -134,6 +134,41 @@ echo "== upload duplicate skip =="
 R=$(curl -s -X POST "$BASE/api/files/photos/2024/05?on-duplicate=skip" -F "file=@$SMOKE_DIR/photos/2024/05/a.png")
 echo "$R" | grep -q '"skipped":true' && echo "  ok   duplicate skipped" || { echo "  FAIL duplicate skip: $R"; FAILURES=$((FAILURES + 1)); }
 
+echo "== uploads larger than the 2 MiB default body limit =="
+# Axum caps request bodies at 2 MiB unless a route opts into more. Uploads of
+# any real photo/video hit that wall (413) while the fixtures stayed tiny, so
+# the limit is asserted explicitly here.
+BIG_FILE="hh-big-$TAG.bin"
+python3 -c "import sys;open(sys.argv[1],'wb').write(b'\0'*3145728)" "$SMOKE_DIR/$BIG_FILE"
+R=$(curl -s -X POST "$BASE/api/files/docs" -F "file=@$SMOKE_DIR/$BIG_FILE")
+echo "$R" | grep -q '"size":3145728' && echo "  ok   3 MiB multipart upload accepted" \
+  || { echo "  FAIL 3 MiB multipart upload rejected: $R"; FAILURES=$((FAILURES + 1)); }
+curl -s -X DELETE "$BASE/api/files/docs/$BIG_FILE" > /dev/null
+rm -f "$SMOKE_DIR/$BIG_FILE"
+
+# 4 MiB is exactly what the Android client sends per chunk.
+R=$(python3 - "$BASE" <<'PY'
+import sys, urllib.request, urllib.parse, json
+B = sys.argv[1]
+data = b"\0" * (4 * 1024 * 1024)
+q = urllib.parse.urlencode(
+    {"dir": "docs", "path": "", "name": "hh-chunk-4m.bin", "offset": 0, "total": len(data)})
+req = urllib.request.Request(f"{B}/api/upload/chunk?{q}", data=data,
+                             headers={"content-type": "application/octet-stream"}, method="POST")
+try:
+    print(json.loads(urllib.request.urlopen(req).read().decode())["offset"])
+except Exception as e:  # noqa: BLE001 - surface the reason to the caller
+    print(f"ERR {e}")
+PY
+)
+case "$R" in
+  4194304) echo "  ok   4 MiB chunk accepted" ;;
+  *) echo "  FAIL 4 MiB chunk rejected: $R"; FAILURES=$((FAILURES + 1)) ;;
+esac
+curl -s -X POST "$BASE/api/upload/complete" -H 'content-type: application/json' \
+  -d '{"dir":"docs","path":"","name":"hh-chunk-4m.bin","total":4194304}' > /dev/null
+curl -s -X DELETE "$BASE/api/files/docs/hh-chunk-4m.bin" > /dev/null
+
 echo "== resumable chunked upload =="
 python3 - "$BASE" "$SMOKE_DIR" <<'PY'
 import sys, urllib.request, urllib.parse, json

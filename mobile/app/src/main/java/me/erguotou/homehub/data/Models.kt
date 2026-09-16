@@ -262,6 +262,13 @@ data class UploadCompleteRequest(
     val path: String = "",
     val name: String,
     val total: Long? = null,
-    /** "skip" = discard when a duplicate exists, "keep" = store both copies. */
-    @SerializedName("onDuplicate") val onDuplicate: String = "keep"
+    /**
+     * "skip" = discard when a duplicate exists, "keep" = store both copies.
+     *
+     * The wire name is snake_case like the rest of the API
+     * (`server/src/handlers/upload.rs` deserialises `on_duplicate`); sending
+     * `onDuplicate` made serde drop the field and silently fall back to "keep",
+     * so the user's duplicate policy never took effect.
+     */
+    @SerializedName("on_duplicate") val onDuplicate: String = "keep"
 )

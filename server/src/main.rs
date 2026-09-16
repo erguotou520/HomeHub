@@ -201,6 +201,24 @@ fn admin_dist() -> std::path::PathBuf {
     std::path::PathBuf::from("../admin/dist")
 }
 
+/// Content-Security-Policy served with the admin SPA.
+///
+/// `style-src` keeps `'unsafe-inline'` because the React views set inline
+/// `style` attributes; scripts are restricted to same-origin bundles, which is
+/// what actually shuts down an injected `<img onerror=…>`.
+const CSP: &str = "default-src 'self'; \
+     script-src 'self'; \
+     style-src 'self' 'unsafe-inline'; \
+     img-src 'self' data: blob: http: https:; \
+     media-src 'self' blob: http: https:; \
+     frame-src 'self' http: https:; \
+     connect-src 'self' http: https:; \
+     font-src 'self' data:; \
+     object-src 'none'; \
+     base-uri 'self'; \
+     form-action 'self'; \
+     frame-ancestors 'none'";
+
 /// Serve the built admin SPA (single-container deployment).
 ///
 /// Set `ADMIN_DIST` to the `admin/dist` directory; when it is missing the
@@ -230,7 +248,17 @@ async fn spa_fallback(uri: axum::http::Uri) -> axum::response::Response {
             };
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, mime.to_string()), (header::CACHE_CONTROL, cache.into())],
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (header::CACHE_CONTROL, cache.to_string()),
+                    // Defence in depth for the admin SPA: no inline scripts, no
+                    // framing. (Only meaningful on document responses; harmless
+                    // elsewhere, so it is attached unconditionally.)
+                    (
+                        axum::http::HeaderName::from_static("content-security-policy"),
+                        CSP.to_string(),
+                    ),
+                ],
                 body,
             )
                 .into_response()

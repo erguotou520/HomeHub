@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { API_BASE, api, formatBytes, formatTime } from '../api/client'
+import { API_BASE, api, formatBytes, formatTime, getToken } from '../api/client'
 import type { DirStat, FileEntry } from '../api/types'
 import Icon from '../components/Icon'
 import ImageEditor from '../components/ImageEditor'
@@ -27,6 +27,11 @@ function uploadOne(
     form.append('file', item.file, item.file.name)
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url)
+    // Same credential handling as the JSON client: the data plane does not
+    // require it today, but sending it keeps the upload path consistent (and
+    // working) once the endpoint is protected.
+    const token = getToken()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
     xhr.responseType = 'json'
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded / e.total)
@@ -57,10 +62,13 @@ function rel(entry: FileEntry, dir: string): string {
   return entry.path.startsWith(`${dir}/`) ? entry.path.slice(dir.length + 1) : entry.path
 }
 
-export function mediaUrl(dir: string, path: string, thumb = false, rev = 0): string {
+export function mediaUrl(dir: string, path: string, thumb = false, version = 0): string {
   const q: string[] = []
   if (thumb) q.push('size=thumb')
-  if (rev) q.push(`rev=${rev}`)
+  // The server only treats `v` as a cache version (see docs/api.md §4); any
+  // other name leaves the response on `no-cache`, so previews would refetch
+  // the bytes on every re-render.
+  if (version) q.push(`v=${version}`)
   const s = q.length ? `?${q.join('&')}` : ''
   return `${API_BASE}/api/media/${encodeURIComponent(dir)}/${enc(path)}${s}`
 }

@@ -75,12 +75,15 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         prefs = Prefs(this)
 
-        android.util.Log.d(
-            "HomeHubGate",
-            "server=${prefs.isServerConfigured()} addr='${prefs.serverAddress}' " +
-                "wg=${prefs.isWireGuardConfigured()} priv=${prefs.wgPrivateKey.length} " +
-                "peer=${prefs.wgPeerPublicKey.length} ep='${prefs.wgEndpoint}'"
-        )
+        // Deliberately terse: the previous message logged the server address,
+        // the WireGuard endpoint and key lengths, which leaks the internal
+        // topology to anything that can read logcat.
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d(
+                "HomeHubGate",
+                "server=${prefs.isServerConfigured()} wg=${prefs.isWireGuardConfigured()}"
+            )
+        }
 
         val canAuthenticate = AppLock.canAuthenticate(this)
         val unavailableReason = AppLock.unavailableReason(this)

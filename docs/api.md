@@ -18,6 +18,8 @@
 | POST | `/api/admin/login` | body `{"password": "..."}` → `{"token": "...", "expires_in": 604800}` |
 | GET | `/api/admin/me` | 当前管理员信息 |
 
+> token **只接受** `Authorization: Bearer <token>` 请求头。查询串中的 `?token=` 不再受理（URL 会进入代理日志、浏览器历史与 `Referer`）。
+
 ### 目录注册表
 
 | 方法 | 路径 | 说明 |
@@ -79,6 +81,9 @@
 | POST | `/api/admin/duplicates/trash` | `{"fingerprint": "..."}` 该组除第一张外移入回收站 |
 | GET | `/api/admin/backups` | SQLite 快照列表 + 备份配置 + 上次结果 |
 | POST | `/api/admin/backups/run` | 立即备份一次，返回 `{"name": "homehub-<时间戳>.db"}` |
+| GET | `/api/admin/fs` | `path` 参数（省略则取 `$HOME`）列子目录，仅返回目录、跳过隐藏项；供目录选择器使用 |
+
+> `GET /api/admin/settings` 中的凭据字段（`alerts.smtp.password`、`alerts.ntfy.token`、`alerts.telegram.bot-token`）以 `••••••••` 掩码返回；`PUT` 时若该字段为空或仍是掩码，则保留服务端已存的值，因此保存表单不会清空密钥。
 
 ### 人物分组
 
@@ -94,16 +99,19 @@
 
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
-| GET | `/api/photos/timeline` | `group=month\|year`、`from`、`to`、`per_group` | 跨 album 目录聚合的时间轴 |
+| GET | `/api/photos/timeline` | `group=day\|month\|year`（默认 `month`）、`kind=photo\|video`、`from`、`to`、`per_group`（默认 500） | 跨 album 目录聚合的时间轴 |
 | GET | `/api/photos/tree` | `dir_id` | 按目录层级聚合 |
 | GET | `/api/photos/tags` | – | 标签云（物体 + 场景）与封面 |
 | GET | `/api/photos/people` | – | 人脸分组与封面 |
 | GET | `/api/photos/geo` | `precision`（网格精度，默认 0.02 度） | 地理聚合点，地图渲染由客户端完成（PC：Leaflet + 高德瓦片；Android：高德 SDK）。两者都需把 WGS-84 转成 GCJ-02 |
-| GET | `/api/photos/list` | `dir_id`、`tag`、`person_id`、`from`、`to`、`has_gps`、`ids`、`limit`、`offset` | 条件分页查询；`ids` 为逗号分隔的照片 id，用于展开地图上的一个聚合点 |
+| GET | `/api/photos/semantic` | `q`、`dir_id`、`year`、`limit` | 中文自然语言搜图（Chinese-CLIP 余弦排序）；`limit` 上限 200。需构建时启用 `onnx` 且已加载 CLIP 模型，否则返回 400 |
+| GET | `/api/photos/list` | `dir_id`、`tag`、`person_id`、`from`、`to`、`has_gps`、`kind`、`ids`、`limit`、`offset` | 条件分页查询；`kind=photo\|video`，`ids` 为逗号分隔的照片 id（最多 1000 个），用于展开地图上的一个聚合点；`limit` 默认 200、上限 1000 |
 | GET | `/api/photos/:id` | – | 详情（EXIF 信息 + 标签 + 人脸框） |
+| GET | `/api/photos/:id/raw` | – | 按 id 流式读取原图/原视频，支持 `Range`（视频播放用；路径由服务端解析） |
 | POST | `/api/photos/:id/rotate` | `{"angle": 90\|180\|270}` | 旋转写回；原像素先归档到 `.originals/` |
 | POST | `/api/photos/people/:id/rename` | `{"name": "..."}` | 给人物分组命名 |
 | GET | `/api/duplicates` | – | 重复照片分组（file_hash / pixel_hash） |
+| GET | `/api/geo/reverse` | `lat`、`lng` | 经纬度反查地名，结果按约 11 m 网格缓存在 `geo_places`；返回 `{"label": ..., "cached": bool}` |
 
 照片对象：
 
@@ -137,7 +145,7 @@
 | GET | `/api/dirs` | 已登记目录列表 |
 | GET | `/api/files/:dir` | 列目录根 |
 | GET | `/api/files/:dir/*path` | 列目录；命中文件则直接下载（支持 Range） |
-| POST | `/api/files/:dir/*path` | multipart 上传（字段名任意，可多文件） |
+| POST | `/api/files/:dir/*path` | multipart 上传（字段名任意，可多文件）；`?on-duplicate=skip` 时命中重复直接丢弃 |
 | PATCH | `/api/files/:dir/*path` | `{"name": "new.jpg"}` 重命名；或 `{"op":"copy"\|"move","to_dir":"…","to_path":"…"}` |
 | DELETE | `/api/files/:dir/*path` | 软删除，进回收站 |
 | POST | `/api/mkdir/:dir/*path` | `{"name": "..."}` 新建目录 |
@@ -145,13 +153,40 @@
 
 列目录参数：`sort=name|mtime|size`、`desc=true`。目录永远排在前面。
 
-上传响应包含去重提示：
+上传响应包含去重提示（`skipped` 仅在 `on-duplicate=skip` 命中重复且被丢弃时出现）：
 
 ```json
 {"uploaded": [{"name": "a.png", "size": 573, "duplicate_of": "photos/2024/05/a.png", "queued": true}], "count": 1}
 ```
 
+> **体积上限**：multipart 上传单请求上限 512 MiB；单文件更大时请走下面的分片接口（单个分片上限 16 MiB，单个文件累计上限 16 GiB）。服务端默认的 2 MiB body 限制已在文件上传相关路由上放宽。
+
 ---
+
+## 3.1 断点续传上传 `/api/upload/*`
+
+大文件（Android 客户端）走分片上传：`dir` / `path` / `name` 为查询或 body 参数，语义与 `/api/files` 一致。
+
+| 方法 | 路径 | 参数 | 说明 |
+|------|------|------|------|
+| GET | `/api/upload/offset` | `dir`、`path`、`name` | 返回 `<name>.homehub-part` 已收到的字节数 → `{"offset": n}` |
+| POST | `/api/upload/chunk` | `dir`、`path`、`name`、`offset`、`total`(可选) | body 为原始字节流，追加到 `.part` 文件。`offset` 小于当前长度时视为重传并截断重写；`offset` 大于当前长度返回 400（gap） |
+| POST | `/api/upload/complete` | body `{"dir","path","name","total"?,"on_duplicate"?}` | 校验大小后走与 multipart 相同的去重 / 索引 / 入队流程，并删除 `.part` |
+
+- 单个分片上限 16 MiB，单个文件累计上限 16 GiB（`total` 省略时同样受累计上限约束）。
+- `on_duplicate` 取值 `skip` | `keep`（默认 `keep`）；**注意是下划线命名**，与其余接口一致。
+
+## 3.2 图片编辑 `/api/images/*`
+
+按 `<目录名>/<相对路径>` 寻址（不限于已索引的相册照片），服务端有 `safe_join` + 前缀双重校验。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/images/transform/:dir/*path` | body `{"ops": [...]}`，按顺序应用 rotate / flip / resize 等步骤；原像素先归档到 `.originals/`，响应返回新几何信息 |
+| POST | `/api/images/restore/:dir/*path` | 回滚到归档的原始像素 |
+| GET | `/api/images/exif/:dir/*path` | 完整元数据面板（EXIF / 尺寸 / 方向 / GPS），含 `has_original` |
+
+> 相册侧另有按 id 的旋转接口 `POST /api/photos/:id/rotate`（见 §2），两者都会归档原图。
 
 ## 4. 媒体 `/api/media/*`
 

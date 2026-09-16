@@ -11,6 +11,41 @@ function formatDuration(ms: number): string {
   return `${m}:${String(s % 60).padStart(2, '0')}`
 }
 
+/**
+ * Render an FTS5 snippet safely.
+ *
+ * The server highlights matches with literal `<b>` / `</b>` markers inside
+ * text that comes straight from indexed file names and tags. That text must
+ * never be handed to `dangerouslySetInnerHTML` — a filename such as
+ * `<img src=x onerror=…>.jpg` would then run in the admin origin. Here only
+ * the two markers are interpreted; every other character is rendered as a text
+ * node, so the worst case is a stray bold word.
+ */
+function renderSnippet(snippet: string): React.ReactNode[] {
+  const out: React.ReactNode[] = []
+  let buf = ''
+  let bold = false
+  let key = 0
+  const flush = () => {
+    if (!buf) return
+    out.push(bold ? <b key={key++}>{buf}</b> : <span key={key++}>{buf}</span>)
+    buf = ''
+  }
+  for (const part of snippet.split(/(<b>|<\/b>)/)) {
+    if (part === '<b>') {
+      flush()
+      bold = true
+    } else if (part === '</b>') {
+      flush()
+      bold = false
+    } else {
+      buf += part
+    }
+  }
+  flush()
+  return out
+}
+
 interface SemanticResult {
   items: PhotoItem[]
   total: number
@@ -190,10 +225,7 @@ export default function Search() {
                     <span className="badge">{h.ftype === 'photo' ? '照片' : '文件'}</span>
                   </td>
                   <td className="muted">{h.rel_path}</td>
-                  <td
-                    className="muted"
-                    dangerouslySetInnerHTML={{ __html: h.snippet ?? '' }}
-                  />
+                  <td className="muted">{h.snippet ? renderSnippet(h.snippet) : null}</td>
                 </tr>
               ))}
             </tbody>

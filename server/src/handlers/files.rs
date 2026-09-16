@@ -4,7 +4,7 @@
 
 use axum::{
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json, Router,
@@ -17,6 +17,15 @@ use crate::models::AppError;
 use crate::services::files::{SortKey, UploadOutcome};
 use crate::AppState;
 
+/// Largest multipart upload the file API accepts.
+///
+/// Axum caps request bodies at 2 MiB by default, which silently rejected every
+/// real photo/video (uploads came back as `413 Payload Too Large`). The
+/// multipart handler buffers one part in memory, so this stays a deliberate,
+/// memory-bounded ceiling: bigger files belong on the resumable `/api/upload/*`
+/// endpoints.
+const MAX_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         // Directory browsing
@@ -24,8 +33,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/files/:dir", get(list_root))
         .route("/api/files/:dir/*path", get(list_or_download))
         // Mutations
-        .route("/api/files/:dir/*path", post(upload_path))
-        .route("/api/files/:dir", post(upload_root))
+        .route(
+            "/api/files/:dir/*path",
+            post(upload_path).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/files/:dir",
+            post(upload_root).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/api/files/:dir/*path", patch(patch_file))
         .route("/api/files/:dir/*path", delete(delete_path))
         .route("/api/mkdir/:dir", post(mkdir_root))
@@ -492,11 +507,21 @@ pub async fn read_document(
         .ok_or_else(|| AppError::NotFound("directory not found".into()))?;
     let full = crate::services::paths::safe_join(std::path::Path::new(&record.path), &path)
         .ok_or_else(|| AppError::BadRequest("invalid path".into()))?;
-    // Cap the preview at 1 MiB.
-    let content = tokio::fs::read(full)
+    // Cap the preview at 1 MiB *while reading*: `tokio::fs::read` would pull the
+    // whole file into memory first, so a multi-GB document could OOM the server
+    // long before the response was truncated.
+    const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(&full)
         .await
         .map_err(|e| AppError::NotFound(e.to_string()))?;
-    let text = String::from_utf8_lossy(&content[..content.len().min(1024 * 1024)]).to_string();
+    let mut buf = Vec::with_capacity(MAX_PREVIEW_BYTES as usize);
+    file.take(MAX_PREVIEW_BYTES)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let text = String::from_utf8_lossy(&buf).to_string();
     Ok(Json(serde_json::json!({ "content": text })))
 }
 

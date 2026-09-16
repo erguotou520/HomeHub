@@ -2,10 +2,18 @@
 <!--
   HomeHub talks to the server over the WireGuard tunnel or the trusted home
   LAN; the server is never exposed to the public internet and currently has
-  no TLS listener, so cleartext HTTP is permitted for all server addresses
-  the app may point at (WG 10.0.0.1, LAN 192.168.x.x, localhost).
-  TLS uses the system trust store, or the single self-signed certificate
-  registered in Settings (see HttpClientFactory) once the server gains HTTPS.
+  no TLS listener.
+
+  NOTE: this is a *blanket* permit. `base-config` applies to every host, so
+  cleartext HTTP is allowed for any address the user types in, not just the
+  private ranges – a `domain-config` allow-list cannot express "10.0.0.0/8 and
+  192.168.0.0/16" and the server address is user-configurable, so the app has
+  no static list to pin. Anyone able to act as a network intermediary on the
+  path can therefore read or tamper with traffic in plain-HTTP mode.
+
+  Tightening this requires either TLS on the server (TLS already uses the
+  system trust store, or the single certificate registered in Settings – see
+  HttpClientFactory) or a fixed, enumerable set of server addresses.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">

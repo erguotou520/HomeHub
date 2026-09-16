@@ -104,6 +104,6 @@ app/src/main/java/me/erguotou/homehub/
 | 旧实现 | 现在 |
 |--------|------|
 | SharedPreferences 明文存私钥与密码 | EncryptedSharedPreferences（Keystore 托管密钥） |
-| 全局信任所有证书、WebView 忽略 SSL 错误 | OkHttp + 可配置的单证书信任；`usesCleartextTraffic=false`（仅私有网段例外） |
+| 全局信任所有证书、WebView 忽略 SSL 错误 | OkHttp + 可配置的单证书信任；服务端暂无 TLS 监听，故明文 HTTP 为**全局放行**（`base-config`，非仅私有网段） |
 | 1366 行 MainActivity 承载全部 UI | 多 Screen + Navigation Compose |
 | Frigate 登录 JS 注入 hack | 本期监控空置，不迁移 |

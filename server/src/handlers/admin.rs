@@ -396,19 +396,54 @@ pub async fn clear_failed(
 
 // ────────────────────────────────── settings ───────────────────────────────
 
+/// Placeholder sent to the browser in place of a stored secret.
+///
+/// `GET /api/admin/settings` used to hand back the SMTP password, ntfy token
+/// and Telegram bot token in cleartext. They are masked now; `update_settings`
+/// recognises the mask (or an empty field) and keeps whatever is stored, so
+/// saving the form can never wipe a secret by accident.
+const SECRET_MASK: &str = "••••••••";
+
+fn mask_secret(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        SECRET_MASK.to_string()
+    }
+}
+
+fn is_masked(value: &str) -> bool {
+    value.is_empty() || value == SECRET_MASK
+}
+
 pub async fn get_settings(
     State(state): State<AppState>,
     _claims: Claims,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let settings = state.config.get().runtime.clone();
+    let mut settings = state.config.get().runtime.clone();
+    settings.alerts.ntfy.token = mask_secret(&settings.alerts.ntfy.token);
+    settings.alerts.telegram.bot_token = mask_secret(&settings.alerts.telegram.bot_token);
+    settings.alerts.smtp.password = mask_secret(&settings.alerts.smtp.password);
     Ok(Json(serde_json::to_value(settings).unwrap_or_default()))
 }
 
 pub async fn update_settings(
     State(state): State<AppState>,
     _claims: Claims,
-    Json(body): Json<RuntimeSettings>,
+    Json(mut body): Json<RuntimeSettings>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
+    // Masked / blank secrets mean "unchanged" — restore the stored value.
+    let current = state.config.get().runtime.alerts.clone();
+    if is_masked(&body.alerts.ntfy.token) {
+        body.alerts.ntfy.token = current.ntfy.token;
+    }
+    if is_masked(&body.alerts.telegram.bot_token) {
+        body.alerts.telegram.bot_token = current.telegram.bot_token;
+    }
+    if is_masked(&body.alerts.smtp.password) {
+        body.alerts.smtp.password = current.smtp.password;
+    }
+
     let serialized = serde_json::to_string(&body)?;
     crate::db::set_setting(&state.db, "runtime_settings", &serialized).await?;
 

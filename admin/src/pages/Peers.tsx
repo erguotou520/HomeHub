@@ -72,7 +72,7 @@ export default function Peers() {
               <th>来源</th>
               <th>最近访问</th>
               <th>请求数 / 流量</th>
-              <th />
+              <th><span className="sr-only">操作</span></th>
             </tr>
           </thead>
           <tbody>

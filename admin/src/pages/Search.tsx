@@ -131,13 +131,13 @@ export default function Search() {
           onChange={(e) => setQ(e.target.value)}
         />
         {mode === 'keyword' && (
-          <select value={type} onChange={(e) => setType(e.target.value)}>
+          <select value={type} aria-label="搜索类型" onChange={(e) => setType(e.target.value)}>
             <option value="">全部</option>
             <option value="photo">照片</option>
             <option value="file">文件</option>
           </select>
         )}
-        <button type="submit" disabled={busy}>
+        <button type="submit" className="primary" disabled={busy}>
           搜索
         </button>
         {(hits || semantic) && <span className="muted">命中 {count} 条</span>}

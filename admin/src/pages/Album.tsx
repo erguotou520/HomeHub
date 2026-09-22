@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, formatBytes } from '../api/client'
 import type { DirStat, GeoPoint, PhotoItem, Stats, TimelineGroup } from '../api/types'
@@ -41,8 +41,14 @@ export default function Album() {
   const [dirs, setDirs] = useState<DirStat[]>([])
   const [items, setItems] = useState<PhotoItem[]>([])
   const [points, setPoints] = useState<GeoPoint[]>([])
-  /** Server aggregation grid for the geo view; the map bumps it while zooming. */
-  const [geoPrecision, setGeoPrecision] = useState(0.02)
+  /**
+   * Server sampling grid for the geo view. Starts at the map's opening zoom
+   * (z4 → 1°), the map bumps it while zooming so bubbles can split.
+   */
+  const [geoPrecision, setGeoPrecision] = useState(1)
+  const [geoLoading, setGeoLoading] = useState(false)
+  /** Zoom steps can outrun the network; only the newest response may land. */
+  const geoSampleRef = useRef(0)
   const [tag, setTag] = useState<string | null>(null)
   const [personId, setPersonId] = useState<number | null>(null)
   const [dirId, setDirId] = useState<number | null>(null)
@@ -194,13 +200,22 @@ export default function Album() {
     }
   }, [view])
 
-  /** Geo view refetches on its own: every precision change (map zoom) re-aggregates. */
+  /** Geo view refetches on its own: every zoom step re-samples on a finer grid. */
   useEffect(() => {
     if (view !== 'geo') return
+    const seq = ++geoSampleRef.current
+    setGeoLoading(true)
     api
       .get<{ points: GeoPoint[] }>('/api/photos/geo', { precision: geoPrecision })
-      .then((r) => setPoints(r.points))
-      .catch((e: Error) => setError(e.message))
+      .then((r) => {
+        if (seq === geoSampleRef.current) setPoints(r.points)
+      })
+      .catch((e: Error) => {
+        if (seq === geoSampleRef.current) setError(e.message)
+      })
+      .finally(() => {
+        if (seq === geoSampleRef.current) setGeoLoading(false)
+      })
   }, [view, geoPrecision])
 
   useEffect(() => {
@@ -227,24 +242,29 @@ export default function Album() {
       </div>
 
       <div className="toolbar">
-        {(['timeline', 'tree', 'tags', 'people', 'geo'] as const).map((v) => (
-          <button
-            key={v}
-            className={view === v ? '' : 'ghost'}
-            onClick={() => {
-              setView(v)
-              setTag(null)
-              setPersonId(null)
-              setDirId(null)
-              setGeoLabel(null)
-            }}
-          >
-            {VIEW_LABELS[v]}
-          </button>
-        ))}
+        <span className="seg" role="group" aria-label="相册视图">
+          {VIEWS.map((v) => (
+            <button
+              key={v}
+              type="button"
+              className={`seg-btn${view === v ? ' on' : ''}`}
+              aria-pressed={view === v}
+              onClick={() => {
+                setView(v)
+                setTag(null)
+                setPersonId(null)
+                setDirId(null)
+                setGeoLabel(null)
+              }}
+            >
+              {VIEW_LABELS[v]}
+            </button>
+          ))}
+        </span>
         {(tag || personId || dirId || geoLabel) && (
           <button
-            className="ghost"
+            type="button"
+            className="ghost small"
             onClick={() => {
               setTag(null)
               setPersonId(null)
@@ -257,10 +277,11 @@ export default function Album() {
           </button>
         )}
         {view === 'timeline' && !tag && !personId && !dirId && !geoLabel && (
-          <span className="seg" role="group" aria-label="媒体类型">
+          <span className="seg toolbar-end" role="group" aria-label="媒体类型">
             {(['all', 'photo', 'video'] as const).map((k) => (
               <button
                 key={k}
+                type="button"
                 className={`seg-btn${kind === k ? ' on' : ''}`}
                 onClick={() => setKind(k)}
                 aria-pressed={kind === k}
@@ -270,7 +291,11 @@ export default function Album() {
             ))}
           </span>
         )}
-        {loading && <span className="muted">加载中…</span>}
+        {loading && (
+          <span className="muted" aria-live="polite">
+            加载中…
+          </span>
+        )}
       </div>
 
       {error && <div className="error">{error}</div>}
@@ -304,7 +329,7 @@ export default function Album() {
                 <th>照片</th>
                 <th>文件</th>
                 <th>占用</th>
-                <th />
+                <th><span className="sr-only">选择</span></th>
               </tr>
             </thead>
             <tbody>
@@ -403,13 +428,19 @@ export default function Album() {
       {view === 'geo' && !geoLabel && (
         <div className="card">
           <h2>地点</h2>
-          {points.length === 0 && !loading && (
-            <div className="empty">没有带 GPS 信息的照片</div>
+          {points.length === 0 && !geoLoading && (
+            <div className="empty">
+              没有带 GPS 信息的照片
+              <div className="empty-hint">
+                先在「目录管理」登记带 album 标记的目录，再到「任务中心」执行一次全量重扫
+              </div>
+            </div>
           )}
           {points.length > 0 && (
             <GeoMap
               points={points}
               precision={geoPrecision}
+              loading={geoLoading}
               onSelect={showGeo}
               onPrecisionChange={setGeoPrecision}
             />
@@ -471,6 +502,8 @@ export default function Album() {
     </div>
   )
 }
+
+const VIEWS: AlbumView[] = ['timeline', 'tree', 'tags', 'people', 'geo']
 
 const VIEW_LABELS: Record<AlbumView, string> = {
   timeline: '时间轴',
@@ -588,6 +621,8 @@ function RenameDialog({
             onKeyDown={(e) => {
               if (e.key === 'Enter' && valid) onSubmit(value.trim())
             }}
+            name="group-name"
+            autoComplete="off"
             autoFocus
             onFocus={(e) => e.target.select()}
           />

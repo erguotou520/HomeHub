@@ -85,7 +85,7 @@ export default function Trash() {
               <th>大小</th>
               <th>删除时间</th>
               <th>到期时间</th>
-              <th />
+              <th><span className="sr-only">操作</span></th>
             </tr>
           </thead>
           <tbody>

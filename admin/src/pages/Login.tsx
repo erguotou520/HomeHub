@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { useAuth } from '../state/auth'
+import Icon from '../components/Icon'
 
 export default function Login() {
   const { login } = useAuth()
@@ -30,14 +31,21 @@ export default function Login() {
   }
 
   return (
-    <div className="login-wrap">
+    // 用 <main> 而不是 <div>：登录态下整页只有这一块内容，
+    // 没有 main landmark 读屏用户会失去「跳到主内容」的落点。
+    <main className="login-wrap">
       <form className="login-card" onSubmit={submit}>
-        <h1>
-          Home<span style={{ background: 'var(--grad)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}>Hub</span>
-        </h1>
-        <p className="muted" style={{ marginTop: 0, marginBottom: 18 }}>
-          管理后台 · 请输入管理员密码
-        </p>
+        <div className="login-brand">
+          <span className="brand-mark" aria-hidden="true">
+            <Icon name="brand" size={19} strokeWidth={1.7} />
+          </span>
+          <div>
+            <h1>
+              Home<span>Hub</span>
+            </h1>
+            <p className="login-sub">家庭数据中心 · 管理后台</p>
+          </div>
+        </div>
         <div className="field">
           <label htmlFor="pw">管理员密码</label>
           <input
@@ -59,10 +67,10 @@ export default function Login() {
             {error}
           </div>
         )}
-        <button type="submit" disabled={busy} style={{ width: '100%', marginTop: 8 }}>
-          {busy ? '登录中…' : '登 录'}
+        <button type="submit" className="primary" disabled={busy}>
+          {busy ? '登录中…' : '登录'}
         </button>
       </form>
-    </div>
+    </main>
   )
 }

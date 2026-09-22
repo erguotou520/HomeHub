@@ -61,6 +61,11 @@ const PATHS = {
   resize: 'M4 20v-6M4 20h6M20 4v6M20 4h-6M4 20L10 14M20 4l-6 6',
   zoomIn: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5M8 11h6M11 8v6',
   zoomOut: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5M8 11h6',
+  logout: 'M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4M17 8l4 4-4 4M9 12h12',
+
+  // ── 品牌 ──
+  // 层叠卡片：HomeHub 是「把散落的东西收拢成一层层归档」的意思。
+  brand: 'M12 3l8.5 4.6-8.5 4.6L3.5 7.6zM3.5 12.3l8.5 4.6 8.5-4.6M3.5 16.7l8.5 4.6 8.5-4.6',
 } as const
 
 export type IconName = keyof typeof PATHS

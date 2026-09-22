@@ -688,7 +688,7 @@ export default function Files() {
                   <th>名称</th>
                   <th className="num">大小</th>
                   <th>修改时间</th>
-                  <th className="ops" />
+                  <th className="ops"><span className="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>

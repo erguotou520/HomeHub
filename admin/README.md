@@ -2,6 +2,9 @@
 
 React + TypeScript + Vite 实现的 HomeHub 管理后台，同时兼作 PC 端相册客户端。
 
+界面是「中性石墨 + 冷调强调色」的设计系统，令牌、组件规范与配色改动前必读的
+几条硬规则见 **[DESIGN.md](./DESIGN.md)**。
+
 ## 开发
 
 ```bash
@@ -45,12 +48,28 @@ ADMIN_DIST=/app/admin/dist ./homehub-server   # 访问 http://<server>:8485/
 
 ## 相册「地点」视图
 
-服务端 `/api/photos/geo` 返回按经纬度网格聚合的点，PC 端用 **Leaflet + 高德瓦片**渲染
-（`admin/src/components/GeoMap.tsx`），可切换路网 / 影像两种底图。
+PC 端用 **Leaflet + 高德瓦片**渲染（`admin/src/components/GeoMap.tsx`），可切换路网 / 影像两种底图。
+
+聚合分两层，各管一件事：
+
+| 层 | 粒度 | 职责 |
+|----|------|------|
+| 服务端 `/api/photos/geo?precision=` | 经纬度网格，随 zoom 变细（`precisionForZoom`，约等于当前 zoom 下 14 px 的地面距离） | 只做取样，把 payload 压到「每个网格一个点」 |
+| 客户端 | **屏幕像素距离**（`CLUSTER_RADIUS_PX = 56`） | 决定最终看到的聚合气泡，每次 `zoomend` 重算 |
+
+屏幕像素半径意味着「相近」是视觉意义上的：相距 2 km 的两点在小比例尺下同属一个气泡，
+放大到彼此超过 56 px 后自动拆开；缩小回去又会合并。服务端网格刻意比气泡细，
+所以放大时既取到更细的点、气泡本身也在散开，不会出现「卡住不拆」。
+平移不触发重新聚合（像素距离与平移无关）。
+
+**只有一种标记**：没有「单张点 / 聚合气泡」的区分，任何点都是一个带数字的气泡，
+数字就是它包含的照片数（只有 1 张时显示 `1`）。因此地图上不需要图例。
+直径由 `bubbleSize(count)` 按 `log10(count)` 绝对映射到 28–54 px（1000 张封顶），
+不随当前视野里的最大聚合数变化——否则满屏都是单点时每个点都会撑到最大直径而互相重叠。
 
 照片的 EXIF GPS 是 WGS-84，而高德瓦片是 GCJ-02（火星坐标），
-因此每个聚合点在交给 Leaflet 之前都会做 WGS-84 → GCJ-02 换算，否则标记会偏离几百米。
-点击聚合点会带上该点的 `photo_ids` 请求 `/api/photos/list?ids=…` 展开照片。
+因此每个点在交给 Leaflet 之前都会做 WGS-84 → GCJ-02 换算，否则标记会偏离几百米。
+点击气泡会带上其 `photo_ids` 请求 `/api/photos/list?ids=…` 展开照片（上限 1000 张）。
 
 ## 目录结构
 

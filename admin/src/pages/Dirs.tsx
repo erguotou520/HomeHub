@@ -288,7 +288,7 @@ export default function Dirs() {
               <th>文件</th>
               <th>占用</th>
               <th>状态</th>
-              <th />
+              <th><span className="sr-only">操作</span></th>
             </tr>
           </thead>
           <tbody>

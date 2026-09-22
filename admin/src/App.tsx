@@ -62,8 +62,15 @@ export default function App() {
       </a>
       <aside className="sidebar">
         <div className="brand">
-          Home<span>Hub</span>
-          <div className="brand-sub">家庭数据中心</div>
+          <span className="brand-mark" aria-hidden="true">
+            <Icon name="brand" size={17} strokeWidth={1.7} />
+          </span>
+          <span className="brand-text">
+            <span className="brand-name">
+              Home<span>Hub</span>
+            </span>
+            <span className="brand-sub">家庭数据中心</span>
+          </span>
         </div>
         <nav className="nav">
           {NAV.map((item) => (
@@ -79,7 +86,8 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <button className="ghost small" onClick={logout}>
+          <button type="button" className="sb-action" onClick={logout}>
+            <Icon name="logout" size={17} />
             退出登录
           </button>
         </div>

@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS photo_embeddings_v2 (
     scene     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (photo_id, model, scene)
 );
-INSERT INTO photo_embeddings_v2 SELECT photo_id, model, dimension, dtype, embedding, scene
+-- Existing rows predate scene detection and are photos, so they backfill as scene 0.
+INSERT INTO photo_embeddings_v2 SELECT photo_id, model, dimension, dtype, embedding, 0
   FROM photo_embeddings;
 DROP TABLE photo_embeddings;
 ALTER TABLE photo_embeddings_v2 RENAME TO photo_embeddings;

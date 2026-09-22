@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import me.erguotou.homehub.data.DirEntry
 import me.erguotou.homehub.data.FileEntry
 import me.erguotou.homehub.data.ImageOp
+import me.erguotou.homehub.data.Prefs
 import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.util.FileKind
 import me.erguotou.homehub.util.FileKinds
@@ -84,6 +85,7 @@ data class FilesUiState(
 class FilesViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repository = Repository(app)
+    private val prefs = Prefs(app)
 
     private val _state = MutableStateFlow(FilesUiState())
     val state: StateFlow<FilesUiState> = _state.asStateFlow()
@@ -92,7 +94,12 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             repository.dirs().onSuccess { list ->
                 _state.value = _state.value.copy(dirs = list)
-                list.firstOrNull()?.let { open(it.name, "") }
+                // The server registers several named roots; opening the first
+                // one unconditionally made the others look unreachable. Reopen
+                // the one last used, falling back to the first when it is gone.
+                val remembered = prefs.lastFileDir
+                val start = list.firstOrNull { it.name == remembered } ?: list.firstOrNull()
+                start?.let { open(it.name, "") }
             }.onFailure { e ->
                 _state.value = _state.value.copy(error = e.message)
             }
@@ -141,19 +148,41 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun open(dir: String, path: String) {
-        _state.value = _state.value.copy(
+        // Remember the root so the next launch lands where the user left off
+        // instead of snapping back to the first registered directory.
+        prefs.lastFileDir = dir
+        val previous = _state.value
+        // Moving to another folder must drop the rows on screen. Leaving them
+        // up meant a root that fails to list (an external volume that is not
+        // mounted server-side) rendered the *previous* directory's files under
+        // the new directory's name — the list looked like the switch did
+        // nothing. Re-listing the same folder keeps them to avoid a flicker.
+        val samePlace = previous.currentDir == dir && previous.currentPath == path
+        _state.value = previous.copy(
             loading = true,
             error = null,
             currentDir = dir,
             currentPath = path,
+            entries = if (samePlace) previous.entries else emptyList(),
             selected = emptySet()
         )
         viewModelScope.launch {
+            // Switching roots twice in a row (photos → mi9) can leave the slower
+            // request landing last, which would paint the wrong folder's rows
+            // under the current title. Only the newest request may apply.
+            fun stillCurrent(): Boolean =
+                _state.value.currentDir == dir && _state.value.currentPath == path
             repository.listFiles(dir, path, _state.value.sort, _state.value.desc)
                 .fold(
-                    onSuccess = { _state.value = _state.value.copy(loading = false, entries = it) },
+                    onSuccess = { list ->
+                        if (stillCurrent()) {
+                            _state.value = _state.value.copy(loading = false, entries = list)
+                        }
+                    },
                     onFailure = { e ->
-                        _state.value = _state.value.copy(loading = false, error = e.message)
+                        if (stillCurrent()) {
+                            _state.value = _state.value.copy(loading = false, error = e.message)
+                        }
                     }
                 )
         }

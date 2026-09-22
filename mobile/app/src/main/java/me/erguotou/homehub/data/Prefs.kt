@@ -83,6 +83,16 @@ class Prefs(context: Context) {
         lastUploadPath = path
     }
 
+    /**
+     * Root directory the 文件 tab was last browsing. The server registers
+     * several named directories and the tab used to always reopen the first
+     * one, which made the others look unreachable. Internal convenience only,
+     * not surfaced in 设置.
+     */
+    var lastFileDir: String
+        get() = prefs.getString(KEY_LAST_FILE_DIR, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LAST_FILE_DIR, value.trim()).apply()
+
     var frigateUrl: String
         get() = prefs.getString(KEY_FRIGATE_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_FRIGATE_URL, value.trim()).apply()
@@ -267,6 +277,7 @@ class Prefs(context: Context) {
         private const val KEY_DUPLICATE_POLICY = "duplicate_policy"
         private const val KEY_LAST_UPLOAD_DIR = "last_upload_dir"
         private const val KEY_LAST_UPLOAD_PATH = "last_upload_path"
+        private const val KEY_LAST_FILE_DIR = "last_file_dir"
         private const val KEY_FRIGATE_URL = "frigate_url"
 
         private const val WG_PRIVATE_KEY = "wg_private_key"

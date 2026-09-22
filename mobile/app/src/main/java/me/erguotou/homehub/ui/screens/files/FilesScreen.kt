@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Code
@@ -69,6 +71,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -116,6 +119,7 @@ fun FilesScreen(
     var uploadTargetDir by remember { mutableStateOf<String?>(null) }
     var uploadTargetPath by remember { mutableStateOf("") }
     var menuExpanded by remember { mutableStateOf(false) }
+    var rootMenuExpanded by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<List<FileEntry>?>(null) }
     var pendingUris by remember { mutableStateOf<List<android.net.Uri>>(emptyList()) }
 
@@ -184,7 +188,60 @@ fun FilesScreen(
                 Column {
                 TopAppBar(
                     title = {
-                        Text(state.currentDir?.let { "$it/${state.currentPath}" } ?: "文件")
+                        // 服务端注册了多个根目录（document / photos / music …）。
+                        // 这里以前只是纯文本，且永远只打开第一个，看上去像"只有
+                        // 一个目录"。标题现在就是目录切换器：点开列出全部根目录。
+                        val currentDir = state.currentDir
+                        val canSwitch = state.dirs.size > 1
+                        Box {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .then(
+                                        if (canSwitch) Modifier.clickable { rootMenuExpanded = true }
+                                        else Modifier
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    currentDir?.let {
+                                        if (state.currentPath.isBlank()) it else "$it/${state.currentPath}"
+                                    } ?: "文件",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                if (canSwitch) {
+                                    Icon(
+                                        Icons.Default.ArrowDropDown,
+                                        contentDescription = "切换目录"
+                                    )
+                                }
+                            }
+                            DropdownMenu(
+                                expanded = rootMenuExpanded,
+                                onDismissRequest = { rootMenuExpanded = false }
+                            ) {
+                                state.dirs.forEach { d ->
+                                    DropdownMenuItem(
+                                        text = { Text(d.name) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Folder, contentDescription = null)
+                                        },
+                                        trailingIcon = {
+                                            if (d.name == state.currentDir) {
+                                                Icon(Icons.Default.Check, contentDescription = null)
+                                            }
+                                        },
+                                        onClick = {
+                                            rootMenuExpanded = false
+                                            vm.open(d.name, "")
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     },
                     navigationIcon = {
                         if (state.currentPath.isNotBlank()) {
@@ -277,7 +334,16 @@ fun FilesScreen(
                     when {
                         state.loading && state.entries.isEmpty() -> Loading()
                         state.error != null && state.entries.isEmpty() ->
-                            ErrorText(state.error!!) { retryDir?.let { vm.open(it.first, it.second) } }
+                            // A root that is not mounted server-side (外置盘没挂上)
+                            // fails here, and 重试 can never succeed. Point at the
+                            // way out instead of leaving the user stuck.
+                            ErrorText(
+                                state.error!! + if (state.dirs.size > 1) {
+                                    "\n可点标题切换其他目录"
+                                } else {
+                                    ""
+                                }
+                            ) { retryDir?.let { vm.open(it.first, it.second) } }
                         state.entries.isEmpty() -> Empty("这个目录是空的", icon = Icons.Outlined.FolderOpen)
                         else -> LazyColumn {
                             items(state.entries, key = { it.path }) { entry ->

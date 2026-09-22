@@ -55,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,10 +73,12 @@ import androidx.compose.ui.unit.sp
 import androidx.core.graphics.createBitmap
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.erguotou.homehub.ui.components.AudioPage
+import me.erguotou.homehub.ui.components.AudioPlaybackMemory
 import me.erguotou.homehub.ui.components.InfoLine
 import me.erguotou.homehub.ui.components.ImagePage
 import me.erguotou.homehub.ui.components.VideoControllerInset
@@ -110,6 +113,15 @@ import java.io.File
  * album's photo+video pager. Image pages keep the album's server-side
  * rotate/flip/restore toolbar — those endpoints are file-address based, so they
  * work for any image in a registered directory.
+ *
+ * Audio pages are the one exception to "swipe always pages": the music surface
+ * is a full player (disc + cover + seek bar), and while the seek bar is being
+ * dragged the pager is frozen — otherwise scrubbing a track immediately flung
+ * the viewer onto the neighbouring file. See [AudioPage].
+ *
+ * Leaving an audio page pauses the track at the exact spot and returning
+ * carries on from there, which is what [audioMemory] is for — the page itself,
+ * and its player, do not survive the swipe.
  */
 /**
  * Height of the translucent bar floating over the viewer (back arrow, file
@@ -117,6 +129,40 @@ import java.io.File
  * much below the status bar so the first line never hides under it.
  */
 private val ViewerTopBarHeight = 56.dp
+
+/**
+ * Cover-image file stems that sit next to a track rather than inside it.
+ * Mirrors what the server's own music parser looks for.
+ */
+private val CoverStems = setOf("cover", "folder", "album", "albumart", "artwork", "front")
+
+/**
+ * URL of a cover image shipped alongside [item], if any.
+ *
+ * Embedded artwork (read by the player from the file's tags) wins over this —
+ * [AudioPage] only asks for a sibling cover when the file carries none. Matches
+ * `track.jpg` first, then the usual `cover/folder/album` names, and only looks
+ * at image siblings in the *same* folder.
+ */
+private fun siblingCover(
+    item: ViewerItem,
+    items: List<ViewerItem>,
+    urlFor: (ViewerItem) -> String
+): String? {
+    if (item.kind != FileKind.AUDIO) return null
+    val folder = item.relPath.substringBeforeLast('/', "")
+    val siblings = items.filter {
+        it.kind == FileKind.IMAGE &&
+            it.dir == item.dir &&
+            it.relPath.substringBeforeLast('/', "") == folder
+    }
+    if (siblings.isEmpty()) return null
+    fun stemOf(name: String) = name.substringBeforeLast('.', name).lowercase()
+    val stem = stemOf(item.name)
+    val match = siblings.firstOrNull { stemOf(it.name) == stem }
+        ?: siblings.firstOrNull { stemOf(it.name) in CoverStems }
+    return match?.let(urlFor)
+}
 
 @Composable
 fun FileViewerScreen(
@@ -138,10 +184,19 @@ fun FileViewerScreen(
         pageCount = { items.size }
     )
     var pageZoomed by remember { mutableStateOf(false) }
+    /** A seek bar is being dragged: paging must not steal the gesture. */
+    var scrubbing by remember { mutableStateOf(false) }
+    /**
+     * Where each track was left. Lives as long as the viewer does because audio
+     * pages are torn down with their player: without this, leaving a song
+     * paused would lose the position and it would replay from 0:00.
+     */
+    val audioMemory = remember { AudioPlaybackMemory() }
     var busy by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -178,7 +233,9 @@ fun FileViewerScreen(
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
-            userScrollEnabled = !pageZoomed
+            // Freeze paging while a seek bar is held: the drag belongs to the
+            // slider, and letting the pager take it flipped to another file.
+            userScrollEnabled = !pageZoomed && !scrubbing
         ) { page ->
             val item = items[page]
             when (item.kind) {
@@ -198,7 +255,16 @@ fun FileViewerScreen(
                     url = urlFor(item),
                     title = item.name,
                     subtitle = item.entry.mimeType,
-                    isCurrentPage = pagerState.currentPage == page
+                    isCurrentPage = pagerState.currentPage == page,
+                    memory = audioMemory,
+                    coverUrl = siblingCover(item, items, urlFor),
+                    onScrubbingChanged = { scrubbing = it },
+                    onPrev = if (page > 0) {
+                        { scope.launch { pagerState.animateScrollToPage(page - 1) } }
+                    } else null,
+                    onNext = if (page < items.size - 1) {
+                        { scope.launch { pagerState.animateScrollToPage(page + 1) } }
+                    } else null
                 )
                 FileKind.TEXT -> TextPage(item, loadText)
                 FileKind.PDF -> PdfPage(item, loadBytes) { onOpenExternal(item) }

@@ -1,5 +1,8 @@
 # Build stage
-FROM rust:1.85-bookworm AS builder
+# ort-sys (ONNX Runtime) requires rustc >= 1.88, and the prebuilt ONNX Runtime
+# library needs libstdc++ symbols newer than Debian bookworm's GCC 12 —
+# build on trixie (GCC 14).
+FROM rust:1.92-trixie AS builder
 
 WORKDIR /app
 
@@ -26,8 +29,9 @@ COPY migrations ./migrations
 # out of the box (drop model files under /data/models, see README).
 RUN touch src/main.rs && cargo build --release --features onnx
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage — must match the builder's glibc (trixie) since the binary is
+# linked against trixie's glibc / libstdc++.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -35,6 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo \
     # `jpegtran` powers the lossless JPEG optimisation; optional.
     libjpeg-turbo-progs \
+    # `ffmpeg`/`ffprobe` power the video pipeline (probe, posters, scene frames).
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

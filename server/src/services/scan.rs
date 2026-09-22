@@ -229,103 +229,122 @@ pub async fn scan_dir(
 }
 
 /// File system watcher: enqueue a targeted scan whenever something changes.
+///
+/// Runs on a dedicated OS thread: on network filesystems (CIFS/NAS) the
+/// recursive inotify registration walks the entire tree and can take a very
+/// long time (or wedge), which must never block the main thread from
+/// binding the HTTP port. If no directory can be watched, incremental
+/// changes still rely on the periodic full rescan.
 pub fn spawn_watcher(registry: DirRegistry, queue: TaskQueue, debounce_secs: u64) -> Result<()> {
     use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use std::collections::HashMap;
     use std::sync::mpsc as std_mpsc;
     use std::time::{Duration, Instant};
 
-    let (ntx, nrx) = std_mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher = RecommendedWatcher::new(
-        move |res: notify::Result<notify::Event>| {
-            let _ = ntx.send(res);
-        },
-        NotifyConfig::default().with_poll_interval(Duration::from_secs(30)),
-    )?;
+    let handle = tokio::runtime::Handle::current();
 
-    let mut watched: Vec<(std::path::PathBuf, i64)> = Vec::new();
-    for dir in registry.enabled() {
-        let path = Path::new(&dir.path);
-        if path.exists() {
-            match watcher.watch(path, RecursiveMode::Recursive) {
-                Ok(_) => watched.push((path.to_path_buf(), dir.id)),
-                Err(e) => tracing::warn!("cannot watch {}: {}", dir.path, e),
-            }
-        }
-    }
-    if watched.is_empty() {
-        return Ok(());
-    }
-    tracing::info!("watching {} directories for changes", watched.len());
-
-    let debounce = Duration::from_secs(debounce_secs.max(5));
-    tokio::spawn(async move {
-        let mut last: HashMap<i64, Instant> = HashMap::new();
-        loop {
-            let events: Vec<notify::Event> = tokio::task::block_in_place(|| {
-                let mut out = Vec::new();
-                match nrx.recv() {
-                    Ok(Ok(event)) => out.push(event),
-                    Ok(Err(e)) => tracing::debug!("watch error: {}", e),
-                    Err(_) => return out,
+    std::thread::Builder::new()
+        .name("fs-watcher".into())
+        .spawn(move || {
+            let (ntx, nrx) = std_mpsc::channel::<notify::Result<notify::Event>>();
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: notify::Result<notify::Event>| {
+                    let _ = ntx.send(res);
+                },
+                NotifyConfig::default().with_poll_interval(Duration::from_secs(30)),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("file watcher unavailable: {}", e);
+                    return;
                 }
-                while let Ok(Ok(event)) = nrx.try_recv() {
-                    out.push(event);
-                }
-                out
-            });
+            };
 
-            if events.is_empty() {
-                break;
-            }
-
-            for event in events {
-                let relevant = matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                );
-                if !relevant {
-                    continue;
-                }
-                let Some(path) = event.paths.first() else {
-                    continue;
-                };
-                // Pipeline temp files and thumbnail churn are not content
-                // changes: reacting to them feeds a scan/compress feedback loop.
-                let ev_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if ev_name.ends_with(".tmp")
-                    || path
-                        .components()
-                        .any(|c| c.as_os_str().to_string_lossy() == ".thumbnails")
-                {
-                    continue;
-                };
-                let Some((_, dir_id)) = watched
-                    .iter()
-                    .find(|(root, _)| path.starts_with(root))
-                else {
-                    continue;
-                };
-                let dir_id = *dir_id;
-
-                let now = Instant::now();
-                if let Some(prev) = last.get(&dir_id) {
-                    if now.duration_since(*prev) < debounce {
-                        continue;
+            let mut watched: Vec<(std::path::PathBuf, i64)> = Vec::new();
+            for dir in registry.enabled() {
+                let path = Path::new(&dir.path);
+                if path.exists() {
+                    match watcher.watch(path, RecursiveMode::Recursive) {
+                        Ok(_) => watched.push((path.to_path_buf(), dir.id)),
+                        Err(e) => tracing::warn!("cannot watch {}: {}", dir.path, e),
                     }
                 }
-                last.insert(dir_id, now);
-                if let Err(e) = queue.enqueue_scan(dir_id, false, PRIORITY_NORMAL).await {
-                    tracing::debug!("cannot enqueue scan: {}", e);
+            }
+            if watched.is_empty() {
+                tracing::warn!(
+                    "file watcher registered no directories; \
+                     incremental changes rely on the periodic rescan"
+                );
+                return;
+            }
+            tracing::info!("watching {} directories for changes", watched.len());
+
+            let debounce = Duration::from_secs(debounce_secs.max(5));
+            let mut last: HashMap<i64, Instant> = HashMap::new();
+            loop {
+                let events: Vec<notify::Event> = {
+                    let mut out = Vec::new();
+                    match nrx.recv() {
+                        Ok(Ok(event)) => out.push(event),
+                        Ok(Err(e)) => {
+                            tracing::debug!("watch error: {}", e);
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                    while let Ok(Ok(event)) = nrx.try_recv() {
+                        out.push(event);
+                    }
+                    out
+                };
+
+                for event in events {
+                    let relevant = matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    );
+                    if !relevant {
+                        continue;
+                    }
+                    let Some(path) = event.paths.first() else {
+                        continue;
+                    };
+                    // Pipeline temp files and thumbnail churn are not content
+                    // changes: reacting to them feeds a scan/compress feedback loop.
+                    let ev_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if ev_name.ends_with(".tmp")
+                        || path
+                            .components()
+                            .any(|c| c.as_os_str().to_string_lossy() == ".thumbnails")
+                    {
+                        continue;
+                    }
+                    let Some((_, dir_id)) = watched
+                        .iter()
+                        .find(|(root, _)| path.starts_with(root))
+                    else {
+                        continue;
+                    };
+                    let dir_id = *dir_id;
+
+                    let now = Instant::now();
+                    if let Some(prev) = last.get(&dir_id) {
+                        if now.duration_since(*prev) < debounce {
+                            continue;
+                        }
+                    }
+                    last.insert(dir_id, now);
+                    if let Err(e) =
+                        handle.block_on(queue.enqueue_scan(dir_id, false, PRIORITY_NORMAL))
+                    {
+                        tracing::debug!("cannot enqueue scan: {}", e);
+                    }
                 }
             }
-        }
-    });
-
-    // Keep the watcher alive for the lifetime of the process.
-    std::mem::forget(watcher);
+        })
+        .map_err(|e| anyhow::anyhow!("failed to spawn watcher thread: {e}"))?;
     Ok(())
 }

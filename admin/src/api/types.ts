@@ -271,17 +271,6 @@ export interface RuntimeSettings {
     'disk-usage-percent': number
     'task-failure-threshold': number
     'cooldown-secs': number
-    ntfy: { enabled: boolean; url: string; topic: string; token: string }
-    telegram: { enabled: boolean; 'bot-token': string; 'chat-id': string }
-    smtp: {
-      enabled: boolean
-      host: string
-      port: number
-      username: string
-      password: string
-      from: string
-      to: string
-      starttls: boolean
-    }
+    serverchan: { enabled: boolean; 'send-key': string }
   }
 }

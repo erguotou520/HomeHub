@@ -780,12 +780,9 @@ pub struct AlertConfig {
     /// Minimum seconds between two notifications of the same alert kind.
     #[serde(rename = "cooldown-secs", default = "default_alert_cooldown")]
     pub cooldown_secs: i64,
+    /// ServerChan (sct.ftqq.com) push: a SendKey is all it takes.
     #[serde(default)]
-    pub ntfy: NtfyConfig,
-    #[serde(default)]
-    pub telegram: TelegramConfig,
-    #[serde(default)]
-    pub smtp: SmtpConfig,
+    pub serverchan: ServerChanConfig,
 }
 
 fn default_disk_threshold() -> f64 {
@@ -799,64 +796,12 @@ fn default_alert_cooldown() -> i64 {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct NtfyConfig {
+pub struct ServerChanConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// SendKey, e.g. SCT1234TkC… — posted to https://sctapi.ftqq.com/{key}.send
     #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub topic: String,
-    #[serde(default)]
-    pub token: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TelegramConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(rename = "bot-token", default)]
-    pub bot_token: String,
-    #[serde(rename = "chat-id", default)]
-    pub chat_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SmtpConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub host: String,
-    #[serde(default = "default_smtp_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-    #[serde(default)]
-    pub from: String,
-    #[serde(default)]
-    pub to: String,
-    #[serde(default = "default_true")]
-    pub starttls: bool,
-}
-
-fn default_smtp_port() -> u16 {
-    587
-}
-
-impl Default for SmtpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: String::new(),
-            port: default_smtp_port(),
-            username: String::new(),
-            password: String::new(),
-            from: String::new(),
-            to: String::new(),
-            starttls: true,
-        }
-    }
+    pub send_key: String,
 }
 
 impl Default for AlertConfig {
@@ -866,9 +811,7 @@ impl Default for AlertConfig {
             disk_usage_percent: default_disk_threshold(),
             task_failure_threshold: default_task_failure(),
             cooldown_secs: default_alert_cooldown(),
-            ntfy: NtfyConfig::default(),
-            telegram: TelegramConfig::default(),
-            smtp: SmtpConfig::default(),
+            serverchan: ServerChanConfig::default(),
         }
     }
 }

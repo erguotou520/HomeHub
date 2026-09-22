@@ -97,21 +97,37 @@ export default function SystemPage() {
     setSettings((s) => (s ? { ...s, alerts: { ...s.alerts, ...patch } } : s))
   }
 
+  // 磁盘水位带上状态语义：用用户自己配的告警阈值当 warn 线，接近写满时升级为 err。
+  // 否则「90.8%」和「v0.1.0」长得一模一样，告警色就白定义了。
+  const diskWarnAt = settings?.alerts['disk-usage-percent'] ?? 85
+  const diskPct = info?.disk_usage_percent ?? null
+  const diskTone = diskPct == null ? '' : diskPct >= 95 ? 'err' : diskPct >= diskWarnAt ? 'warn' : ''
+
   return (
     <div>
       {error && <div className="error">{error}</div>}
 
       <div className="toolbar">
-        {([
-          ['overview', '概览'],
-          ['alerts', '告警与通知'],
-          ['dedup', '重复照片'],
-          ['backup', '数据库备份'],
-        ] as const).map(([t, label]) => (
-          <button key={t} className={tab === t ? '' : 'ghost'} onClick={() => setTab(t)}>
-            {label}
-          </button>
-        ))}
+        <span className="seg" role="group" aria-label="系统信息分区">
+          {(
+            [
+              ['overview', '概览'],
+              ['alerts', '告警与通知'],
+              ['dedup', '重复照片'],
+              ['backup', '数据库备份'],
+            ] as const
+          ).map(([t, label]) => (
+            <button
+              key={t}
+              type="button"
+              className={`seg-btn${tab === t ? ' on' : ''}`}
+              aria-pressed={tab === t}
+              onClick={() => setTab(t)}
+            >
+              {label}
+            </button>
+          ))}
+        </span>
       </div>
 
       {tab === 'overview' && info && (
@@ -129,11 +145,12 @@ export default function SystemPage() {
               <div className="label">SQLite</div>
               <div className="value">{formatBytes(info.db_bytes)}</div>
             </div>
-            <div className="stat">
+            <div className={diskTone ? `stat ${diskTone}` : 'stat'}>
               <div className="label">磁盘水位</div>
               <div className="value">
                 {info.disk_usage_percent != null ? `${info.disk_usage_percent.toFixed(1)}%` : '-'}
               </div>
+              {diskPct != null && <div className="hint">告警阈值 {diskWarnAt}%</div>}
             </div>
             <div className="stat">
               <div className="label">ML 后端</div>
@@ -205,139 +222,32 @@ export default function SystemPage() {
           </div>
 
           <div className="card">
-            <h2>通知渠道（可多选）</h2>
+            <h2>通知渠道（Server酱）</h2>
             <div className="row" style={{ alignItems: 'flex-end' }}>
               <label className="row" style={{ gap: 6 }}>
                 <input
                   type="checkbox"
                   style={{ width: 'auto' }}
-                  checked={settings.alerts.ntfy.enabled}
-                  onChange={(e) =>
-                    patchAlerts({ ntfy: { ...settings.alerts.ntfy, enabled: e.target.checked } })
-                  }
-                />
-                ntfy
-              </label>
-              <div className="field" style={{ width: 220, marginBottom: 0 }}>
-                <label>ntfy 地址</label>
-                <input
-                  value={settings.alerts.ntfy.url}
-                  onChange={(e) =>
-                    patchAlerts({ ntfy: { ...settings.alerts.ntfy, url: e.target.value } })
-                  }
-                />
-              </div>
-              <div className="field" style={{ width: 160, marginBottom: 0 }}>
-                <label>主题</label>
-                <input
-                  value={settings.alerts.ntfy.topic}
-                  onChange={(e) =>
-                    patchAlerts({ ntfy: { ...settings.alerts.ntfy, topic: e.target.value } })
-                  }
-                />
-              </div>
-              <div className="field" style={{ width: 160, marginBottom: 0 }}>
-                <label>Token（可选）</label>
-                <input
-                  value={settings.alerts.ntfy.token}
-                  onChange={(e) =>
-                    patchAlerts({ ntfy: { ...settings.alerts.ntfy, token: e.target.value } })
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="row" style={{ alignItems: 'flex-end', marginTop: 12 }}>
-              <label className="row" style={{ gap: 6 }}>
-                <input
-                  type="checkbox"
-                  style={{ width: 'auto' }}
-                  checked={settings.alerts.telegram.enabled}
+                  checked={settings.alerts.serverchan.enabled}
                   onChange={(e) =>
                     patchAlerts({
-                      telegram: { ...settings.alerts.telegram, enabled: e.target.checked },
+                      serverchan: { ...settings.alerts.serverchan, enabled: e.target.checked },
                     })
                   }
                 />
-                Telegram
+                启用 Server酱推送
               </label>
-              <div className="field" style={{ width: 260, marginBottom: 0 }}>
-                <label>Bot Token</label>
-                <input
-                  value={settings.alerts.telegram['bot-token']}
-                  onChange={(e) =>
-                    patchAlerts({
-                      telegram: { ...settings.alerts.telegram, 'bot-token': e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div className="field" style={{ width: 180, marginBottom: 0 }}>
-                <label>Chat ID</label>
-                <input
-                  value={settings.alerts.telegram['chat-id']}
-                  onChange={(e) =>
-                    patchAlerts({
-                      telegram: { ...settings.alerts.telegram, 'chat-id': e.target.value },
-                    })
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="row" style={{ alignItems: 'flex-end', marginTop: 12 }}>
-              <label className="row" style={{ gap: 6 }}>
-                <input
-                  type="checkbox"
-                  style={{ width: 'auto' }}
-                  checked={settings.alerts.smtp.enabled}
-                  onChange={(e) =>
-                    patchAlerts({ smtp: { ...settings.alerts.smtp, enabled: e.target.checked } })
-                  }
-                />
-                SMTP 邮件
-              </label>
-              <div className="field" style={{ width: 200, marginBottom: 0 }}>
-                <label>主机</label>
-                <input
-                  value={settings.alerts.smtp.host}
-                  onChange={(e) => patchAlerts({ smtp: { ...settings.alerts.smtp, host: e.target.value } })}
-                />
-              </div>
-              <div className="field" style={{ width: 90, marginBottom: 0 }}>
-                <label>端口</label>
-                <input
-                  type="number"
-                  value={settings.alerts.smtp.port}
-                  onChange={(e) =>
-                    patchAlerts({ smtp: { ...settings.alerts.smtp, port: Number(e.target.value) } })
-                  }
-                />
-              </div>
-              <div className="field" style={{ width: 160, marginBottom: 0 }}>
-                <label>用户名</label>
-                <input
-                  value={settings.alerts.smtp.username}
-                  onChange={(e) =>
-                    patchAlerts({ smtp: { ...settings.alerts.smtp, username: e.target.value } })
-                  }
-                />
-              </div>
-              <div className="field" style={{ width: 160, marginBottom: 0 }}>
-                <label>密码</label>
+              <div className="field" style={{ width: 320, marginBottom: 0 }}>
+                <label>SendKey（sct.ftqq.com 获取）</label>
                 <input
                   type="password"
-                  value={settings.alerts.smtp.password}
+                  placeholder="SCT…"
+                  value={settings.alerts.serverchan['send-key']}
                   onChange={(e) =>
-                    patchAlerts({ smtp: { ...settings.alerts.smtp, password: e.target.value } })
+                    patchAlerts({
+                      serverchan: { ...settings.alerts.serverchan, 'send-key': e.target.value },
+                    })
                   }
-                />
-              </div>
-              <div className="field" style={{ width: 180, marginBottom: 0 }}>
-                <label>收件人</label>
-                <input
-                  value={settings.alerts.smtp.to}
-                  onChange={(e) => patchAlerts({ smtp: { ...settings.alerts.smtp, to: e.target.value } })}
                 />
               </div>
             </div>

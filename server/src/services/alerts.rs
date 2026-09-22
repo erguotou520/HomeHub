@@ -1,4 +1,4 @@
-//! Health alerting: thresholds -> notifications (ntfy / Telegram / SMTP).
+//! Health alerting: thresholds -> ServerChan (sct.ftqq.com) push notifications.
 
 use std::path::Path;
 
@@ -187,92 +187,27 @@ async fn notify(db: &Db, config: &Config, level: AlertLevel, kind: &str, message
 
     let title = format!("[HomeHub][{}] {}", level.as_str(), kind);
     let mut sent = false;
-    if let Ok(true) = notify_ntfy(alerts, &title, message).await {
-        sent = true;
-    }
-    if let Ok(true) = notify_telegram(alerts, &title, message).await {
-        sent = true;
-    }
-    if let Ok(true) = notify_smtp(alerts, &title, message).await {
+    if let Ok(true) = notify_serverchan(alerts, &title, message).await {
         sent = true;
     }
     sent
 }
 
-async fn notify_ntfy(cfg: &AlertConfig, title: &str, message: &str) -> Result<bool> {
-    if !cfg.ntfy.enabled || cfg.ntfy.url.is_empty() || cfg.ntfy.topic.is_empty() {
-        return Ok(false);
-    }
-    let url = format!("{}/{}", cfg.ntfy.url.trim_end_matches('/'), cfg.ntfy.topic);
-    let mut req = reqwest::Client::new()
-        .post(&url)
-        .header("Title", title)
-        .header("Tags", "warning,homehub")
-        .body(message.to_string());
-    if !cfg.ntfy.token.is_empty() {
-        req = req.bearer_auth(&cfg.ntfy.token);
-    }
-    let resp = req.send().await?;
-    Ok(resp.status().is_success())
-}
-
-async fn notify_telegram(cfg: &AlertConfig, title: &str, message: &str) -> Result<bool> {
-    if !cfg.telegram.enabled || cfg.telegram.bot_token.is_empty() || cfg.telegram.chat_id.is_empty() {
+/// ServerChan (sct.ftqq.com): one POST with the SendKey, done.
+async fn notify_serverchan(cfg: &AlertConfig, title: &str, message: &str) -> Result<bool> {
+    if !cfg.serverchan.enabled || cfg.serverchan.send_key.is_empty() {
         return Ok(false);
     }
     let url = format!(
-        "https://api.telegram.org/bot{}/sendMessage",
-        cfg.telegram.bot_token
+        "https://sctapi.ftqq.com/{}.send",
+        cfg.serverchan.send_key.trim()
     );
     let resp = reqwest::Client::new()
         .post(&url)
-        .json(&serde_json::json!({
-            "chat_id": cfg.telegram.chat_id,
-            "text": format!("{}\n{}", title, message),
-        }))
+        .form(&[("title", title), ("desp", message)])
         .send()
         .await?;
     Ok(resp.status().is_success())
-}
-
-async fn notify_smtp(cfg: &AlertConfig, title: &str, message: &str) -> Result<bool> {
-    if !cfg.smtp.enabled || cfg.smtp.host.is_empty() || cfg.smtp.to.is_empty() {
-        return Ok(false);
-    }
-    let smtp = cfg.smtp.clone();
-    let subject = title.to_string();
-    let body = message.to_string();
-    tokio::task::spawn_blocking(move || -> Result<bool> {
-        use lettre::message::header::ContentType;
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::{Message, SmtpTransport, Transport};
-
-        let from = if smtp.from.is_empty() {
-            smtp.username.clone()
-        } else {
-            smtp.from.clone()
-        };
-        let email = Message::builder()
-            .from(from.parse()?)
-            .to(smtp.to.parse()?)
-            .subject(subject)
-            .header(ContentType::TEXT_PLAIN)
-            .body(body)?;
-
-        let mut builder = if smtp.starttls {
-            SmtpTransport::starttls_relay(&smtp.host)?
-        } else {
-            SmtpTransport::builder_dangerous(&smtp.host)
-        };
-        builder = builder.port(smtp.port);
-        if !smtp.username.is_empty() {
-            builder = builder.credentials(Credentials::new(smtp.username, smtp.password));
-        }
-        let mailer = builder.build();
-        mailer.send(&email)?;
-        Ok(true)
-    })
-    .await?
 }
 
 // ────────────────────────────────── helpers ────────────────────────────────

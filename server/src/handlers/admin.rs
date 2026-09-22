@@ -398,10 +398,10 @@ pub async fn clear_failed(
 
 /// Placeholder sent to the browser in place of a stored secret.
 ///
-/// `GET /api/admin/settings` used to hand back the SMTP password, ntfy token
-/// and Telegram bot token in cleartext. They are masked now; `update_settings`
-/// recognises the mask (or an empty field) and keeps whatever is stored, so
-/// saving the form can never wipe a secret by accident.
+/// `GET /api/admin/settings` used to hand back the push credentials in
+/// cleartext. They are masked now; `update_settings` recognises the mask (or an
+/// empty field) and keeps whatever is stored, so saving the form can never wipe
+/// a secret by accident.
 const SECRET_MASK: &str = "••••••••";
 
 fn mask_secret(value: &str) -> String {
@@ -421,38 +421,64 @@ pub async fn get_settings(
     _claims: Claims,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let mut settings = state.config.get().runtime.clone();
-    settings.alerts.ntfy.token = mask_secret(&settings.alerts.ntfy.token);
-    settings.alerts.telegram.bot_token = mask_secret(&settings.alerts.telegram.bot_token);
-    settings.alerts.smtp.password = mask_secret(&settings.alerts.smtp.password);
+    settings.alerts.serverchan.send_key = mask_secret(&settings.alerts.serverchan.send_key);
     Ok(Json(serde_json::to_value(settings).unwrap_or_default()))
 }
 
 pub async fn update_settings(
     State(state): State<AppState>,
     _claims: Claims,
-    Json(mut body): Json<RuntimeSettings>,
+    Json(body): Json<RuntimeSettings>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    // Masked / blank secrets mean "unchanged" — restore the stored value.
+    // Deep-merge the incoming settings over the stored ones instead of
+    // replacing wholesale: a client that fetched a stale snapshot must not
+    // silently roll back sections it did not edit (bitten once already).
+    let stored_raw = crate::db::get_setting(&state.db, "runtime_settings")
+        .await?
+        .unwrap_or_else(|| "null".to_string());
+    let mut merged =
+        serde_json::from_str::<serde_json::Value>(&stored_raw).unwrap_or_else(|_| serde_json::json!({}));
+    let incoming = serde_json::to_value(&body)?;
+    merge_json(&mut merged, &incoming);
+    let mut settings: RuntimeSettings = serde_json::from_value(merged).map_err(|e| {
+        crate::models::AppError::BadRequest(format!("merged settings invalid: {e}"))
+    })?;
+
+    // Masked / blank secrets mean "unchanged" — put the stored value back.
+    // Applied *after* the merge rather than before it, so it covers both a
+    // client that sent the mask and one that sent nothing at all.
     let current = state.config.get().runtime.alerts.clone();
-    if is_masked(&body.alerts.ntfy.token) {
-        body.alerts.ntfy.token = current.ntfy.token;
-    }
-    if is_masked(&body.alerts.telegram.bot_token) {
-        body.alerts.telegram.bot_token = current.telegram.bot_token;
-    }
-    if is_masked(&body.alerts.smtp.password) {
-        body.alerts.smtp.password = current.smtp.password;
+    if is_masked(&settings.alerts.serverchan.send_key) {
+        settings.alerts.serverchan.send_key = current.serverchan.send_key;
     }
 
-    let serialized = serde_json::to_string(&body)?;
+    let serialized = serde_json::to_string(&settings)?;
     crate::db::set_setting(&state.db, "runtime_settings", &serialized).await?;
 
     let mut next = (*state.config.get()).clone();
-    next.runtime = body;
+    next.runtime = settings;
     state.config.update(next)?;
     state.queue.reload_limits();
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Recursively merge `src` into `dst`: objects merge key-by-key, everything
+/// else (scalars, arrays, null) is replaced by `src`.
+fn merge_json(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    match (dst, src) {
+        (serde_json::Value::Object(d), serde_json::Value::Object(s)) => {
+            for (k, v) in s {
+                match d.get_mut(k) {
+                    Some(slot) if slot.is_object() && v.is_object() => merge_json(slot, v),
+                    _ => {
+                        d.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (dst, src) => *dst = src.clone(),
+    }
 }
 
 // ─────────────────────────────────── stats ─────────────────────────────────

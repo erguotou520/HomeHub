@@ -800,7 +800,12 @@ pub struct ServerChanConfig {
     #[serde(default)]
     pub enabled: bool,
     /// SendKey, e.g. SCT1234TkC… — posted to https://sctapi.ftqq.com/{key}.send
-    #[serde(default)]
+    ///
+    /// Kebab-case on the wire, matching every other multi-word key in this file
+    /// (`disk-usage-percent`, `bot-token`, `chat-id`) and what the admin form
+    /// reads. `send_key` is accepted as an alias so a config written before the
+    /// rename (the field briefly serialised as snake_case) still loads.
+    #[serde(rename = "send-key", alias = "send_key", default)]
     pub send_key: String,
 }
 

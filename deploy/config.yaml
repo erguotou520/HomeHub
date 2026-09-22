@@ -129,21 +129,7 @@ runtime:
     disk-usage-percent: 85
     task-failure-threshold: 5
     cooldown-secs: 3600
-    ntfy:
+    # Server 酱（sct.ftqq.com）推送：在 https://sct.ftqq.com 拿一个 SendKey 填进来即可。
+    serverchan:
       enabled: false
-      url: https://ntfy.sh
-      topic: homehub
-      token: ""
-    telegram:
-      enabled: false
-      bot-token: ""
-      chat-id: ""
-    smtp:
-      enabled: false
-      host: ""
-      port: 587
-      username: ""
-      password: ""
-      from: ""
-      to: ""
-      starttls: true
+      send-key: ""

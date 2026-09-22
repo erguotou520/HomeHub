@@ -44,7 +44,7 @@ ADMIN_DIST=/app/admin/dist ./homehub-server   # 访问 http://<server>:8485/
 | 身份审计 | WG 设备列表、按设备查看访问日志、流量统计 |
 | 回收站 | 浏览 / 还原 / 彻底删除 / 清空 / 占用统计 |
 | 监控 | Frigate 地址配置骨架（预留） |
-| 系统信息 | 版本、运行时长、SQLite 体积、磁盘水位、ML 后端；告警历史与 ntfy / Telegram / SMTP 通知配置；重复照片分组清理；SQLite 备份（设置 / 手动触发 / 快照列表） |
+| 系统信息 | 版本、运行时长、SQLite 体积、磁盘水位、ML 后端；告警历史与 Server 酱通知配置；重复照片分组清理；SQLite 备份（设置 / 手动触发 / 快照列表） |
 
 ## 相册「地点」视图
 

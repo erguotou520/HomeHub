@@ -83,7 +83,9 @@
 | POST | `/api/admin/backups/run` | 立即备份一次，返回 `{"name": "homehub-<时间戳>.db"}` |
 | GET | `/api/admin/fs` | `path` 参数（省略则取 `$HOME`）列子目录，仅返回目录、跳过隐藏项；供目录选择器使用 |
 
-> `GET /api/admin/settings` 中的凭据字段（`alerts.smtp.password`、`alerts.ntfy.token`、`alerts.telegram.bot-token`）以 `••••••••` 掩码返回；`PUT` 时若该字段为空或仍是掩码，则保留服务端已存的值，因此保存表单不会清空密钥。
+> `GET /api/admin/settings` 中的凭据字段（`alerts.serverchan.send-key`）以 `••••••••` 掩码返回；`PUT` 时若该字段为空或仍是掩码，则保留服务端已存的值，因此保存表单不会清空密钥。
+>
+> `PUT` 的语义是**深合并**而非整体替换：请求体逐键合并到已存的设置上（对象递归合并，标量 / 数组 / null 直接覆盖）。因此拿着旧快照的客户端保存一次，不会把它没编辑过的段落回退成旧值。
 
 ### 人物分组
 

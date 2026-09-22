@@ -43,7 +43,7 @@ server/src/
 │   ├── dedup       双指纹去重（file_hash + pixel_hash）
 │   ├── search      FTS5 全局搜索
 │   ├── audit       WG peer 注册表 + 异步批量审计日志
-│   ├── alerts      健康告警（磁盘 / 任务 / SQLite / 占用）+ ntfy/Telegram/SMTP
+│   ├── alerts      健康告警（磁盘 / 任务 / SQLite / 占用）+ Server 酱推送
 │   └── backup      SQLite 定期快照（`VACUUM INTO`）
 └── handlers/   admin（JWT）/ photos / files / media / trash / upload
 ```

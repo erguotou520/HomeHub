@@ -803,9 +803,16 @@ pub struct ServerChanConfig {
     ///
     /// Kebab-case on the wire, matching every other multi-word key in this file
     /// (`disk-usage-percent`, `bot-token`, `chat-id`) and what the admin form
-    /// reads. `send_key` is accepted as an alias so a config written before the
-    /// rename (the field briefly serialised as snake_case) still loads.
-    #[serde(rename = "send-key", alias = "send_key", default)]
+    /// reads.
+    ///
+    /// Do **not** add `alias = "send_key"` here. `update_settings` deep-merges
+    /// the incoming JSON over the stored blob, so a stored `send_key` plus an
+    /// incoming `send-key` leaves *both* keys in the same object, and an alias
+    /// makes serde reject that pair as `duplicate field`. A stale key from
+    /// before the rename is instead ignored as unknown, which is the right
+    /// outcome: no value was ever written under the old name, and the very next
+    /// save rewrites the blob and config.yaml from this struct.
+    #[serde(rename = "send-key", default)]
     pub send_key: String,
 }
 

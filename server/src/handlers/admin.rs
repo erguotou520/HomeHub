@@ -176,10 +176,14 @@ pub async fn create_dir(
     }
     let dir = state.registry.create(&body).await?;
     persist_dirs(&state).await?;
-    state
-        .queue
-        .enqueue_scan(dir.id, true, crate::services::tasks::PRIORITY_HIGH)
-        .await?;
+    // A disabled directory is not part of the library, so scanning it would
+    // only produce `file missing` failures for a path the user opted out of.
+    if dir.is_enabled() {
+        state
+            .queue
+            .enqueue_scan(dir.id, true, crate::services::tasks::PRIORITY_HIGH)
+            .await?;
+    }
     Ok(Json(serde_json::json!({ "dir": dir })))
 }
 
@@ -191,10 +195,12 @@ pub async fn update_dir(
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let dir = state.registry.update(id, &body).await?;
     persist_dirs(&state).await?;
-    state
-        .queue
-        .enqueue_scan(dir.id, true, crate::services::tasks::PRIORITY_HIGH)
-        .await?;
+    if dir.is_enabled() {
+        state
+            .queue
+            .enqueue_scan(dir.id, true, crate::services::tasks::PRIORITY_HIGH)
+            .await?;
+    }
     Ok(Json(serde_json::json!({ "dir": dir })))
 }
 
@@ -222,6 +228,15 @@ pub async fn set_dir_enabled(
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     state.registry.set_enabled(id, body.enabled).await?;
     persist_dirs(&state).await?;
+    // Enabling a directory puts it back in the library, so index it again.
+    // Disabling needs no scan: `TaskQueue::claim` drops the queued work of any
+    // directory that is no longer enabled.
+    if body.enabled {
+        state
+            .queue
+            .enqueue_scan(id, true, crate::services::tasks::PRIORITY_HIGH)
+            .await?;
+    }
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -354,10 +369,19 @@ pub async fn rescan(
     let mut n = 0;
     match body.dir_id {
         Some(dir_id) => {
-            state
-                .queue
-                .force_scan(dir_id, full)
-                .await?;
+            // Scanning a disabled directory would queue work that the worker
+            // pool now refuses to run (`TaskQueue::claim`), so reject it here
+            // with a reason instead of silently queueing nothing.
+            let dir = state.registry.by_id(dir_id).ok_or_else(|| {
+                crate::models::AppError::BadRequest(format!("dir {dir_id} not registered"))
+            })?;
+            if !dir.is_enabled() {
+                return Err(crate::models::AppError::BadRequest(format!(
+                    "目录 {} 已停用，不参与扫描",
+                    dir.name
+                )));
+            }
+            state.queue.force_scan(dir_id, full).await?;
             n += 1;
         }
         None => {
@@ -478,6 +502,55 @@ fn merge_json(dst: &mut serde_json::Value, src: &serde_json::Value) {
             }
         }
         (dst, src) => *dst = src.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RuntimeSettings;
+
+    /// Regression: a stored blob written before the `send_key` → `send-key`
+    /// rename still carries the old spelling. The deep merge keeps both keys,
+    /// so if the field also declared `alias = "send_key"` serde rejected the
+    /// object as `duplicate field` and **every** save from the admin form
+    /// answered 400. The stale key must be ignored instead, and the incoming
+    /// kebab-case value must win.
+    #[test]
+    fn stale_snake_case_key_does_not_break_the_settings_merge() {
+        let mut stored = serde_json::json!({
+            "alerts": { "serverchan": { "enabled": false, "send_key": "" } }
+        });
+        let incoming = serde_json::json!({
+            "alerts": { "serverchan": { "enabled": true, "send-key": "SCT123" } }
+        });
+
+        merge_json(&mut stored, &incoming);
+        let settings: RuntimeSettings = serde_json::from_value(stored)
+            .expect("legacy snake_case key must not poison the merged object");
+
+        assert!(settings.alerts.serverchan.enabled);
+        assert_eq!(settings.alerts.serverchan.send_key, "SCT123");
+        // Re-serialising from the struct is what heals the stored blob and
+        // config.yaml: the stale key is simply not part of the output.
+        let rewritten = serde_json::to_value(&settings).unwrap();
+        assert!(rewritten["alerts"]["serverchan"].get("send_key").is_none());
+        assert_eq!(rewritten["alerts"]["serverchan"]["send-key"], "SCT123");
+    }
+
+    /// The merge must not drop sections the client did not send — the reason
+    /// it exists in the first place.
+    #[test]
+    fn merge_keeps_untouched_sections() {
+        let mut stored = serde_json::json!({
+            "tasks": { "max-attempts": 3 },
+            "alerts": { "disk-usage-percent": 85.0 }
+        });
+        let incoming = serde_json::json!({ "alerts": { "disk-usage-percent": 70.0 } });
+
+        merge_json(&mut stored, &incoming);
+        assert_eq!(stored["alerts"]["disk-usage-percent"], 70.0);
+        assert_eq!(stored["tasks"]["max-attempts"], 3);
     }
 }
 

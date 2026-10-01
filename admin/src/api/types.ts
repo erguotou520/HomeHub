@@ -100,10 +100,20 @@ export interface QueueStatus {
   concurrency: number
 }
 
+export interface AlbumProgress {
+  name: string
+  dir_id: number
+  total: number
+  embedded: number
+}
+
 export interface TaskStatus {
   queues: QueueStatus[]
   running: number
   throughput_5min: number
+  progress?: AlbumProgress[]
+  recognition_pending?: number
+  recognition_failed?: number
 }
 
 export interface FailedTask {

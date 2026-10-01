@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import { useConfirm } from '../components/Confirm'
+import { useToast } from '../components/Toast'
 import type { DirStat, Stats, TaskStatus } from '../api/types'
 
 function formatBytes(bytes: number): string {
@@ -54,6 +56,8 @@ const QUEUE_LABELS: Record<string, string> = {
 }
 
 export default function Home() {
+  const confirm = useConfirm()
+  const toast = useToast()
   const [stats, setStats] = useState<Stats | null>(null)
   const [tasks, setTasks] = useState<TaskStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -72,12 +76,18 @@ export default function Home() {
   }, [])
 
   async function rescan() {
-    if (!confirm('对全部目录执行一次全量重扫？')) return
+    const ok = await confirm({
+      title: '对全部目录执行一次全量重扫？',
+      body: '会重新遍历所有已启用的目录，比较耗时，期间任务队列会排在这批之后。',
+      confirmText: '开始重扫',
+    })
+    if (!ok) return
     setBusy(true)
     try {
       await api.post('/api/admin/tasks/rescan', { full: true })
       const t = await api.get<TaskStatus>('/api/admin/tasks')
       setTasks(t)
+      toast.ok('已排入全量重扫')
     } catch (e) {
       setError(e instanceof Error ? e.message : '触发失败')
     } finally {

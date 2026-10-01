@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { FileEntry } from '../api/types'
 import Icon from './Icon'
+import { useToast } from './Toast'
 
 /** Encode each path segment individually so "/" separators survive. */
 function enc(path: string): string {
@@ -46,7 +47,6 @@ export default function ImageEditor({
   onIndexChange,
   onClose,
   onChanged,
-  notify,
 }: {
   dir: string
   /** All image entries of the current view, for prev/next navigation. */
@@ -55,8 +55,8 @@ export default function ImageEditor({
   onIndexChange: (i: number) => void
   onClose: () => void
   onChanged: () => void
-  notify: (msg: string) => void
 }) {
+  const toast = useToast()
   const entry = entries[index]
   const [imgUrl, setImgUrl] = useState(() => rawUrl(dir, rel(entry, dir)))
   const [busy, setBusy] = useState(false)
@@ -92,9 +92,9 @@ export default function ImageEditor({
       refreshCache()
       onChanged()
       setExif(null)
-      if (after) notify(after)
+      if (after) toast.ok(after)
     } catch (e) {
-      notify(e instanceof Error ? e.message : '操作失败')
+      toast.err(e instanceof Error ? e.message : '操作失败')
     } finally {
       setBusy(false)
     }
@@ -114,16 +114,16 @@ export default function ImageEditor({
         refreshCache()
         onChanged()
         setExif(null)
-        notify('已还原到最近一次编辑前')
+        toast.ok('已还原到最近一次编辑前')
       })
-      .catch((e) => notify(e instanceof Error ? e.message : '还原失败'))
+      .catch((e) => toast.err(e instanceof Error ? e.message : '还原失败'))
       .finally(() => setBusy(false))
   }
 
   function doResize() {
     const w = Number.parseInt(widthText, 10)
     if (!Number.isFinite(w) || w <= 0) {
-      notify('请输入有效的宽度（像素）')
+      toast.warn('请输入有效的宽度（像素）')
       return
     }
     setResizeOpen(false)
@@ -142,7 +142,7 @@ export default function ImageEditor({
         setExif(d)
         setShowInfo(true)
       })
-      .catch((e) => notify(e instanceof Error ? e.message : '读取信息失败'))
+      .catch((e) => toast.err(e instanceof Error ? e.message : '读取信息失败'))
       .finally(() => setBusy(false))
   }
 

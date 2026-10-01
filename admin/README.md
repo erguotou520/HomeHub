@@ -44,7 +44,7 @@ ADMIN_DIST=/app/admin/dist ./homehub-server   # 访问 http://<server>:8485/
 | 身份审计 | WG 设备列表、按设备查看访问日志、流量统计 |
 | 回收站 | 浏览 / 还原 / 彻底删除 / 清空 / 占用统计 |
 | 监控 | Frigate 地址配置骨架（预留） |
-| 系统信息 | 版本、运行时长、SQLite 体积、磁盘水位、ML 后端；告警历史与 Server 酱通知配置；重复照片分组清理；SQLite 备份（设置 / 手动触发 / 快照列表） |
+| 系统信息 | 版本、运行时长、SQLite 体积、磁盘水位、ML 后端；告警历史与 Server 酱通知配置；重复照片分组清理；SQLite 备份（间隔 / 保留份数 / 目录 / 手动触发 / 快照列表） |
 
 ## 相册「地点」视图
 
@@ -78,9 +78,35 @@ admin/
 ├── src/
 │   ├── api/        # HTTP 客户端与类型定义（types.ts 与服务端 JSON 一一对应）
 │   ├── state/      # 登录态
-│   ├── components/ # 查看器、地图等复用组件
+│   ├── hooks/      # 跨页复用的小钩子
+│   ├── components/ # 查看器、地图、Toast / Confirm 反馈层等复用组件
 │   ├── pages/      # 各页面
-│   ├── ui/         # 导航与布局
 │   └── styles.css
 └── vite.config.ts
 ```
+
+## 反馈层
+
+一次性动作（保存设置、删除、发送测试告警）的结果反馈统一走两个共享组件，
+不用浏览器的 `alert()` / `confirm()`（样式脱离设计系统，且同步阻塞整个标签页）：
+
+```tsx
+const toast = useToast()
+const confirm = useConfirm()
+
+async function save() {
+  try {
+    await api.put('/api/admin/settings', { alerts })
+    toast.ok('通知设置已保存')
+  } catch (e) {
+    toast.err(e instanceof Error ? e.message : '保存失败')
+  }
+}
+
+async function purge(id: number) {
+  if (!(await confirm({ title: '彻底删除？', body: '删除后无法恢复。', danger: true }))) return
+  // ...
+}
+```
+
+色调：`ok` / `warn`（部分失败、功能不支持）/ `err` / `info`，细节见 DESIGN.md。

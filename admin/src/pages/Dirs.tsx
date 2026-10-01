@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { useConfirm } from '../components/Confirm'
+import { useToast } from '../components/Toast'
 import type { DirInput, DirStat } from '../api/types'
 
 const ALL_MARKS = ['album', 'video', 'music', 'document', 'none']
@@ -112,6 +114,8 @@ function FsPicker({
 }
 
 export default function Dirs() {
+  const confirm = useConfirm()
+  const toast = useToast()
   const [dirs, setDirs] = useState<DirStat[]>([])
   const [form, setForm] = useState<DirInput>(empty)
   const [editing, setEditing] = useState<number | null>(null)
@@ -161,9 +165,20 @@ export default function Dirs() {
   }
 
   async function remove(id: number) {
-    if (!confirm('确定删除该目录登记吗？磁盘上的文件不会被删除。')) return
-    await api.del(`/api/admin/dirs/${id}`)
-    await load()
+    const ok = await confirm({
+      title: '删除该目录登记？',
+      body: '磁盘上的文件不会被删除，只是不再被 HomeHub 索引。',
+      confirmText: '删除登记',
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await api.del(`/api/admin/dirs/${id}`)
+      await load()
+      toast.ok('目录登记已删除')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
+    }
   }
 
   async function toggleEnabled(d: DirStat) {

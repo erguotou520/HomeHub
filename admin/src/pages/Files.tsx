@@ -3,6 +3,7 @@ import { API_BASE, api, formatBytes, formatTime, getToken } from '../api/client'
 import type { DirStat, FileEntry } from '../api/types'
 import Icon from '../components/Icon'
 import ImageEditor from '../components/ImageEditor'
+import { useToast } from '../components/Toast'
 
 type SortKey = 'name' | 'mtime' | 'size'
 
@@ -94,6 +95,7 @@ type Preview =
   | { kind: 'other'; entry: FileEntry }
 
 export default function Files() {
+  const toast = useToast()
   const [dirs, setDirs] = useState<DirStat[]>([])
   const [dir, setDir] = useState<string>('')
   const [path, setPath] = useState('')
@@ -109,7 +111,6 @@ export default function Files() {
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
   const [showMkdir, setShowMkdir] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [rev, setRev] = useState(0)
   const [queue, setQueue] = useState<UpItem[]>([])
@@ -136,10 +137,9 @@ export default function Files() {
     [entries],
   )
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg)
-    window.setTimeout(() => setToast(null), 2600)
-  }, [])
+  /* 反馈统一走全局 toast（components/Toast.tsx）：成功绿点、失败红点、
+     部分失败琥珀——「3 项里有 1 项失败」和「全部完成」不是一回事。 */
+
 
   useEffect(() => {
     api
@@ -262,7 +262,7 @@ export default function Files() {
         a.remove()
       }, idx * 400)
     })
-    showToast(`开始下载 ${items.length} 个文件`)
+    toast.info(`开始下载 ${items.length} 个文件`)
   }
 
   async function runBatch(op: 'copy' | 'move', toDir: string, toPath: string) {
@@ -285,7 +285,9 @@ export default function Files() {
         }
       }
       setBatchOp(null)
-      showToast(`已${op === 'copy' ? '复制' : '移动'} ${ok} 项${fail ? `，${fail} 项失败` : ''}`)
+      const done = `已${op === 'copy' ? '复制' : '移动'} ${ok} 项`
+      if (fail > 0) toast.warn(`${done}，${fail} 项失败`)
+      else toast.ok(done)
       await load()
       exitSel()
     } finally {
@@ -308,7 +310,8 @@ export default function Files() {
         }
       }
       setConfirmBatchDel(false)
-      showToast(`已移入回收站 ${ok} 项${fail ? `，${fail} 项失败` : ''}`)
+      if (fail > 0) toast.warn(`已移入回收站 ${ok} 项，${fail} 项失败`)
+      else toast.ok(`已移入回收站 ${ok} 项`)
       await load()
       exitSel()
     } finally {
@@ -428,7 +431,7 @@ export default function Files() {
       api
         .get<{ content: string }>(`/api/documents/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`)
         .then((r) => setPreview({ kind: 'text', entry, content: r.content ?? '' }))
-        .catch((e: Error) => showToast(`无法读取：${e.message}`))
+        .catch((e: Error) => toast.err(`无法读取：${e.message}`))
     } else setPreview({ kind: 'other', entry })
   }
 
@@ -437,10 +440,10 @@ export default function Files() {
     try {
       await api.patch(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`, { name })
       setRenameTarget(null)
-      showToast('已重命名')
+      toast.ok('已重命名')
       await load()
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '重命名失败')
+      toast.err(e instanceof Error ? e.message : '重命名失败')
     } finally {
       setBusy(false)
     }
@@ -458,10 +461,10 @@ export default function Files() {
         to_path: toPathFull,
       })
       setMoveTarget(null)
-      showToast(op === 'copy' ? '已复制' : '已移动')
+      toast.ok(op === 'copy' ? '已复制' : '已移动')
       await load()
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '操作失败')
+      toast.err(e instanceof Error ? e.message : '操作失败')
     } finally {
       setBusy(false)
     }
@@ -472,10 +475,10 @@ export default function Files() {
     try {
       await api.del(`/api/files/${encodeURIComponent(dir)}/${enc(rel(entry, dir))}`)
       setDeleteTarget(null)
-      showToast('已移入回收站')
+      toast.ok('已移入回收站')
       await load()
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '删除失败')
+      toast.err(e instanceof Error ? e.message : '删除失败')
     } finally {
       setBusy(false)
     }
@@ -488,10 +491,10 @@ export default function Files() {
       const tail = path ? `/${enc(`${path}/${name}`)}` : `/${enc(name)}`
       await api.post(`/api/mkdir/${encodeURIComponent(dir)}${tail}`)
       setShowMkdir(false)
-      showToast(`已创建 ${base}/${name}`)
+      toast.ok(`已创建 ${base}/${name}`)
       await load()
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '创建失败')
+      toast.err(e instanceof Error ? e.message : '创建失败')
     } finally {
       setBusy(false)
     }
@@ -504,10 +507,10 @@ export default function Files() {
       const tail = path ? `/${enc(path)}` : ''
       await api.put(`/api/documents/${encodeURIComponent(dir)}${tail}/${enc(name)}`, { content: '' })
       setShowNewText(false)
-      showToast(`已创建 ${name}`)
+      toast.ok(`已创建 ${name}`)
       await load()
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '创建失败')
+      toast.err(e instanceof Error ? e.message : '创建失败')
     } finally {
       setBusy(false)
     }
@@ -757,7 +760,6 @@ export default function Files() {
           onIndexChange={setEditIndex}
           onClose={() => setEditIndex(null)}
           onChanged={onEdited}
-          notify={showToast}
         />
       )}
       {preview && (
@@ -765,8 +767,8 @@ export default function Files() {
           preview={preview}
           dir={dir}
           onClose={() => setPreview(null)}
-          onSaved={() => showToast('已保存')}
-          onError={(m) => showToast(m)}
+          onSaved={() => toast.ok('已保存')}
+          onError={(m) => toast.err(m)}
         />
       )}
       {renameTarget && (
@@ -882,9 +884,6 @@ export default function Files() {
             </div>
           </div>
         </div>
-      )}
-      {toast && (
-        <div className="toast" role="status" aria-live="polite">{toast}</div>
       )}
     </div>
   )

@@ -55,9 +55,11 @@ export default function Tasks() {
     }
   }
 
+  // 只提交本页负责的 tasks 段：接口是深合并的，带上整份快照会把别的页面
+  // 在这期间改过的配置一起退回去。
   async function saveSettings() {
     if (!settings) return
-    await act(() => api.put('/api/admin/settings', settings))
+    await act(() => api.put('/api/admin/settings', { tasks: settings.tasks }))
   }
 
   function patchTasks(patch: Partial<RuntimeSettings['tasks']>) {
@@ -86,6 +88,51 @@ export default function Tasks() {
           <div className="value">{status?.throughput_5min ?? 0}</div>
         </div>
       </div>
+
+      {status?.progress && status.progress.length > 0 && (
+        <div className="card">
+          <h2>识别进度</h2>
+          <div className="row">
+            <div className="stat">
+              <div className="label">媒体总量</div>
+              <div className="value">
+                {status.progress.reduce((a, p) => a + p.total, 0).toLocaleString()}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">已识别</div>
+              <div className="value">
+                {status.progress.reduce((a, p) => a + p.embedded, 0).toLocaleString()}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">识别待处理</div>
+              <div className="value">{(status.recognition_pending ?? 0).toLocaleString()}</div>
+            </div>
+            <div className="stat">
+              <div className="label">识别失败</div>
+              <div className="value">{status.recognition_failed ?? 0}</div>
+            </div>
+          </div>
+          {status.progress.map((p) => {
+            const pct = p.total > 0 ? Math.round((p.embedded / p.total) * 100) : 0
+            return (
+              <div key={p.dir_id} className="row" style={{ alignItems: 'center', gap: 12 }}>
+                <span style={{ width: 120 }}>{p.name}</span>
+                <div className="progress-track" style={{ flex: 1 }}>
+                  <div className="progress-fill" style={{ width: `${pct}%` }} />
+                </div>
+                <span className="muted">
+                  {p.embedded.toLocaleString()} / {p.total.toLocaleString()}（{pct}%）
+                </span>
+              </div>
+            )
+          })}
+          <div className="muted" style={{ marginTop: 8 }}>
+            说明：总量 = 扫描已发现的媒体数，随扫描推进增长；已识别 = 已生成 CLIP 向量（缩略图 + 对象/场景/人脸/语义全部完成）。
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h2>队列状态</h2>

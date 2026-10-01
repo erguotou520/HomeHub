@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api, formatBytes, formatTime } from '../api/client'
+import { useConfirm } from '../components/Confirm'
+import { useToast } from '../components/Toast'
 import type { TrashEntry } from '../api/types'
 
 export default function Trash() {
+  const confirm = useConfirm()
+  const toast = useToast()
   const [entries, setEntries] = useState<TrashEntry[]>([])
   const [stats, setStats] = useState<{ count: number; bytes: number; retention_days: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -35,20 +39,39 @@ export default function Trash() {
   }
 
   async function purge(id: number) {
-    if (!confirm('彻底删除后无法恢复，确定继续？')) return
+    const ok = await confirm({
+      title: '彻底删除这一项？',
+      body: '删除后无法恢复。',
+      confirmText: '彻底删除',
+      danger: true,
+    })
+    if (!ok) return
     setError(null)
     try {
       await api.del(`/api/trash/${id}`)
       await load()
+      toast.ok('已彻底删除')
     } catch (e) {
       setError(e instanceof Error ? e.message : '删除失败')
     }
   }
 
   async function empty() {
-    if (!confirm('确定清空回收站？该操作不可撤销。')) return
-    await api.del('/api/trash/empty')
-    await load()
+    const ok = await confirm({
+      title: '清空回收站？',
+      body: '其中所有条目将被彻底删除，该操作不可撤销。',
+      confirmText: '清空回收站',
+      danger: true,
+    })
+    if (!ok) return
+    setError(null)
+    try {
+      await api.del('/api/trash/empty')
+      await load()
+      toast.ok('回收站已清空')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '清空失败')
+    }
   }
 
   return (

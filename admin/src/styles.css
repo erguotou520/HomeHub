@@ -2456,30 +2456,96 @@ button.op.danger:hover {
   padding: 12px;
 }
 
-.toast {
+/* ── 轻提示：底部居中堆叠 ──
+   容器**常驻 DOM**（aria-live 区域与内容同时出现时读屏器多半不播报），
+   所以它自己必须 pointer-events: none 穿透，否则这个 fixed 层会横在底部
+   挡住底下的按钮；只有胶囊本体吃点击。 */
+.toast-stack {
   position: fixed;
-  bottom: 26px;
   left: 50%;
+  bottom: 26px;
   transform: translateX(-50%);
-  background: var(--surface-3);
-  color: var(--text);
-  border: 1px solid var(--line-2);
-  border-radius: 9px;
-  padding: 9px 16px;
-  font-size: 13px;
-  box-shadow: var(--shadow-3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   z-index: 120;
+  pointer-events: none;
+}
+
+.toast-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 8px 8px 8px 14px;
+  border-radius: 9px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-3);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  pointer-events: auto;
   animation: toast-in var(--t) var(--ease);
+}
+
+/* 只有圆点着色，胶囊保持中性 —— 一屏里可能同时有成功和失败，
+   整体铺色就吵了，也违背「强调色只落在语义点上」。 */
+.toast-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.toast-item.ok .toast-dot {
+  background: var(--ok);
+}
+
+.toast-item.warn .toast-dot {
+  background: var(--warn);
+}
+
+.toast-item.err .toast-dot {
+  background: var(--err);
+}
+
+.toast-item.info .toast-dot {
+  background: var(--accent);
+}
+
+.toast-text {
+  min-width: 0; /* 长文案要换行而不是把胶囊撑破 */
+  overflow-wrap: anywhere;
+}
+
+/* 提权成 button.toast-close —— 否则被 `button:hover` 的实心底色压过去 */
+button.toast-close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+}
+
+button.toast-close:hover {
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--text);
 }
 
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(8px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -2645,4 +2711,18 @@ tr:focus-within,
   .viewer .filmstrip {
     bottom: 58px;
   }
+}
+
+/* ── 任务页 · 识别进度条 ── */
+.progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent, #3b9eff);
+  transition: width 0.6s ease;
 }

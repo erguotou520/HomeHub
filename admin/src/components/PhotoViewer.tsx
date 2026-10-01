@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { API_BASE, api, formatBytes, formatTime } from '../api/client'
 import type { PhotoItem } from '../api/types'
 import Icon from './Icon'
+import { useToast } from './Toast'
 
 interface Props {
   items: PhotoItem[]
@@ -64,7 +65,6 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
   const [confirm, setConfirm] = useState<'trash' | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
-  const [toast, setToast] = useState<string | null>(null)
   const [hasOriginal, setHasOriginal] = useState(false)
   const [confirmRestore, setConfirmRestore] = useState(false)
   const [resizeOpen, setResizeOpen] = useState(false)
@@ -76,11 +76,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
 
   const isVideo = photo?.media_kind === 'video'
   const photoId = photo?.id
-
-  const notify = useCallback((msg: string) => {
-    setToast(msg)
-    window.setTimeout(() => setToast(null), 2200)
-  }, [])
+  const toast = useToast()
 
   const loadInfo = useCallback(async (id: number) => {
     try {
@@ -224,7 +220,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       if (document.fullscreenElement) await document.exitFullscreen()
       else await document.documentElement.requestFullscreen()
     } catch {
-      notify('当前浏览器不支持全屏')
+      toast.warn('当前浏览器不支持全屏')
     }
   }
 
@@ -253,9 +249,9 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       setBust(Date.now())
       onEdited?.(photo.id)
       setHasOriginal(true) // the pre-edit bytes are now archived
-      notify(msg)
+      toast.ok(msg)
     } catch (e) {
-      notify(e instanceof Error ? e.message : '操作失败')
+      toast.err(e instanceof Error ? e.message : '操作失败')
     } finally {
       setBusy(false)
     }
@@ -275,9 +271,9 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       onEdited?.(photo.id)
       setConfirmRestore(false)
       setHasOriginal(false)
-      notify('已还原到最近一次编辑前')
+      toast.ok('已还原到最近一次编辑前')
     } catch (e) {
-      notify(e instanceof Error ? e.message : '还原失败')
+      toast.err(e instanceof Error ? e.message : '还原失败')
     } finally {
       setBusy(false)
     }
@@ -286,7 +282,7 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
   function doResize() {
     const w = Number.parseInt(widthText, 10)
     if (!Number.isFinite(w) || w <= 0) {
-      notify('请输入有效的宽度（像素）')
+      toast.warn('请输入有效的宽度（像素）')
       return
     }
     setResizeOpen(false)
@@ -305,9 +301,9 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       await api.patch(`/api/files/${encodeURIComponent(photo.dir_name)}/${photo.rel_path}`, { name })
       onRenamed?.(photo.id, name)
       setRenaming(false)
-      notify('已重命名')
+      toast.ok('已重命名')
     } catch (e) {
-      notify(e instanceof Error ? e.message : '重命名失败')
+      toast.err(e instanceof Error ? e.message : '重命名失败')
     } finally {
       setBusy(false)
     }
@@ -323,13 +319,13 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
       if (items.length <= 1 || onDeleted) {
         // Either there is nothing left to show, or the parent will rebuild the list.
         if (items.length <= 1) onClose()
-        notify('已移入回收站')
+        toast.ok('已移入回收站')
         return
       }
       go(Math.min(safeIndex, items.length - 2))
-      notify('已移入回收站')
+      toast.ok('已移入回收站')
     } catch (e) {
-      notify(e instanceof Error ? e.message : '删除失败')
+      toast.err(e instanceof Error ? e.message : '删除失败')
     } finally {
       setBusy(false)
     }
@@ -671,12 +667,6 @@ export function PhotoViewer({ items, index, onIndexChange, onClose, onDeleted, o
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {toast && (
-        <div className="toast" role="status" aria-live="polite">
-          {toast}
         </div>
       )}
     </div>

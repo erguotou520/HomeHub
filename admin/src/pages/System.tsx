@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
 import { api, formatBytes, formatTime } from '../api/client'
+import { useToast } from '../components/Toast'
+import { useConfirm } from '../components/Confirm'
 import type { Alert, BackupStatus, DuplicateGroup, RuntimeSettings, SystemInfo } from '../api/types'
 
 type Tab = 'overview' | 'alerts' | 'dedup' | 'backup'
 
 export default function SystemPage() {
+  const toast = useToast()
+  const confirm = useConfirm()
   const [info, setInfo] = useState<SystemInfo | null>(null)
   const [settings, setSettings] = useState<RuntimeSettings | null>(null)
   const [dups, setDups] = useState<DuplicateGroup[]>([])
@@ -52,6 +56,7 @@ export default function SystemPage() {
     try {
       await api.post('/api/admin/backups/run')
       await loadBackups()
+      toast.ok('备份已完成')
     } catch (e) {
       setError(e instanceof Error ? e.message : '备份失败')
     }
@@ -61,36 +66,59 @@ export default function SystemPage() {
     setSettings((s) => (s ? { ...s, backup: { ...s.backup, ...patch } } : s))
   }
 
+  // 只提交本页负责的两段（见 Tasks.tsx 同名注释）：接口深合并，发整份快照会
+  // 把任务页这段时间里改过的参数退回去。
+  //
+  // 反馈走 toast 而不是页顶那行 error：保存按钮在卡片深处，页顶的提示
+  // 经常在视野之外，等于没提示。页顶只留给「加载失败」这类整页性的问题。
   async function saveAlerts() {
     if (!settings) return
-    setError(null)
     try {
-      await api.put('/api/admin/settings', settings)
+      await api.put('/api/admin/settings', { alerts: settings.alerts })
       await load()
-      alert('已保存')
+      toast.ok('通知设置已保存')
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败')
+      toast.err(e instanceof Error ? e.message : '保存失败')
     }
   }
 
   async function saveBackup() {
     if (!settings) return
-    setError(null)
     try {
-      await api.put('/api/admin/settings', settings)
+      await api.put('/api/admin/settings', { backup: settings.backup })
       await load()
       await loadBackups()
-      alert('已保存')
+      toast.ok('备份设置已保存')
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败')
+      toast.err(e instanceof Error ? e.message : '保存失败')
+    }
+  }
+
+  async function sendTestAlert() {
+    try {
+      await api.post('/api/admin/alerts/test')
+      toast.ok('测试告警已发送（若渠道可用）')
+    } catch (e) {
+      toast.err(e instanceof Error ? e.message : '发送失败')
     }
   }
 
   async function trashGroup(fp: string) {
-    if (!confirm('除第一张外，其余重复照片将移入回收站，确定继续？')) return
-    await api.post('/api/admin/duplicates/trash', { fingerprint: fp })
-    const r = await api.get<{ groups: DuplicateGroup[] }>('/api/admin/duplicates')
-    setDups(r.groups)
+    const ok = await confirm({
+      title: '清理这组重复照片？',
+      body: '除第一张外，其余重复照片将移入回收站。',
+      confirmText: '移入回收站',
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await api.post('/api/admin/duplicates/trash', { fingerprint: fp })
+      const r = await api.get<{ groups: DuplicateGroup[] }>('/api/admin/duplicates')
+      setDups(r.groups)
+      toast.ok('已移入回收站')
+    } catch (e) {
+      toast.err(e instanceof Error ? e.message : '清理失败')
+    }
   }
 
   function patchAlerts(patch: Partial<RuntimeSettings['alerts']>) {
@@ -254,17 +282,7 @@ export default function SystemPage() {
 
             <div className="row" style={{ marginTop: 14 }}>
               <button onClick={saveAlerts}>保存通知设置</button>
-              <button
-                className="ghost"
-                onClick={async () => {
-                  try {
-                    await api.post('/api/admin/alerts/test')
-                    alert('测试告警已发送（若渠道可用）')
-                  } catch (e) {
-                    alert(e instanceof Error ? e.message : '发送失败')
-                  }
-                }}
-              >
+              <button className="ghost" onClick={sendTestAlert}>
                 发送测试告警
               </button>
             </div>
@@ -334,6 +352,16 @@ export default function SystemPage() {
                   min={1}
                   value={settings.backup.keep}
                   onChange={(e) => patchBackup({ keep: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <div className="field" style={{ flex: 1, maxWidth: 520, marginBottom: 0 }}>
+                <label>备份目录（留空用数据目录下的 backups）</label>
+                <input
+                  placeholder="默认：<data-dir>/backups"
+                  value={settings.backup.dir ?? ''}
+                  onChange={(e) => patchBackup({ dir: e.target.value || null })}
                 />
               </div>
             </div>

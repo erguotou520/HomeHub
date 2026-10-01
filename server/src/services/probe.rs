@@ -170,7 +170,8 @@ fn parse_location(loc: &str) -> Option<(f64, f64)> {
     Some((lat, lng))
 }
 
-/// Extract the first video frame (at ~1s) as a JPEG poster.
+/// Extract a video frame (~1s in, falling back to the first frame for
+/// sub-second clips) as a JPEG poster.
 pub async fn extract_poster(
     file_path: &Path,
     out_path: &Path,
@@ -184,25 +185,31 @@ pub async fn extract_poster(
     }
     let src = file_path.to_string_lossy().to_string();
     let dst = out_path.to_string_lossy().to_string();
-    let output = tokio::process::Command::new(bin)
-        .args([
-            "-y",
-            "-v", "error",
-            "-ss", "1",
+
+    let mut last_err = String::new();
+    for seek in ["1", "0"] {
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.args(["-y", "-v", "error"]);
+        if seek != "0" {
+            cmd.args(["-ss", "1"]);
+        }
+        cmd.args([
             "-i", &src,
             "-frames:v", "1",
             "-vf", "scale='min(256,iw)':-2",
             &dst,
-        ])
-        .output()
-        .await?;
-    if !output.status.success() {
-        anyhow::bail!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr));
+        ]);
+        let output = cmd.output().await?;
+        if output.status.success() && out_path.exists() {
+            return Ok(());
+        }
+        last_err = if output.status.success() {
+            "ffmpeg produced no output".to_string()
+        } else {
+            format!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr))
+        };
     }
-    if !out_path.exists() {
-        anyhow::bail!("ffmpeg produced no output");
-    }
-    Ok(())
+    anyhow::bail!("{}", last_err)
 }
 
 #[cfg(test)]

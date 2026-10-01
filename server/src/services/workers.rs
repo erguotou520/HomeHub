@@ -149,7 +149,7 @@ pub async fn run_detection(
     let orientation = asset.orientation as u32;
 
     let outcome = tokio::task::spawn_blocking(move || -> Result<DetectionOutcome> {
-        let img = image::open(&path).context("decode image")?;
+        let img = crate::services::decode::open_image(&path).context("decode image")?;
         let img = crate::services::hash::apply_orientation(img, orientation);
         let mut outcome = DetectionOutcome::default();
         match kind {
@@ -450,7 +450,7 @@ pub async fn run_clip_embed(queue: &TaskQueue, payload: &FileTaskPayload) -> Res
         let path = full.clone();
         let orientation = asset.orientation as u32;
         let (emb, model, dim) = tokio::task::spawn_blocking(move || -> Result<(Vec<f32>, String, usize)> {
-            let img = image::open(&path).context("decode image")?;
+            let img = crate::services::decode::open_image(&path).context("decode image")?;
             let img = crate::services::hash::apply_orientation(img, orientation);
             let emb = clip.embed_image(&img)?;
             let dim = emb.len();

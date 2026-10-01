@@ -5,6 +5,7 @@ pub mod audit;
 pub mod backup;
 pub mod compress;
 pub mod dedup;
+pub mod decode;
 pub mod dirs;
 pub mod embedding_store;
 pub mod exif;

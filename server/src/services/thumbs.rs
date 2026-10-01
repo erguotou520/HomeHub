@@ -60,7 +60,7 @@ pub async fn ensure_thumbnail(file_path: &Path, fp: &str, orientation: u32) -> R
 }
 
 fn generate(src: &Path, dst: &Path, orientation: u32) -> Result<()> {
-    let img = image::open(src)?;
+    let img = super::decode::open_image(src)?;
     let img = apply_orientation(img, orientation);
     let thumb = img.thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE);
     thumb.save_with_format(dst, ImageFormat::Jpeg)?;

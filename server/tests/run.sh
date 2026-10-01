@@ -19,6 +19,18 @@ BIND=${BIND:-127.0.0.1:8485}
 KEEP=${KEEP:-0}
 PORT=${BIND##*:}
 
+if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/health"; then
+  cat >&2 <<EOF
+port $PORT already has a HomeHub answering /api/health.
+Refusing to run: the smoke test would start a second instance on the same port
+and its cleanup would disturb the one you have running.
+
+Pass a free port instead:
+  BIND=127.0.0.1:8499 bash server/tests/run.sh
+EOF
+  exit 1
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
   . "$HOME/.cargo/env" 2>/dev/null || true
 fi
@@ -41,8 +53,16 @@ disown "$SERVER_PID" 2>/dev/null || true
 
 cleanup() {
   if [ "$KEEP" != "1" ]; then
+    # 只收自己这一份。**永远不要**在这里写 `pkill -f "homehub-server"`：
+    # 它按命令行做子串匹配，会杀掉机器上所有同名进程 —— 包括用户正在跑的
+    # 真实实例（端口不同也照杀），甚至连命令行里恰好含这串字的 shell 一起带走。
+    # 这台机器上因此反复出现"服务毫无征兆地没了、日志里连一行都没有"。
     kill "$SERVER_PID" 2>/dev/null
-    pkill -f "homehub-server" 2>/dev/null
+    for _ in $(seq 1 10); do
+      kill -0 "$SERVER_PID" 2>/dev/null || return
+      sleep 0.3
+    done
+    kill -9 "$SERVER_PID" 2>/dev/null
   fi
 }
 trap cleanup EXIT

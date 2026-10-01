@@ -1,9 +1,18 @@
 //! HomeHub configuration.
 //!
-//! `config.yaml` is the source of truth for the directory registry and for
-//! bootstrap values of everything else. Runtime-tunable values (task resource
-//! control, ML parameters, retention, alerts, ...) live in the `settings` table
-//! and can be changed through `PUT /api/admin/settings`.
+//! Two owners, and they do not overlap — one rule covers every section:
+//!
+//! * **The file is a declaration, re-applied on every start.** `config.yaml`
+//!   owns the directory registry, the declared WireGuard peers, the bootstrap
+//!   values (`global`, `admin`) and the runtime sections the admin UI has no
+//!   form for — ML, compression, video, originals, trash, audit. Because the
+//!   file wins for those, editing them and restarting actually does something.
+//! * **SQLite wins for what the admin UI edits.** That is the remaining runtime
+//!   sections (`tasks`, `alerts`, `backup`) plus per-directory state such as
+//!   `dirs.enabled`. [`Config::save`] leaves those out of the file, so there is
+//!   never a second copy sitting there to be edited and silently ignored.
+//!
+//! `main::load_runtime_settings` is where the two are combined at boot.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -14,6 +23,12 @@ use crate::models::dir::DirMark;
 
 // ─────────────────────────────── top level ─────────────────────────────────
 
+/// The configuration as held in memory: every section, whichever storage owns
+/// it.
+///
+/// This is **not** what lands in `config.yaml`. Persistence goes through
+/// [`ConfigFile`], which drops the sections the admin UI owns; serialising
+/// `Config` directly would emit those as well.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -29,6 +44,55 @@ pub struct Config {
     /// Legacy `apps:` section (home-nas format). Migrated to `dirs` on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<LegacyApps>,
+}
+
+/// The on-disk shape of [`Config`].
+///
+/// Identical to `Config` except that `runtime` carries only the sections the
+/// file owns (see [`ADMIN_OWNED_RUNTIME_SECTIONS`]). Expressing that as its own
+/// type makes the rule structural — `save` cannot forget to strip a section,
+/// and adding a field to `RuntimeSettings` forces a decision about which side
+/// it belongs to.
+#[derive(Serialize)]
+struct ConfigFile<'a> {
+    global: &'a GlobalConfig,
+    admin: &'a AdminConfig,
+    dirs: &'a [DirConfig],
+    wireguard: &'a WireGuardConfig,
+    runtime: RuntimeFileSections<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apps: Option<&'a LegacyApps>,
+}
+
+/// The runtime sections `config.yaml` is authoritative for.
+#[derive(Serialize)]
+struct RuntimeFileSections<'a> {
+    ml: &'a MlConfig,
+    compression: &'a CompressionConfig,
+    video: &'a VideoConfig,
+    originals: &'a OriginalsConfig,
+    trash: &'a TrashConfig,
+    audit: &'a AuditConfig,
+}
+
+impl<'a> From<&'a Config> for ConfigFile<'a> {
+    fn from(c: &'a Config) -> Self {
+        Self {
+            global: &c.global,
+            admin: &c.admin,
+            dirs: &c.dirs,
+            wireguard: &c.wireguard,
+            runtime: RuntimeFileSections {
+                ml: &c.runtime.ml,
+                compression: &c.runtime.compression,
+                video: &c.runtime.video,
+                originals: &c.runtime.originals,
+                trash: &c.runtime.trash,
+                audit: &c.runtime.audit,
+            },
+            apps: c.apps.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -203,6 +267,16 @@ pub struct WgPeerConfig {
 
 // ───────────────────────── runtime tunable settings ────────────────────────
 
+/// Runtime sections the admin UI owns outright.
+///
+/// They live in SQLite and are deliberately kept out of `config.yaml`: a copy
+/// in the file would only be a trap, since editing it changes nothing at boot.
+/// Every section *not* listed here is the opposite — no admin form can touch it,
+/// so `config.yaml` stays authoritative or it could not be configured at all.
+///
+/// Keys are the serialised names, as they appear inside `runtime:`.
+pub const ADMIN_OWNED_RUNTIME_SECTIONS: [&str; 3] = ["tasks", "alerts", "backup"];
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuntimeSettings {
     #[serde(default)]
@@ -238,6 +312,22 @@ impl Default for RuntimeSettings {
             backup: BackupConfig::default(),
             alerts: AlertConfig::default(),
         }
+    }
+}
+
+impl RuntimeSettings {
+    /// Adopt the sections `config.yaml` owns from `file`.
+    ///
+    /// The admin-owned sections ([`ADMIN_OWNED_RUNTIME_SECTIONS`]) are left
+    /// untouched; everything else is taken from the file, which is the only
+    /// place those can be edited.
+    pub fn apply_file_sections(&mut self, file: &RuntimeSettings) {
+        self.ml = file.ml.clone();
+        self.compression = file.compression.clone();
+        self.video = file.video.clone();
+        self.originals = file.originals.clone();
+        self.trash = file.trash.clone();
+        self.audit = file.audit.clone();
     }
 }
 
@@ -846,8 +936,10 @@ impl Config {
         Ok(config)
     }
 
+    /// Persist to `config.yaml`, writing the file's own view of the
+    /// configuration: the sections SQLite owns ([`ConfigFile`]) are left out.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = serde_yaml::to_string(self)?;
+        let content = serde_yaml::to_string(&ConfigFile::from(self))?;
         if let Some(parent) = path.as_ref().parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).ok();
@@ -1062,6 +1154,75 @@ impl ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The file must never carry a copy of a section the admin UI owns: a
+    /// reader who spots `alerts:` in `config.yaml` will edit it, and the edit
+    /// changes nothing because SQLite wins. The rule lives in two places
+    /// (`ConfigFile` and `ADMIN_OWNED_RUNTIME_SECTIONS`), so pin them together.
+    #[test]
+    fn admin_owned_sections_are_absent_from_the_file() {
+        let mut config = Config::default();
+        config.runtime.alerts.serverchan.send_key = "SCT-do-not-write-me".into();
+        config.runtime.tasks.max_workers = 42;
+        config.runtime.ml.backend = "onnx".into();
+
+        // Through `save` rather than `ConfigFile` directly, so the assertion
+        // covers the call `ConfigStore::update` actually makes.
+        let path =
+            std::env::temp_dir().join(format!("homehub-config-{}.yaml", std::process::id()));
+        config.save(&path).unwrap();
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let runtime: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let sections: Vec<String> = runtime["runtime"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+
+        for owned in ADMIN_OWNED_RUNTIME_SECTIONS {
+            assert!(
+                !sections.iter().any(|s| s == owned),
+                "{owned} belongs to the admin UI and must not be written to config.yaml"
+            );
+        }
+        assert!(!yaml.contains("SCT-do-not-write-me"));
+        // ...and the sections neither side can afford to lose are still there.
+        for kept in ["ml", "compression", "video", "originals", "trash", "audit"] {
+            assert!(sections.iter().any(|s| s == kept), "{kept} must stay in the file");
+        }
+    }
+
+    /// Sections the file owns are replaced wholesale at boot; the ones the
+    /// admin UI owns must survive so a restart does not undo an edit.
+    #[test]
+    fn file_sections_overlay_only_the_file_owned_part() {
+        let file = RuntimeSettings {
+            ml: MlConfig {
+                backend: "onnx".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut stored = RuntimeSettings {
+            ml: MlConfig {
+                backend: "stub".into(),
+                ..Default::default()
+            },
+            tasks: TaskConfig {
+                max_workers: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        stored.apply_file_sections(&file);
+
+        assert_eq!(stored.ml.backend, "onnx");
+        assert_eq!(stored.tasks.max_workers, 42);
+    }
 
     #[test]
     fn legacy_apps_are_migrated() {

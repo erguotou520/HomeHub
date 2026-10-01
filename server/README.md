@@ -21,15 +21,30 @@ cargo run --release
 
 容器化部署见 `deploy/docker-compose.yml`（单容器 + 数据卷）。
 
+## 配置归属
+
+配置只有两个家，互不重叠：
+
+| 归属 | 内容 | 怎么改 |
+|------|------|--------|
+| `config.yaml`<br>**每次启动重新读取** | `global`、`admin`、`dirs`、`wireguard`，以及后台没有表单的 `runtime.ml / compression / video / originals / trash / audit` | 改文件，重启 |
+| SQLite `settings` 表<br>**后台是唯一入口** | `runtime.tasks / alerts / backup`，以及 `dirs.enabled` | 管理后台，立即生效 |
+
+一句话规则：**文件是声明，每次启动重新应用；后台改的字段落在库里，文件覆盖不到它们。**
+
+`Config::save` 写文件时会剔除后台拥有的那三段，所以文件里不会留下它们的副本 —— 留一份只能让人改到一个重启就失效的值。`PUT /api/admin/settings` 同样只接受这三段，提交其它段返回 400。段清单见 `config::ADMIN_OWNED_RUNTIME_SECTIONS`，两边由 `config::tests` 锁在一起。
+
+组合发生在 `main::load_runtime_settings`：先取库里的（空库则用文件当种子），再用文件的六段覆盖。
+
 ## 模块
 
 ```
 server/src/
-├── config/     配置模型（目录注册表 + 运行时参数），兼容旧 home-nas 的 apps: 格式并自动迁移
+├── config/     配置模型：文件与 SQLite 的归属规则见上（含旧 home-nas 的 apps: 格式迁移）
 ├── db/         SQLite 连接池、WAL、settings 读写
 ├── models/     目录 / 照片 / 标签 / 人脸 / 任务 / 回收站 / 审计 / 告警
 ├── services/
-│   ├── dirs        目录注册表（配置为准，SQLite 镜像）
+│   ├── dirs        目录注册表（文件声明路径，enabled 等状态以后台为准）
 │   ├── scan        目录扫描（增量指纹 + inotify 监听）
 │   ├── photos      相册查询：时间轴 / 目录树 / 分类 / 人物 / 地理 / 分页
 │   ├── exif        EXIF：拍摄时间、方向、GPS、相机
@@ -98,7 +113,7 @@ runtime:
 ## SQLite 备份
 
 数据库中的元数据（照片索引、标签、人脸、任务队列、审计）全部来自磁盘，可重建，但重建成本高。
-因此服务端按 `runtime.backup`（默认 24 小时、保留 7 份）执行 `VACUUM INTO` 快照：
+因此服务端按管理后台「系统信息 → 数据库备份」里配的间隔与保留份数（默认 24 小时、保留 7 份，目录可用 `backup.dir` 指定）执行 `VACUUM INTO` 快照：
 
 - 快照写入 `<data-dir>/backups/homehub-<时间戳>.db`，先写 `.tmp` 再原子改名，不会出现半截备份；
 - `VACUUM INTO` 在只读事务里拷贝，写入期间服务正常读写，产物同时是整理过的（无 WAL 残留）；

@@ -300,13 +300,20 @@ echo "== settings round-trip =="
 R=$(curl -s -H "$AUTH" "$BASE/api/admin/settings" |
   python3 -c "import sys,json;d=json.load(sys.stdin);print('tasks' if 'tasks' in d else str(d)[:200])")
 check "settings read" "tasks" "$R"
+# Submit only the section under test: the endpoint rejects sections owned by
+# config.yaml, and it exists precisely so a page can send just its own.
 curl -s -X PUT "$BASE/api/admin/settings" -H "$AUTH" -H 'content-type: application/json' \
   -d "$(curl -s -H "$AUTH" "$BASE/api/admin/settings" |
-        python3 -c "import sys,json;d=json.load(sys.stdin);d['tasks']['rate-limit-per-sec']=33;print(json.dumps(d))")" \
+        python3 -c "import sys,json;t=json.load(sys.stdin)['tasks'];t['rate-limit-per-sec']=33;print(json.dumps({'tasks':t}))")" \
   | grep -q success && echo "  ok   settings write" || { echo "  FAIL settings write"; FAILURES=$((FAILURES + 1)); }
 R=$(curl -s -H "$AUTH" "$BASE/api/admin/settings" |
   python3 -c "import sys,json;print(json.load(sys.stdin)['tasks']['rate-limit-per-sec'])")
 check "settings persisted" "33" "$R"
+# The file-owned sections must be refused rather than accepted and later
+# reverted by config.yaml on restart.
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/admin/settings" -H "$AUTH" \
+  -H 'content-type: application/json' -d '{"ml":{"backend":"stub"}}')
+check "file-owned section refused" "400" "$R"
 
 echo "== geo cluster drill-down (map views) =="
 GEO=$(curl -s "$BASE/api/photos/geo?precision=0.02" | python3 -c "

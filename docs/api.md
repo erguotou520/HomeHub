@@ -73,7 +73,7 @@
 |------|------|------|
 | GET | `/api/admin/stats` | 目录统计、照片数、人脸/人物数、回收站与 `.originals` 占用 |
 | GET | `/api/admin/system` | 版本、运行时长、SQLite 体积、磁盘水位、ML 后端、告警历史 |
-| GET/PUT | `/api/admin/settings` | 运行时参数（任务并发/限流/工作时段、ML、压缩、原图保护、回收站、审计、告警）热更新 |
+| GET/PUT | `/api/admin/settings` | 运行时参数热更新；`PUT` 只接受任务 / 告警 / 备份三段（详见下方说明） |
 | GET | `/api/admin/alerts` | 告警历史 |
 | POST | `/api/admin/alerts/resolve` | `{"kind": "disk"}`（省略则全部）标记已恢复 |
 | POST | `/api/admin/alerts/test` | 发送一条测试告警 |
@@ -85,7 +85,9 @@
 
 > `GET /api/admin/settings` 中的凭据字段（`alerts.serverchan.send-key`）以 `••••••••` 掩码返回；`PUT` 时若该字段为空或仍是掩码，则保留服务端已存的值，因此保存表单不会清空密钥。
 >
-> `PUT` 的语义是**深合并**而非整体替换：请求体逐键合并到已存的设置上（对象递归合并，标量 / 数组 / null 直接覆盖）。因此拿着旧快照的客户端保存一次，不会把它没编辑过的段落回退成旧值。
+> `PUT` 的语义是**深合并**而非整体替换：请求体逐键合并到已存的设置上（对象递归合并，标量 / 数组 / null 直接覆盖）。因此客户端只提交自己那一页负责的段落即可，不会把别处改过的配置回退成旧值 —— 管理后台的两个设置页（系统页 / 任务页）正是这么做的。
+>
+> `PUT` 只接受 `tasks`、`alerts`、`backup` 三段（即 `ADMIN_OWNED_RUNTIME_SECTIONS`）：它们存在 SQLite 里，也不写回 `config.yaml`。其余六段（`ml`、`compression`、`video`、`originals`、`trash`、`audit`）由 `config.yaml` 声明、服务端**每次启动**重新读取，经接口提交会返回 `400` —— 照做只会在重启后被静默覆盖。要改这些，改文件后重启。
 
 ### 人物分组
 

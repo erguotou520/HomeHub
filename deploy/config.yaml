@@ -52,22 +52,12 @@ wireguard:
     #   tunnel-ip: 10.0.0.2
     #   public-key: <base64 public key>
 
+# 运行期参数有两个归属，互不重叠：
+#   - 这一段（ml / compression / video / originals / trash / audit）后台没有表单，
+#     以本文件为准，每次启动都会重新读取 —— 改完重启即生效。
+#   - 任务队列 / 告警通知 / 数据库备份三组参数只在管理后台配置（存在 SQLite 里），
+#     不会写回本文件；写在这里是无效的。
 runtime:
-  tasks:
-    concurrency:
-      cpu: 1      # detection / dedup
-      io: 2       # thumbnails / compression
-    rate-limit-per-sec: 20
-    file-timeout-secs: 120
-    max-attempts: 3
-    max-workers: 6
-    work-window:
-      enabled: true
-      start: "02:00"
-      end: "08:00"
-    full-rescan: weekly      # off | daily | weekly
-    full-rescan-hour: 3
-
   ml:
     # `onnx` is the real detector (Docker image builds with --features onnx);
     # `stub` disables recognition entirely.
@@ -104,6 +94,10 @@ runtime:
     png-level: 2
     jpegtran-path: jpegtran
 
+  video:
+    ffprobe-path: ffprobe
+    ffmpeg-path: ffmpeg
+
   originals:
     enabled: true
     retention-days: 30
@@ -116,20 +110,3 @@ runtime:
     retention-days: 90
     batch-size: 256
     flush-interval-secs: 5
-
-  # Periodic `VACUUM INTO` snapshots of homehub.db into <data-dir>/backups.
-  backup:
-    enabled: true
-    interval-hours: 24
-    keep: 7
-    # dir: /data/backups
-
-  alerts:
-    enabled: true
-    disk-usage-percent: 85
-    task-failure-threshold: 5
-    cooldown-secs: 3600
-    # Server 酱（sct.ftqq.com）推送：在 https://sct.ftqq.com 拿一个 SendKey 填进来即可。
-    serverchan:
-      enabled: false
-      send-key: ""

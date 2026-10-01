@@ -43,9 +43,13 @@ cd deploy && docker compose up -d
 > 2. `models/scene-classification.onnx` — 场景/风景分类（任意 ImageNet 分类器导出 ONNX，标签文件可选）；
 > 3. `models/yolov8n-face.onnx` — 人脸检测（如 [yolov8-face](https://github.com/danielsyahputra/yolov8-face)）。
 >
-> 路径与阈值在 `config.yaml` 的 `runtime.ml.*` 配置；模型缺失时服务端回落 stub 并在日志给出具体路径提示。本地源码构建请加 `--features onnx`（需要 `libssl-dev`，首次会下载 ONNX Runtime 预编译库）。
+> 路径与阈值在 `config.yaml` 的 `runtime.ml.*` 配置；这一段以文件为准、每次启动重新读取，所以改完重启即生效。模型缺失时服务端回落 stub 并在日志给出具体路径提示。本地源码构建请加 `--features onnx`（需要 `libssl-dev`，首次会下载 ONNX Runtime 预编译库）。
 
 > **管理员凭据**：`config.yaml` 不设密码（或留旧默认值）时，服务端首次启动会自动生成强随机密码并回写配置文件，同时在日志中以 WARN 级别打印——请从日志获取初始密码。
+
+> **配置改哪里**：`config.yaml` 只写**启动时就得知道**的东西 —— `global`（监听地址、数据目录、JWT 密钥）、`admin`（登录密码）、`dirs`、`wireguard`，加上后台没有表单的 `runtime.ml / compression / video / originals / trash / audit`。这几段**每次启动都会重新读取**，改完重启即生效。
+>
+> 任务队列、告警通知、数据库备份三组参数只在管理后台配置（落在 SQLite 里），**不会出现在 `config.yaml`**：文件里留一份只会让人改到一个重启就失效的副本。目录的启用开关同理，以后台为准。
 
 ### 管理后台
 

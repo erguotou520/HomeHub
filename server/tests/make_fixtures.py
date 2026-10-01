@@ -133,6 +133,11 @@ wireguard:
     - name: smoke-client
       tunnel-ip: 127.0.0.1
 runtime:
+  # These run against a brand-new database, so the file seeds every section,
+  # including the ones the admin UI owns (tasks / alerts / backup) — that
+  # bootstrap path is deliberate, see main::load_runtime_settings. On an
+  # existing database only ml / compression / video / originals / trash / audit
+  # are read back from here.
   tasks:
     concurrency: {{cpu: 1, io: 2}}
     rate-limit-per-sec: 50

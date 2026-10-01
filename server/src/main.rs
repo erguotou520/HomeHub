@@ -62,8 +62,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     tracing::info!("loaded configuration from {}", config_path);
 
-    // Runtime settings live in SQLite so the admin UI can change them; the
-    // YAML copy provides the defaults on first boot.
+    // Runtime settings have two owners — see `config`'s module docs. SQLite
+    // holds the sections the admin UI edits, `config.yaml` the rest.
     let pool = db::open(&config).await?;
     tracing::info!("sqlite ready at {}", config.db_path().display());
 
@@ -271,25 +271,40 @@ async fn spa_fallback(uri: axum::http::Uri) -> axum::response::Response {
     }
 }
 
-/// Read runtime settings from SQLite, falling back to the YAML defaults.
+/// Compose the runtime settings the process runs with.
+///
+/// Two owners, no overlap:
+///
+/// * SQLite holds the sections the admin UI edits (`tasks`, `alerts`,
+///   `backup`), so a save from the browser survives a restart.
+/// * `config.yaml` holds the rest (`ml`, `compression`, `video`, `originals`,
+///   `trash`, `audit`). Nothing in the UI can change those, so the file is
+///   re-applied on **every** start — editing it and restarting works, which it
+///   did not when the stored blob simply won outright.
+///
+/// On a fresh database the file also seeds the SQLite-owned sections, so a
+/// pre-provisioned `config.yaml` still bootstraps a new instance.
 async fn load_runtime_settings(
     pool: &db::Db,
     config: &Config,
 ) -> anyhow::Result<RuntimeSettings> {
-    match db::get_setting(pool, "runtime_settings").await? {
+    let mut settings = match db::get_setting(pool, "runtime_settings").await? {
         Some(raw) => match serde_json::from_str::<RuntimeSettings>(&raw) {
-            Ok(s) => Ok(s),
+            Ok(stored) => stored,
             Err(e) => {
-                tracing::warn!("stored runtime settings are invalid ({}), using defaults", e);
-                Ok(config.runtime.clone())
+                tracing::warn!("stored runtime settings are invalid ({}), falling back to the file", e);
+                config.runtime.clone()
             }
         },
-        None => {
-            let serialized = serde_json::to_string(&config.runtime)?;
-            db::set_setting(pool, "runtime_settings", &serialized).await?;
-            Ok(config.runtime.clone())
-        }
-    }
+        None => config.runtime.clone(),
+    };
+
+    settings.apply_file_sections(&config.runtime);
+
+    // Keep the stored blob equal to what is actually running, so whoever reads
+    // the table is not misled by a stale copy of the file-owned sections.
+    db::set_setting(pool, "runtime_settings", &serde_json::to_string(&settings)?).await?;
+    Ok(settings)
 }
 
 async fn health(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<serde_json::Value> {

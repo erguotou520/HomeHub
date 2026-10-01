@@ -340,16 +340,61 @@ pub async fn traffic(
 
 // ───────────────────────────────── task centre ─────────────────────────────
 
+const RECOGNITION_KINDS: [&str; 5] =
+    ["thumb", "detect_object", "detect_scene", "detect_face", "clip_embed"];
+
 pub async fn task_status(
     State(state): State<AppState>,
     _claims: Claims,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let queues = state.queue.queue_status().await?;
     let throughput = state.queue.throughput(300).await?;
+
+    // Recognition progress per album dir: media discovered by the scan
+    // (`photo_assets`) vs media with a CLIP embedding (fully recognized).
+    // The total only reaches its final value once the scan has walked the
+    // whole directory, so the bar grows in two phases — scan, then recognize.
+    let mut progress = Vec::new();
+    for dir in state.registry.album_dirs() {
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM photo_assets WHERE dir_id = ?")
+            .bind(dir.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or((0,));
+        let embedded: (i64,) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT pe.photo_id)
+             FROM photo_embeddings pe JOIN photo_assets pa ON pa.id = pe.photo_id
+             WHERE pa.dir_id = ?",
+        )
+        .bind(dir.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or((0,));
+        progress.push(serde_json::json!({
+            "name": dir.name,
+            "dir_id": dir.id,
+            "total": total.0,
+            "embedded": embedded.0,
+        }));
+    }
+    let recognition_pending: i64 = queues
+        .iter()
+        .filter(|q| RECOGNITION_KINDS.contains(&q.kind.as_str()))
+        .map(|q| q.pending)
+        .sum();
+    let recognition_failed: i64 = queues
+        .iter()
+        .filter(|q| RECOGNITION_KINDS.contains(&q.kind.as_str()))
+        .map(|q| q.failed)
+        .sum();
+
     Ok(Json(serde_json::json!({
         "queues": queues,
         "running": state.queue.running_now(),
         "throughput_5min": throughput,
+        "progress": progress,
+        "recognition_pending": recognition_pending,
+        "recognition_failed": recognition_failed,
     })))
 }
 
@@ -449,20 +494,52 @@ pub async fn get_settings(
     Ok(Json(serde_json::to_value(settings).unwrap_or_default()))
 }
 
+/// Apply a settings change.
+///
+/// The body is a **partial** object: whatever the calling page owns. The two
+/// settings screens (系统页 / 任务页) are separate views over one object, and
+/// each of them used to PUT a full snapshot fetched minutes earlier — saving
+/// one silently rolled back whatever the other had changed in between. That is
+/// exactly what the deep merge below is for, but it only works if the body is
+/// genuinely partial, hence the loose type.
+///
+/// Only the sections in [`ADMIN_OWNED_RUNTIME_SECTIONS`] are accepted; the rest
+/// are declared by `config.yaml` and re-applied at boot.
 pub async fn update_settings(
     State(state): State<AppState>,
     _claims: Claims,
-    Json(body): Json<RuntimeSettings>,
+    Json(incoming): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
+    if !incoming.is_object() {
+        return Err(crate::models::AppError::BadRequest(
+            "settings body must be a JSON object".into(),
+        ));
+    }
+
+    // Refuse the sections this endpoint does not own. They are declared in
+    // `config.yaml` and re-applied on every boot, so accepting a write here
+    // would recreate the very trap this endpoint was fixed to remove: a change
+    // that looks saved and silently reverts on the next restart.
+    if let Some(fields) = incoming.as_object() {
+        if let Some(unknown) = fields
+            .keys()
+            .find(|k| !crate::config::ADMIN_OWNED_RUNTIME_SECTIONS.contains(&k.as_str()))
+        {
+            return Err(crate::models::AppError::BadRequest(format!(
+                "`{unknown}` belongs in config.yaml and is not editable here; \
+                 change the file and restart"
+            )));
+        }
+    }
+
     // Deep-merge the incoming settings over the stored ones instead of
-    // replacing wholesale: a client that fetched a stale snapshot must not
-    // silently roll back sections it did not edit (bitten once already).
+    // replacing wholesale: a client that sends one section must not roll back
+    // the others.
     let stored_raw = crate::db::get_setting(&state.db, "runtime_settings")
         .await?
         .unwrap_or_else(|| "null".to_string());
     let mut merged =
         serde_json::from_str::<serde_json::Value>(&stored_raw).unwrap_or_else(|_| serde_json::json!({}));
-    let incoming = serde_json::to_value(&body)?;
     merge_json(&mut merged, &incoming);
     let mut settings: RuntimeSettings = serde_json::from_value(merged).map_err(|e| {
         crate::models::AppError::BadRequest(format!("merged settings invalid: {e}"))

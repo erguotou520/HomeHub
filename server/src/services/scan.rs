@@ -41,6 +41,12 @@ pub async fn scan_dir(
     let mut stats = ScanStats::default();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let default_ignore = crate::config::default_ignore_rules();
+    // Walk errors (e.g. EIO / host down on a network filesystem) mean we did
+    // NOT see the whole tree. Remembering them lets the prune phase below
+    // bail out instead of treating "not seen" as "deleted" — on a flapping
+    // NAS mount that one race deleted hundreds of indexed photos.
+    let mut walk_errors: u64 = 0;
+    let mut last_walk_error = String::new();
 
     for entry in WalkDir::new(root)
         .min_depth(1)
@@ -56,8 +62,15 @@ pub async fn scan_dir(
             }
             true
         })
-        .filter_map(|e| e.ok())
     {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                walk_errors += 1;
+                last_walk_error = e.to_string();
+                continue;
+            }
+        };
         let Ok(rel_os) = entry.path().strip_prefix(root) else {
             continue;
         };
@@ -72,9 +85,19 @@ pub async fn scan_dir(
             continue;
         }
 
+        // A failed metadata() means we did NOT see this path: the NFS server
+        // returned EIO / STALE during the walk. Counting it keeps the prune
+        // guard honest — silently `continue`ing would let the walk "finish
+        // clean" on a partially-readable tree and prune everything it failed
+        // to stat (which is how 53k photo rows were deleted on a flapping
+        // mount: 0 readdir errors, but thousands of stat failures).
         let metadata = match entry.metadata() {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(e) => {
+                walk_errors += 1;
+                last_walk_error = e.to_string();
+                continue;
+            }
         };
         let is_dir = metadata.is_dir();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -196,6 +219,17 @@ pub async fn scan_dir(
     }
 
     // Anything we know about but did not see has disappeared from disk.
+    // NEVER prune when the walk itself errored: an incomplete listing would
+    // delete everything we failed to see (mount flap, NAS hiccup, EIO).
+    // Those rows simply get reconciled on the next clean scan.
+    if walk_errors > 0 {
+        tracing::warn!(
+            "scan {}: {} walk errors (last: {}), skipping prune phase",
+            dir.name,
+            walk_errors,
+            last_walk_error
+        );
+    } else {
     let known: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, rel_path FROM file_index WHERE dir_id = ?")
             .bind(dir.id)
@@ -218,6 +252,7 @@ pub async fn scan_dir(
             }
         }
         stats.removed += 1;
+    }
     }
 
     // A full rescan is the cheap moment to rebuild the FTS index from scratch.

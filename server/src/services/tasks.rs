@@ -25,6 +25,17 @@ pub const PRIORITY_NORMAL: i32 = 0;
 /// Freshly uploaded files: allowed to run outside the work window.
 pub const PRIORITY_HIGH: i32 = 10;
 
+/// The `dir_id` carried by a task payload, if any.
+///
+/// Both `FileTaskPayload` and `ScanDirPayload` are keyed by directory, so this
+/// covers every task kind that touches the filesystem.
+fn payload_dir_id(payload: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("dir_id")?
+        .as_i64()
+}
+
 #[derive(Clone)]
 pub struct TaskQueue {
     db: Db,
@@ -345,6 +356,16 @@ impl TaskQueue {
             let Some(kind) = TaskKind::parse(&task.kind) else {
                 continue;
             };
+            // A task pointing at a directory that is disabled — or has since
+            // been removed from the config — can never succeed: the directory
+            // is no longer part of the library. Drop it here, before the work
+            // window check, instead of running it into a permanent `failed`
+            // row. Those rows are sticky: nothing clears them, they keep the
+            // `task` alert raised forever, and a single unmounted volume once
+            // produced 193 of them.
+            if self.drop_if_dir_unavailable(&task).await? {
+                continue;
+            }
             if !inside_window && kind.is_cpu_bound() && task.priority < PRIORITY_HIGH {
                 continue;
             }
@@ -361,6 +382,31 @@ impl TaskQueue {
             }
         }
         Ok(None)
+    }
+
+    /// Delete `task` when the directory it belongs to is disabled or gone.
+    ///
+    /// Returns `true` when the row was dropped.
+    async fn drop_if_dir_unavailable(&self, task: &Task) -> Result<bool> {
+        let Some(dir_id) = payload_dir_id(&task.payload) else {
+            return Ok(false);
+        };
+        let dir = self.registry.by_id(dir_id);
+        if dir.as_ref().map(|d| d.is_enabled()).unwrap_or(false) {
+            return Ok(false);
+        }
+        tracing::info!(
+            "dropping task {} ({}): dir {} is {}",
+            task.id,
+            task.kind,
+            dir_id,
+            if dir.is_some() { "disabled" } else { "unregistered" }
+        );
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(task.id)
+            .execute(&self.db)
+            .await?;
+        Ok(true)
     }
 
     async fn requeue(&self, task: &Task) -> Result<()> {
@@ -415,7 +461,16 @@ impl TaskQueue {
     }
 
     async fn execute(&self, task: &Task, kind: TaskKind) -> Result<()> {
-        let timeout = Duration::from_secs(self.config().runtime.tasks.file_timeout_secs.max(5));
+        // A directory walk is not a per-file operation: on a slow NAS mount a
+        // full tree (60k+ files) takes far longer than one image decode, so
+        // scanning gets its own floor (10h) while every other kind stays
+        // bounded by `file-timeout-secs`.
+        let secs = if kind == TaskKind::Scan {
+            self.config().runtime.tasks.file_timeout_secs.max(5).max(10 * 3600)
+        } else {
+            self.config().runtime.tasks.file_timeout_secs.max(5)
+        };
+        let timeout = Duration::from_secs(secs);
         let fut = self.dispatch(task, kind);
         match tokio::time::timeout(timeout, fut).await {
             Ok(r) => r,
@@ -431,6 +486,28 @@ impl TaskQueue {
                     .registry
                     .by_id(payload.dir_id)
                     .ok_or_else(|| anyhow::anyhow!("dir {} not registered", payload.dir_id))?;
+                // Two concurrent scans of the same directory are dangerous:
+                // each one prunes rows the other hasn't re-inserted yet, and
+                // on a slow NAS the overlap window is hours long. Abort if a
+                // sibling scan of this dir is already running; the periodic
+                // rescan (or a forced scan) will pick it up.
+                let sibling: (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM tasks \
+                     WHERE kind = 'scan' AND status = 'running' AND id != ? \
+                       AND json_extract(payload, '$.dir_id') = ?",
+                )
+                .bind(task.id)
+                .bind(payload.dir_id)
+                .fetch_one(&self.db)
+                .await?;
+                if sibling.0 > 0 {
+                    tracing::info!(
+                        "scan dir {}: another scan is still running, deferring (full={})",
+                        dir.name,
+                        payload.full
+                    );
+                    return Ok(());
+                }
                 let stats =
                     crate::services::scan::scan_dir(&self.db, &self.registry, self, &dir, payload.full)
                         .await?;

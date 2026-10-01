@@ -47,6 +47,11 @@ app/src/main/java/me/erguotou/homehub/
 
 - **浏览视图**：时间轴（按月分组）、目录树、分类（标签）、人物（人脸分组）、地点（高德地图 SDK 渲染聚合点）。
 - **查看器**：左右滑动切换、双击/捏合缩放、EXIF 信息面板、旋转 90°/180° 并调用服务端写回。
+- **下载到本机**：长按任意缩略图（时间轴 / 目录 / 筛选结果 / 语义搜索结果皆可）弹出操作菜单，
+  当前只有「下载到本机」一项 —— 拉取原图，经 SAF 交给系统的「选择保存位置」；
+  全屏查看器顶栏另有常驻的下载按钮。缩略图长按是这里唯一的入口，因为**瓦片本身没有 ⋮ 按钮**
+  （文件页每行都有，长按则是进多选）。菜单与下载分别由 `ui/components/PhotoActions.kt` 的
+  `PhotoActionMenu` / `rememberPhotoDownloader` 提供，与文件页共用同一个 `rememberLocalSaver`。
 - **上传**：系统文件选择器多选 → 二次确认（可勾选「上传完成后删除本地」）→ WorkManager 后台
   分片上传（`GET /api/upload/offset` 续传、`POST /api/upload/chunk` 追加、`POST /api/upload/complete`
   落盘并进入识别/缩略图流水线），进度以通知展示；服务端返回 `duplicate_of` 时提示重复。

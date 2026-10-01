@@ -48,6 +48,7 @@ import me.erguotou.homehub.data.SemanticResponse
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
+import me.erguotou.homehub.ui.components.PhotoActionMenu
 import me.erguotou.homehub.ui.components.PhotoTile
 
 data class SemanticUiState(
@@ -95,11 +96,14 @@ fun SemanticSearchScreen(
     onBack: () -> Unit,
     onFullscreenChange: (Boolean) -> Unit,
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
+    onDownload: (PhotoItem) -> Unit = {},
     vm: SemanticSearchViewModel = viewModel()
 ) {
     // No lifecycle-compose dependency: collect with an explicit initial value.
     val state by vm.state.collectAsState(initial = SemanticUiState())
     var input by remember { mutableStateOf(state.query) }
+    // Long-press target for the shared album action sheet (下载到本机).
+    var menuPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     // Debounce so typing Chinese doesn't fire a request per keystroke.
     LaunchedEffect(input) {
         kotlinx.coroutines.delay(400)
@@ -170,8 +174,10 @@ fun SemanticSearchScreen(
                         Box {
                             PhotoTile(
                                 photo = photo,
-                                urlResolver = vm::url
-                            ) { onOpen(photo, state.results) }
+                                urlResolver = vm::url,
+                                onClick = { onOpen(photo, state.results) },
+                                onLongClick = { menuPhoto = photo }
+                            )
                             if (photo.mediaKind == "video") {
                                 val label = photo.durationMs?.let { ms ->
                                     val s = (ms / 1000).toInt()
@@ -204,4 +210,10 @@ fun SemanticSearchScreen(
             }
         }
     }
+
+    PhotoActionMenu(
+        target = menuPhoto,
+        onDownload = onDownload,
+        onDismiss = { menuPhoto = null }
+    )
 }

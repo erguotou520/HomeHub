@@ -17,6 +17,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -26,14 +28,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import me.erguotou.homehub.data.Repository
+import me.erguotou.homehub.ui.components.rememberPhotoDownloader
 import me.erguotou.homehub.ui.screens.album.AlbumScreen
 import me.erguotou.homehub.ui.screens.album.PhotoViewerScreen
 import me.erguotou.homehub.ui.screens.album.SemanticSearchScreen
@@ -104,33 +110,44 @@ fun HomeHubRoot() {
                 composable("album/semantic") {
                     val semanticVm: me.erguotou.homehub.ui.screens.album.AlbumViewModel =
                         androidx.lifecycle.viewmodel.compose.viewModel()
+                    val context = LocalContext.current
+                    val repository = remember { Repository(context) }
+                    val snackbar = remember { SnackbarHostState() }
+                    val downloadPhoto = rememberPhotoDownloader(repository, snackbar)
                     var viewerPhoto by remember { mutableStateOf<me.erguotou.homehub.data.PhotoItem?>(null) }
                     var viewerList by remember { mutableStateOf(listOf<me.erguotou.homehub.data.PhotoItem>()) }
-                    SemanticSearchScreen(
-                        onBack = { navController.popBackStack() },
-                        onFullscreenChange = { fullscreen = it },
-                        onOpen = { photo, list ->
-                            viewerList = list
-                            viewerPhoto = photo
-                        }
-                    )
-                    viewerPhoto?.let { photo ->
-                        val list = viewerList
-                        val index = list.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
-                        LaunchedEffect(photo.id) { fullscreen = true }
-                        DisposableEffect(Unit) {
-                            onDispose { fullscreen = false }
-                        }
-                        PhotoViewerScreen(
-                            photos = list,
-                            initialIndex = index,
-                            urlResolver = { semanticVm.url(it) },
-                            mediaUrlResolver = { id -> semanticVm.url("api/photos/$id/raw") },
-                            onRotate = { p, angle, done -> semanticVm.rotate(p, angle, done) },
-                            onFlip = { p, vertical, done -> semanticVm.flip(p, vertical, done) },
-                            onRestore = { p, done -> semanticVm.restore(p, done) },
-                            onDismiss = { viewerPhoto = null }
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        SemanticSearchScreen(
+                            onBack = { navController.popBackStack() },
+                            onFullscreenChange = { fullscreen = it },
+                            onOpen = { photo, list ->
+                                viewerList = list
+                                viewerPhoto = photo
+                            },
+                            onDownload = downloadPhoto
                         )
+                        viewerPhoto?.let { photo ->
+                            val list = viewerList
+                            val index = list.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
+                            LaunchedEffect(photo.id) { fullscreen = true }
+                            DisposableEffect(Unit) {
+                                onDispose { fullscreen = false }
+                            }
+                            PhotoViewerScreen(
+                                photos = list,
+                                initialIndex = index,
+                                urlResolver = { semanticVm.url(it) },
+                                mediaUrlResolver = { id -> semanticVm.url("api/photos/$id/raw") },
+                                onRotate = { p, angle, done -> semanticVm.rotate(p, angle, done) },
+                                onFlip = { p, vertical, done -> semanticVm.flip(p, vertical, done) },
+                                onRestore = { p, done -> semanticVm.restore(p, done) },
+                                onDownload = downloadPhoto,
+                                onDismiss = { viewerPhoto = null }
+                            )
+                        }
+                        // Last child of the Box: a download failure stays visible
+                        // even while the full-screen viewer covers the results.
+                        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
                     }
                 }
                 composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }

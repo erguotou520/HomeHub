@@ -39,6 +39,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -72,8 +74,10 @@ import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
+import me.erguotou.homehub.ui.components.PhotoActionMenu
 import me.erguotou.homehub.ui.components.PhotoTile
 import me.erguotou.homehub.ui.components.SectionHeader
+import me.erguotou.homehub.ui.components.rememberPhotoDownloader
 import me.erguotou.homehub.work.UploadWorker
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -91,6 +95,11 @@ fun AlbumScreen(
 
     var viewerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var viewerList by remember { mutableStateOf(listOf<PhotoItem>()) }
+
+    // Long-press target for the album's action sheet (下载到本机).
+    var menuPhoto by remember { mutableStateOf<PhotoItem?>(null) }
+    val snackbar = remember { SnackbarHostState() }
+    val downloadPhoto = rememberPhotoDownloader(repository, snackbar)
 
     // The viewer is handed a snapshot list when it opens. After an edit the
     // ViewModel refetches and that snapshot goes stale (the info panel would
@@ -224,18 +233,28 @@ fun AlbumScreen(
 
                     if (state.activeFilter != null) {
                         FilterHeader(state.activeFilter!!) { vm.clearFilter() }
-                        PhotoGrid(state.filtered, vm::url) { photo, list ->
-                            viewerList = list
-                            viewerPhoto = photo
-                        }
+                        PhotoGrid(
+                            photos = state.filtered,
+                            urlResolver = vm::url,
+                            onOpen = { photo, list ->
+                                viewerList = list
+                                viewerPhoto = photo
+                            },
+                            onLongClick = { menuPhoto = it }
+                        )
                         return@PullToRefreshBox
                     }
 
                     when (state.view) {
-                        AlbumView.TIMELINE -> TimelineGrid(state.groups, vm::url) { photo, list ->
-                            viewerList = list
-                            viewerPhoto = photo
-                        }
+                        AlbumView.TIMELINE -> TimelineGrid(
+                            groups = state.groups,
+                            urlResolver = vm::url,
+                            onOpen = { photo, list ->
+                                viewerList = list
+                                viewerPhoto = photo
+                            },
+                            onLongClick = { menuPhoto = it }
+                        )
                         AlbumView.TREE -> FolderBrowser(
                             stack = state.treeStack,
                             folders = state.treeFolders,
@@ -247,7 +266,8 @@ fun AlbumScreen(
                             onOpenPhoto = { photo, list ->
                                 viewerList = list
                                 viewerPhoto = photo
-                            }
+                            },
+                            onLongClick = { menuPhoto = it }
                         )
                         AlbumView.TAGS -> TagList(state.tags, vm::url, vm::filterByTag)
                         AlbumView.PEOPLE -> PeopleList(state.people, vm::url) { p ->
@@ -286,10 +306,22 @@ fun AlbumScreen(
                 onRotate = { p, angle, done -> vm.rotate(p, angle, done) },
                 onFlip = { p, vertical, done -> vm.flip(p, vertical, done) },
                 onRestore = { p, done -> vm.restore(p, done) },
+                onDownload = downloadPhoto,
                 onDismiss = { viewerPhoto = null }
             )
         }
+
+        // Deliberately NOT Scaffold's own snackbarHost: the full-screen viewer
+        // is drawn over the Scaffold, so a failure reported by the viewer's 下载
+        // button would be hidden behind it. Last child of the Box wins.
+        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
     }
+
+    PhotoActionMenu(
+        target = menuPhoto,
+        onDownload = downloadPhoto,
+        onDismiss = { menuPhoto = null }
+    )
 
     if (showUpload) {
         // Exactly the same directory browser as 复制/移动到 in the 文件 tab:
@@ -396,7 +428,8 @@ private fun FilterHeader(filter: String, onClear: () -> Unit) {
 private fun PhotoGrid(
     photos: List<PhotoItem>,
     urlResolver: (String) -> String,
-    onOpen: (PhotoItem, List<PhotoItem>) -> Unit
+    onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
+    onLongClick: (PhotoItem) -> Unit
 ) {
     if (photos.isEmpty()) {
         Empty("没有照片")
@@ -409,7 +442,12 @@ private fun PhotoGrid(
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         items(photos, key = { it.id }) { photo ->
-            PhotoTile(photo = photo, urlResolver = urlResolver) { onOpen(photo, photos) }
+            PhotoTile(
+                photo = photo,
+                urlResolver = urlResolver,
+                onClick = { onOpen(photo, photos) },
+                onLongClick = { onLongClick(photo) }
+            )
         }
     }
 }
@@ -423,7 +461,8 @@ private fun PhotoGrid(
 private fun TimelineGrid(
     groups: List<me.erguotou.homehub.data.TimelineGroup>,
     urlResolver: (String) -> String,
-    onOpen: (PhotoItem, List<PhotoItem>) -> Unit
+    onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
+    onLongClick: (PhotoItem) -> Unit
 ) {
     if (groups.isEmpty()) {
         Empty("还没有照片或视频。连上 WireGuard 并等待目录扫描完成。")
@@ -444,7 +483,12 @@ private fun TimelineGrid(
                 }
             }
             items(group.items, key = { it.id }) { photo ->
-                PhotoTile(photo, urlResolver) { onOpen(photo, group.items) }
+                PhotoTile(
+                    photo = photo,
+                    urlResolver = urlResolver,
+                    onClick = { onOpen(photo, group.items) },
+                    onLongClick = { onLongClick(photo) }
+                )
             }
         }
     }
@@ -469,7 +513,8 @@ private fun FolderBrowser(
     onOpenFolder: (TreeNode) -> Unit,
     onGoUp: () -> Unit,
     onJumpTo: (Int) -> Unit,
-    onOpenPhoto: (PhotoItem, List<PhotoItem>) -> Unit
+    onOpenPhoto: (PhotoItem, List<PhotoItem>) -> Unit,
+    onLongClick: (PhotoItem) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -547,7 +592,12 @@ private fun FolderBrowser(
                 FolderRow(node) { onOpenFolder(node) }
             }
             items(photos, key = { it.id }) { photo ->
-                PhotoTile(photo, urlResolver) { onOpenPhoto(photo, photos) }
+                PhotoTile(
+                    photo = photo,
+                    urlResolver = urlResolver,
+                    onClick = { onOpenPhoto(photo, photos) },
+                    onLongClick = { onLongClick(photo) }
+                )
             }
         }
     }

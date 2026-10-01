@@ -86,6 +86,7 @@ import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
+import me.erguotou.homehub.ui.components.rememberLocalSaver
 import me.erguotou.homehub.util.FileKind
 import me.erguotou.homehub.util.formatBytes
 import me.erguotou.homehub.util.formatDateTime
@@ -125,7 +126,6 @@ fun FilesScreen(
 
     var renameEntry by remember { mutableStateOf<FileEntry?>(null) }
     var copyMove by remember { mutableStateOf<CopyMovePlan?>(null) }
-    var pendingDownload by remember { mutableStateOf<Pair<String, ByteArray>?>(null) }
 
     // Status lines (复制/移动/删除 results…) surface as snackbars.
     LaunchedEffect(state.message) {
@@ -156,25 +156,13 @@ fun FilesScreen(
         }
     }
 
-    val downloadLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("*/*")
-    ) { uri ->
-        val (_, bytes) = pendingDownload ?: return@rememberLauncherForActivityResult
-        pendingDownload = null
-        uri?.let { target ->
-            try {
-                context.contentResolver.openOutputStream(target)?.use { it.write(bytes) }
-            } catch (_: Exception) {
-                // Best effort.
-            }
-        }
-    }
+    // SAF "保存到本机", shared with the album's long-press action sheet.
+    val saveLocal = rememberLocalSaver()
 
     fun requestDownload(entry: FileEntry) {
         vm.download(entry) { bytes ->
             if (bytes != null) {
-                pendingDownload = entry.name to bytes
-                downloadLauncher.launch(entry.name)
+                saveLocal(entry.name, bytes)
             } else {
                 scope.launch { snackbar.showSnackbar("下载失败，请检查连接") }
             }

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SwapVert
@@ -82,6 +83,7 @@ fun PhotoViewerScreen(
     onRotate: (PhotoItem, Int, (Boolean) -> Unit) -> Unit,
     onFlip: (PhotoItem, Boolean, (Boolean) -> Unit) -> Unit,
     onRestore: (PhotoItem, (Boolean) -> Unit) -> Unit,
+    onDownload: (PhotoItem) -> Unit,
     onDismiss: () -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { photos.size })
@@ -163,6 +165,7 @@ fun PhotoViewerScreen(
             toast = toast,
             panels = panels,
             onClose = onDismiss,
+            onDownload = onDownload,
             onRotate = { angle, done ->
                 runEdit(
                     { cb -> onRotate(currentPhoto, angle) { ok -> cb(ok); done(ok) } },
@@ -216,6 +219,7 @@ private fun ViewerOverlay(
     toast: String?,
     panels: ViewerPanels,
     onClose: () -> Unit,
+    onDownload: (PhotoItem) -> Unit,
     onRotate: (Int, (Boolean) -> Unit) -> Unit,
     onFlip: (Boolean, (Boolean) -> Unit) -> Unit,
     onRestore: ((Boolean) -> Unit) -> Unit
@@ -234,6 +238,17 @@ private fun ViewerOverlay(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Explicit button rather than a long-press gesture: the video
+                // page deliberately carries no Compose gesture layer (it would
+                // swallow the Media3 controller's taps), and a hidden gesture
+                // on the photo page would fight pinch-zoom.
+                IconButton(onClick = { onDownload(photo) }, enabled = !busy) {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = "下载到本机",
+                        tint = Color.White
+                    )
+                }
                 IconButton(onClick = { panels.info = !panels.info }) {
                     Icon(Icons.Outlined.Info, contentDescription = "信息", tint = Color.White)
                 }

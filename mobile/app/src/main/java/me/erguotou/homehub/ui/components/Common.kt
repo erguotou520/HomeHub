@@ -2,8 +2,9 @@ package me.erguotou.homehub.ui.components
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -176,20 +177,26 @@ fun SectionHeader(
 /**
  * Square media tile loading the 256px server thumbnail. Video items get a
  * scrim plus play icon and duration in the bottom-left, like the system gallery.
+ *
+ * [onLongClick] opens the album's action sheet; the 文件 list uses the same
+ * gesture to enter multi-select, but a tile has no ⋮ button of its own, so
+ * holding it down is the only way to reach 「下载到本机」.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PhotoTile(
     photo: PhotoItem,
     urlResolver: (String) -> String,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     Box(
         modifier = modifier
             .aspectRatio(1f)
             .clip(TileShape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
         AsyncImage(
             model = urlResolver(photo.thumbUrl),

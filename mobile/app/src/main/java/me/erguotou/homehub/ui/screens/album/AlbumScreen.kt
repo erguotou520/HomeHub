@@ -39,7 +39,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -74,6 +73,7 @@ import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
+import me.erguotou.homehub.ui.components.NoticeHost
 import me.erguotou.homehub.ui.components.PhotoActionMenu
 import me.erguotou.homehub.ui.components.PhotoTile
 import me.erguotou.homehub.ui.components.SectionHeader
@@ -317,7 +317,7 @@ fun AlbumScreen(
         // Deliberately NOT Scaffold's own snackbarHost: the full-screen viewer
         // is drawn over the Scaffold, so a failure reported by the viewer's 下载
         // button would be hidden behind it. Last child of the Box wins.
-        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
+        NoticeHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
     }
 
     PhotoActionMenu(

@@ -17,7 +17,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +38,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import me.erguotou.homehub.data.Repository
+import me.erguotou.homehub.ui.components.NoticeHost
 import me.erguotou.homehub.ui.components.rememberPhotoDownloader
 import me.erguotou.homehub.ui.components.rememberPhotoSharer
 import me.erguotou.homehub.ui.screens.album.AlbumScreen
@@ -151,7 +151,7 @@ fun HomeHubRoot() {
                         }
                         // Last child of the Box: a download failure stays visible
                         // even while the full-screen viewer covers the results.
-                        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
+                        NoticeHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
                     }
                 }
                 composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }

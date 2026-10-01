@@ -54,7 +54,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -87,7 +86,10 @@ import me.erguotou.homehub.ui.components.DirectoryPickerDialog
 import me.erguotou.homehub.ui.components.Empty
 import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
+import me.erguotou.homehub.ui.components.NoticeHost
+import me.erguotou.homehub.ui.components.NoticeKind
 import me.erguotou.homehub.ui.components.rememberLocalSaver
+import me.erguotou.homehub.ui.components.notify
 import me.erguotou.homehub.util.FileKind
 import me.erguotou.homehub.util.FileKinds
 import me.erguotou.homehub.util.Sharing
@@ -169,7 +171,7 @@ fun FilesScreen(
             if (bytes != null) {
                 saveLocal(entry.name, bytes)
             } else {
-                scope.launch { snackbar.showSnackbar("下载失败，请检查连接") }
+                scope.launch { snackbar.notify("下载失败", NoticeKind.Failure) }
             }
         }
     }
@@ -186,11 +188,13 @@ fun FilesScreen(
             }
             val mime = FileKinds.mimeOf(entry.name, entry.mimeType)
             val opened = file != null && Sharing.share(context, file, mime, entry.name)
-            scope.launch {
-                when {
-                    bytes == null -> snackbar.showSnackbar("读取失败，请检查连接")
-                    file == null -> snackbar.showSnackbar("无法写入临时文件")
-                    !opened -> snackbar.showSnackbar("没有可接收分享的应用")
+            if (!opened) {
+                scope.launch {
+                    // Both cases look identical to the user — no sheet appeared.
+                    snackbar.notify(
+                        if (bytes != null && file != null) "没有可分享的应用" else "分享失败",
+                        NoticeKind.Failure
+                    )
                 }
             }
         }
@@ -447,7 +451,7 @@ fun FilesScreen(
 
         // Last child of the Box: download/share receipts stay visible even while
         // the viewer covers the list.
-        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
+        NoticeHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
     }
 
     // 上传 reuses the same directory browser as 复制到 / 移动到: the target

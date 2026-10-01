@@ -49,9 +49,10 @@ app/src/main/java/me/erguotou/homehub/
 - **查看器**：左右滑动切换、双击/捏合缩放、EXIF 信息面板、旋转 90°/180° 并调用服务端写回。
 - **长按操作菜单（分享 / 下载到本机）**：长按任意缩略图（时间轴 / 目录 / 筛选结果 / 语义搜索结果皆可）
   弹出操作菜单，两项都拉取**原图**：
-  - **下载到本机**经 SAF 交给系统的「选择保存位置」，回来后用 Snackbar 报出落盘位置
-    （`util/SavedFile.kt` 把返回的 `content://` 反解成「内部存储/Download/xxx.jpg」这样的措辞 ——
-    选择器可以指向设备上十几个地方，而它自己不给回执）；用户取消选择则静默，不算失败。
+  - **下载到本机**经 SAF 交给系统的「选择保存位置」，回来后报出落盘**目录**
+    （`util/SavedFile.kt` 把返回的 `content://` 反解成「内部存储/Download」这样的措辞 ——
+    选择器可以指向设备上十几个地方，而它自己不给回执；只报目录是因为文件名是用户刚选过的，
+    重复一遍只是噪音）；用户取消选择则静默，不算失败。
   - **分享**走系统分享面板（`ACTION_SEND` + `Intent.createChooser`，见 `util/Sharing.kt`），
     微信 / QQ / 邮件 / 云盘 / 蓝牙 等凡是注册了该类型的应用都会出现，App 不特化任何渠道。
     接收方是异步读文件的，所以字节必须先落到 `cache/preview/handoff`（`TempFiles.writeHandoff`）再
@@ -60,6 +61,11 @@ app/src/main/java/me/erguotou/homehub/
   （文件页每行都有 ⋮，长按则是进多选，菜单里同样有这两项）。菜单与两个动作分别由
   `ui/components/PhotoActions.kt` 的 `PhotoActionMenu` / `rememberPhotoSharer` /
   `rememberPhotoDownloader` 提供，与文件页共用同一个 `rememberLocalSaver`。
+- **操作回执**：结果不是 Material 默认的整条 Snackbar（一条四字提示撑成一整条，还留着空的动作位），
+  而是 `ui/components/Notice.kt` 渲染的居中胶囊：`NoticeKind.Success` 配圆形对勾、
+  `.Failure` 配圆形叉，文案压到最短（`已保存到 Download` / `保存失败` / `没有可分享的应用`）。
+  用 `snackbar.notify(...)` 投递；普通字符串消息（如文件页的复制/移动状态行）也能渲染，
+  只是不带图标。**宿主必须用 `NoticeHost`**，三个使用点（相册 / 文件 / 语义搜索路由）都换过了。
 - **上传**：系统文件选择器多选 → 二次确认（可勾选「上传完成后删除本地」）→ WorkManager 后台
   分片上传（`GET /api/upload/offset` 续传、`POST /api/upload/chunk` 追加、`POST /api/upload/complete`
   落盘并进入识别/缩略图流水线），进度以通知展示；服务端返回 `duplicate_of` 时提示重复。

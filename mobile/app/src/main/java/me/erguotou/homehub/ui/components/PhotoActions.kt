@@ -64,10 +64,12 @@ fun rememberLocalSaver(snackbar: SnackbarHostState): (String, ByteArray) -> Unit
         scope.launch {
             // Naming the folder is the point: the picker can be pointed at any
             // of a dozen places on the device and gives no receipt of its own.
-            snackbar.showSnackbar(
-                if (written) "已保存到 ${SavedFile.describe(context, uri)}"
-                else "保存失败：无法写入所选位置"
-            )
+            val where = SavedFile.location(uri)
+            if (written) {
+                snackbar.notify(where?.let { "已保存到 $it" } ?: "已保存")
+            } else {
+                snackbar.notify("保存失败", NoticeKind.Failure)
+            }
         }
     }
     return { name, bytes ->
@@ -96,7 +98,7 @@ private fun rememberPhotoFetcher(
         scope.launch {
             repository.download(photo.dirName, photo.relPath).fold(
                 onSuccess = { consume(photo, it) },
-                onFailure = { snackbar.showSnackbar(failure) }
+                onFailure = { snackbar.notify(failure, NoticeKind.Failure) }
             )
         }
     }
@@ -114,7 +116,7 @@ fun rememberPhotoDownloader(
     snackbar: SnackbarHostState
 ): (PhotoItem) -> Unit {
     val saveLocal = rememberLocalSaver(snackbar)
-    return rememberPhotoFetcher(repository, snackbar, "下载失败，请检查连接") { photo, bytes ->
+    return rememberPhotoFetcher(repository, snackbar, "下载失败") { photo, bytes ->
         saveLocal(photo.name, bytes)
     }
 }
@@ -134,14 +136,15 @@ fun rememberPhotoSharer(
     snackbar: SnackbarHostState
 ): (PhotoItem) -> Unit {
     val context = LocalContext.current
-    return rememberPhotoFetcher(repository, snackbar, "分享失败，请检查连接") { photo, bytes ->
+    return rememberPhotoFetcher(repository, snackbar, "分享失败") { photo, bytes ->
         val file = runCatching { TempFiles.writeHandoff(context, photo.name, bytes) }.getOrNull()
         if (file == null) {
-            snackbar.showSnackbar("无法写入临时文件")
+            // Either way the user sees the same thing: the sheet never opened.
+            snackbar.notify("没有可分享的应用", NoticeKind.Failure)
             return@rememberPhotoFetcher
         }
         if (!Sharing.share(context, file, FileKinds.mimeOf(photo.name), photo.name)) {
-            snackbar.showSnackbar("没有可接收分享的应用")
+            snackbar.notify("没有可分享的应用", NoticeKind.Failure)
         }
     }
 }

@@ -47,11 +47,19 @@ app/src/main/java/me/erguotou/homehub/
 
 - **浏览视图**：时间轴（按月分组）、目录树、分类（标签）、人物（人脸分组）、地点（高德地图 SDK 渲染聚合点）。
 - **查看器**：左右滑动切换、双击/捏合缩放、EXIF 信息面板、旋转 90°/180° 并调用服务端写回。
-- **下载到本机**：长按任意缩略图（时间轴 / 目录 / 筛选结果 / 语义搜索结果皆可）弹出操作菜单，
-  当前只有「下载到本机」一项 —— 拉取原图，经 SAF 交给系统的「选择保存位置」；
-  全屏查看器顶栏另有常驻的下载按钮。缩略图长按是这里唯一的入口，因为**瓦片本身没有 ⋮ 按钮**
-  （文件页每行都有，长按则是进多选）。菜单与下载分别由 `ui/components/PhotoActions.kt` 的
-  `PhotoActionMenu` / `rememberPhotoDownloader` 提供，与文件页共用同一个 `rememberLocalSaver`。
+- **长按操作菜单（分享 / 下载到本机）**：长按任意缩略图（时间轴 / 目录 / 筛选结果 / 语义搜索结果皆可）
+  弹出操作菜单，两项都拉取**原图**：
+  - **下载到本机**经 SAF 交给系统的「选择保存位置」，回来后用 Snackbar 报出落盘位置
+    （`util/SavedFile.kt` 把返回的 `content://` 反解成「内部存储/Download/xxx.jpg」这样的措辞 ——
+    选择器可以指向设备上十几个地方，而它自己不给回执）；用户取消选择则静默，不算失败。
+  - **分享**走系统分享面板（`ACTION_SEND` + `Intent.createChooser`，见 `util/Sharing.kt`），
+    微信 / QQ / 邮件 / 云盘 / 蓝牙 等凡是注册了该类型的应用都会出现，App 不特化任何渠道。
+    接收方是异步读文件的，所以字节必须先落到 `cache/preview/handoff`（`TempFiles.writeHandoff`）再
+    通过 FileProvider 交给它，不能直接从网络流过去。
+  全屏查看器顶栏另有常驻的分享 / 下载按钮。缩略图长按是相册唯一的入口，因为**瓦片本身没有 ⋮ 按钮**
+  （文件页每行都有 ⋮，长按则是进多选，菜单里同样有这两项）。菜单与两个动作分别由
+  `ui/components/PhotoActions.kt` 的 `PhotoActionMenu` / `rememberPhotoSharer` /
+  `rememberPhotoDownloader` 提供，与文件页共用同一个 `rememberLocalSaver`。
 - **上传**：系统文件选择器多选 → 二次确认（可勾选「上传完成后删除本地」）→ WorkManager 后台
   分片上传（`GET /api/upload/offset` 续传、`POST /api/upload/chunk` 追加、`POST /api/upload/complete`
   落盘并进入识别/缩略图流水线），进度以通知展示；服务端返回 `duplicate_of` 时提示重复。

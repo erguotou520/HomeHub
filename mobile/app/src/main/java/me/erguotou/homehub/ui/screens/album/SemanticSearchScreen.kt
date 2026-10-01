@@ -97,12 +97,13 @@ fun SemanticSearchScreen(
     onFullscreenChange: (Boolean) -> Unit,
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
     onDownload: (PhotoItem) -> Unit = {},
+    onShare: (PhotoItem) -> Unit = {},
     vm: SemanticSearchViewModel = viewModel()
 ) {
     // No lifecycle-compose dependency: collect with an explicit initial value.
     val state by vm.state.collectAsState(initial = SemanticUiState())
     var input by remember { mutableStateOf(state.query) }
-    // Long-press target for the shared album action sheet (下载到本机).
+    // Long-press target for the shared album action sheet (分享 / 下载到本机).
     var menuPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     // Debounce so typing Chinese doesn't fire a request per keystroke.
     LaunchedEffect(input) {
@@ -214,6 +215,7 @@ fun SemanticSearchScreen(
     PhotoActionMenu(
         target = menuPhoto,
         onDownload = onDownload,
+        onShare = onShare,
         onDismiss = { menuPhoto = null }
     )
 }

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.Info
@@ -84,6 +85,7 @@ fun PhotoViewerScreen(
     onFlip: (PhotoItem, Boolean, (Boolean) -> Unit) -> Unit,
     onRestore: (PhotoItem, (Boolean) -> Unit) -> Unit,
     onDownload: (PhotoItem) -> Unit,
+    onShare: (PhotoItem) -> Unit,
     onDismiss: () -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { photos.size })
@@ -166,6 +168,7 @@ fun PhotoViewerScreen(
             panels = panels,
             onClose = onDismiss,
             onDownload = onDownload,
+            onShare = onShare,
             onRotate = { angle, done ->
                 runEdit(
                     { cb -> onRotate(currentPhoto, angle) { ok -> cb(ok); done(ok) } },
@@ -220,6 +223,7 @@ private fun ViewerOverlay(
     panels: ViewerPanels,
     onClose: () -> Unit,
     onDownload: (PhotoItem) -> Unit,
+    onShare: (PhotoItem) -> Unit,
     onRotate: (Int, (Boolean) -> Unit) -> Unit,
     onFlip: (Boolean, (Boolean) -> Unit) -> Unit,
     onRestore: ((Boolean) -> Unit) -> Unit
@@ -238,10 +242,17 @@ private fun ViewerOverlay(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Explicit button rather than a long-press gesture: the video
+                // Explicit buttons rather than long-press gestures: the video
                 // page deliberately carries no Compose gesture layer (it would
                 // swallow the Media3 controller's taps), and a hidden gesture
                 // on the photo page would fight pinch-zoom.
+                IconButton(onClick = { onShare(photo) }, enabled = !busy) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = "分享",
+                        tint = Color.White
+                    )
+                }
                 IconButton(onClick = { onDownload(photo) }, enabled = !busy) {
                     Icon(
                         Icons.Default.Download,

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
@@ -176,6 +177,7 @@ fun FileViewerScreen(
     onRestore: (ViewerItem, (Boolean) -> Unit) -> Unit,
     onOpenExternal: (ViewerItem) -> Unit,
     onDownload: (ViewerItem) -> Unit,
+    onShare: (ViewerItem) -> Unit,
     onDismiss: () -> Unit
 ) {
     if (items.isEmpty()) return
@@ -317,6 +319,11 @@ fun FileViewerScreen(
                             text = { Text("下载到本机") },
                             leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
                             onClick = { menu = false; onDownload(current) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("分享") },
+                            leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                            onClick = { menu = false; onShare(current) }
                         )
                     }
                 }

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.TextSnippet
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material3.AlertDialog
@@ -88,6 +89,9 @@ import me.erguotou.homehub.ui.components.ErrorText
 import me.erguotou.homehub.ui.components.Loading
 import me.erguotou.homehub.ui.components.rememberLocalSaver
 import me.erguotou.homehub.util.FileKind
+import me.erguotou.homehub.util.FileKinds
+import me.erguotou.homehub.util.Sharing
+import me.erguotou.homehub.util.TempFiles
 import me.erguotou.homehub.util.formatBytes
 import me.erguotou.homehub.util.formatDateTime
 
@@ -156,8 +160,9 @@ fun FilesScreen(
         }
     }
 
-    // SAF "保存到本机", shared with the album's long-press action sheet.
-    val saveLocal = rememberLocalSaver()
+    // SAF "保存到本机", shared with the album's long-press action sheet. It
+    // reports the outcome (and the folder that came back) on our snackbar.
+    val saveLocal = rememberLocalSaver(snackbar)
 
     fun requestDownload(entry: FileEntry) {
         vm.download(entry) { bytes ->
@@ -169,9 +174,34 @@ fun FilesScreen(
         }
     }
 
+    /**
+     * 分享 through the system share sheet, like the album's long-press menu.
+     * A receiver reads our `content://` URI long after the HTTP call is gone,
+     * so the bytes have to land in scratch space first — see [TempFiles].
+     */
+    fun requestShare(entry: FileEntry) {
+        vm.download(entry) { bytes ->
+            val file = bytes?.let {
+                runCatching { TempFiles.writeHandoff(context, entry.name, it) }.getOrNull()
+            }
+            val mime = FileKinds.mimeOf(entry.name, entry.mimeType)
+            val opened = file != null && Sharing.share(context, file, mime, entry.name)
+            scope.launch {
+                when {
+                    bytes == null -> snackbar.showSnackbar("读取失败，请检查连接")
+                    file == null -> snackbar.showSnackbar("无法写入临时文件")
+                    !opened -> snackbar.showSnackbar("没有可接收分享的应用")
+                }
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
+        // Deliberately NOT Scaffold's own snackbarHost: the full-screen viewer
+        // below is an opaque black Box drawn over the Scaffold, so a "已保存到…"
+        // receipt raised from inside it would be hidden. Host it on the outer
+        // Box as the last child instead — same shape the album screen uses.
         Scaffold(
-            snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
                 Column {
                 TopAppBar(
@@ -343,6 +373,7 @@ fun FilesScreen(
                                     onToggleSelect = { vm.toggleSelect(entry) },
                                     onOpenExternal = { vm.openExternally(it) },
                                     onDownload = { requestDownload(it) },
+                                    onShare = { requestShare(it) },
                                     onRename = { e -> afterMenu { renameEntry = e } },
                                     onCopyMove = { e, op -> afterMenu { copyMove = CopyMovePlan(listOf(e), op) } },
                                     onDelete = { e -> afterMenu { confirmDelete = listOf(e) } }
@@ -409,9 +440,14 @@ fun FilesScreen(
                 onRestore = { item, done -> vm.restore(item, done) },
                 onOpenExternal = { item -> vm.openExternally(item.entry, item) },
                 onDownload = { item -> requestDownload(item.entry) },
+                onShare = { item -> requestShare(item.entry) },
                 onDismiss = { vm.dismissViewer() }
             )
         }
+
+        // Last child of the Box: download/share receipts stay visible even while
+        // the viewer covers the list.
+        SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
     }
 
     // 上传 reuses the same directory browser as 复制到 / 移动到: the target
@@ -645,6 +681,7 @@ private fun FileRow(
     onToggleSelect: () -> Unit,
     onOpenExternal: (FileEntry) -> Unit,
     onDownload: (FileEntry) -> Unit,
+    onShare: (FileEntry) -> Unit,
     onRename: (FileEntry) -> Unit,
     onCopyMove: (FileEntry, String) -> Unit,
     onDelete: (FileEntry) -> Unit
@@ -712,6 +749,11 @@ private fun FileRow(
                         text = { Text("下载到本机") },
                         leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
                         onClick = { menuOpen = false; onDownload(entry) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("分享") },
+                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                        onClick = { menuOpen = false; onShare(entry) }
                     )
                 }
                 DropdownMenuItem(

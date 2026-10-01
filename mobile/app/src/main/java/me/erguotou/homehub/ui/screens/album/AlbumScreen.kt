@@ -78,6 +78,7 @@ import me.erguotou.homehub.ui.components.PhotoActionMenu
 import me.erguotou.homehub.ui.components.PhotoTile
 import me.erguotou.homehub.ui.components.SectionHeader
 import me.erguotou.homehub.ui.components.rememberPhotoDownloader
+import me.erguotou.homehub.ui.components.rememberPhotoSharer
 import me.erguotou.homehub.work.UploadWorker
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -96,10 +97,11 @@ fun AlbumScreen(
     var viewerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var viewerList by remember { mutableStateOf(listOf<PhotoItem>()) }
 
-    // Long-press target for the album's action sheet (下载到本机).
+    // Long-press target for the album's action sheet (分享 / 下载到本机).
     var menuPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     val snackbar = remember { SnackbarHostState() }
     val downloadPhoto = rememberPhotoDownloader(repository, snackbar)
+    val sharePhoto = rememberPhotoSharer(repository, snackbar)
 
     // The viewer is handed a snapshot list when it opens. After an edit the
     // ViewModel refetches and that snapshot goes stale (the info panel would
@@ -307,6 +309,7 @@ fun AlbumScreen(
                 onFlip = { p, vertical, done -> vm.flip(p, vertical, done) },
                 onRestore = { p, done -> vm.restore(p, done) },
                 onDownload = downloadPhoto,
+                onShare = sharePhoto,
                 onDismiss = { viewerPhoto = null }
             )
         }
@@ -320,6 +323,7 @@ fun AlbumScreen(
     PhotoActionMenu(
         target = menuPhoto,
         onDownload = downloadPhoto,
+        onShare = sharePhoto,
         onDismiss = { menuPhoto = null }
     )
 

@@ -40,6 +40,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.ui.components.rememberPhotoDownloader
+import me.erguotou.homehub.ui.components.rememberPhotoSharer
 import me.erguotou.homehub.ui.screens.album.AlbumScreen
 import me.erguotou.homehub.ui.screens.album.PhotoViewerScreen
 import me.erguotou.homehub.ui.screens.album.SemanticSearchScreen
@@ -114,6 +115,7 @@ fun HomeHubRoot() {
                     val repository = remember { Repository(context) }
                     val snackbar = remember { SnackbarHostState() }
                     val downloadPhoto = rememberPhotoDownloader(repository, snackbar)
+                    val sharePhoto = rememberPhotoSharer(repository, snackbar)
                     var viewerPhoto by remember { mutableStateOf<me.erguotou.homehub.data.PhotoItem?>(null) }
                     var viewerList by remember { mutableStateOf(listOf<me.erguotou.homehub.data.PhotoItem>()) }
                     Box(modifier = Modifier.fillMaxSize()) {
@@ -124,7 +126,8 @@ fun HomeHubRoot() {
                                 viewerList = list
                                 viewerPhoto = photo
                             },
-                            onDownload = downloadPhoto
+                            onDownload = downloadPhoto,
+                            onShare = sharePhoto
                         )
                         viewerPhoto?.let { photo ->
                             val list = viewerList
@@ -142,6 +145,7 @@ fun HomeHubRoot() {
                                 onFlip = { p, vertical, done -> semanticVm.flip(p, vertical, done) },
                                 onRestore = { p, done -> semanticVm.restore(p, done) },
                                 onDownload = downloadPhoto,
+                                onShare = sharePhoto,
                                 onDismiss = { viewerPhoto = null }
                             )
                         }

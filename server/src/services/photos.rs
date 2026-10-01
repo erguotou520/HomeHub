@@ -214,7 +214,15 @@ const SELECT_PHOTO: &str = "SELECT p.*, d.name AS dir_name FROM photo_assets p \
      JOIN dirs d ON d.id = p.dir_id \
      WHERE p.status = 'ok'";
 
-fn album_clause(album_dirs: &[DirRecord]) -> String {
+/// Album-directory restriction, templated on the table alias it will be spliced
+/// next to. Callers MUST pass the alias in scope at the splice point.
+///
+/// A fragment written for `p` and injected into a subquery whose own table is
+/// aliased `p2` does not fail — SQLite resolves the bare `p` to the *outer*
+/// query (correlated subquery), so the filter silently stops constraining the
+/// subquery's rows. No error, no warning, just a wrong result; this is what made
+/// `tag_summary`'s cover thumbnails leak in from non-album directories.
+fn album_clause(album_dirs: &[DirRecord], alias: &str) -> String {
     if album_dirs.is_empty() {
         return " AND 0".to_string();
     }
@@ -223,12 +231,12 @@ fn album_clause(album_dirs: &[DirRecord]) -> String {
         .map(|d| d.id.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    format!(" AND p.dir_id IN ({})", ids)
+    format!(" AND {alias}.dir_id IN ({ids})")
 }
 
 pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Vec<PhotoItem>, i64)> {
     let album_dirs = registry.album_dirs();
-    let mut filters = album_clause(&album_dirs);
+    let mut filters = album_clause(&album_dirs, "p");
 
     if let Some(dir_id) = q.dir_id {
         filters.push_str(&format!(" AND p.dir_id = {}", dir_id));
@@ -301,7 +309,7 @@ pub async fn timeline(
     limit_per_group: i64,
 ) -> Result<Vec<TimelineGroup>> {
     let albums = registry.album_dirs();
-    let clause = album_clause(&albums);
+    let clause = album_clause(&albums, "p");
     let mut sql = format!(
         "SELECT p.*, d.name AS dir_name FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \
          WHERE p.status = 'ok'{}",
@@ -399,7 +407,7 @@ pub async fn tree(
     dir_id: Option<i64>,
 ) -> Result<Vec<TreeGroup>> {
     let albums = registry.album_dirs();
-    let mut clause = album_clause(&albums);
+    let mut clause = album_clause(&albums, "p");
     if let Some(id) = dir_id {
         clause.push_str(&format!(" AND p.dir_id = {}", id));
     }
@@ -434,7 +442,12 @@ pub async fn tree(
 
 pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSummary>> {
     let albums = registry.album_dirs();
-    let clause = album_clause(&albums);
+    // One clause per alias: the three cover subqueries each alias their own copy
+    // of `photo_assets` (p2/p3/p5), so the outer fragment does not reach them.
+    let clause = album_clause(&albums, "p");
+    let cover_rel_album = album_clause(&albums, "p2");
+    let cover_dir_album = album_clause(&albums, "p3");
+    let cover_fp_album = album_clause(&albums, "p5");
     let sql = format!(
         "SELECT t.tag AS tag, t.kind AS kind, COUNT(*) AS photo_count, \
                 (SELECT p2.rel_path FROM photo_tags t2 JOIN photo_assets p2 ON p2.id = t2.photo_id \
@@ -442,15 +455,15 @@ pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSumma
                   ORDER BY COALESCE(p2.taken_at, p2.mtime) DESC LIMIT 1) AS cover_rel, \
                 (SELECT d2.name FROM photo_tags t3 JOIN photo_assets p3 ON p3.id = t3.photo_id \
                    JOIN dirs d2 ON d2.id = p3.dir_id \
-                  WHERE t3.tag = t.tag AND t3.kind = t.kind AND p3.status = 'ok' \
+                  WHERE t3.tag = t.tag AND t3.kind = t.kind AND p3.status = 'ok'{} \
                   ORDER BY COALESCE(p3.taken_at, p3.mtime) DESC LIMIT 1) AS cover_dir, \
                 (SELECT p5.fingerprint FROM photo_tags t5 JOIN photo_assets p5 ON p5.id = t5.photo_id \
-                  WHERE t5.tag = t.tag AND t5.kind = t.kind AND p5.status = 'ok' \
+                  WHERE t5.tag = t.tag AND t5.kind = t.kind AND p5.status = 'ok'{} \
                   ORDER BY COALESCE(p5.taken_at, p5.mtime) DESC LIMIT 1) AS cover_fp \
          FROM photo_tags t JOIN photo_assets p ON p.id = t.photo_id \
          WHERE p.status = 'ok'{} \
          GROUP BY t.kind, t.tag ORDER BY photo_count DESC, t.tag",
-        clause, clause
+        cover_rel_album, cover_dir_album, cover_fp_album, clause
     );
     let rows = sqlx::query(&sql).fetch_all(db).await?;
     let mut out = Vec::new();
@@ -515,7 +528,7 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
 /// Aggregated geo clusters (grid size in degrees).
 pub async fn geo(db: &Db, registry: &DirRegistry, precision: f64) -> Result<Vec<GeoPoint>> {
     let albums = registry.album_dirs();
-    let clause = album_clause(&albums);
+    let clause = album_clause(&albums, "p");
     let sql = format!(
         "SELECT p.id AS id, p.gps_lat AS lat, p.gps_lng AS lng, p.rel_path AS rel_path, \
                 p.fingerprint AS fingerprint, \
@@ -557,7 +570,7 @@ pub async fn geo(db: &Db, registry: &DirRegistry, precision: f64) -> Result<Vec<
 /// Duplicate groups found by byte hash or perceptual hash.
 pub async fn duplicates(db: &Db, registry: &DirRegistry) -> Result<Vec<DuplicateGroup>> {
     let albums = registry.album_dirs();
-    let clause = album_clause(&albums);
+    let clause = album_clause(&albums, "p");
 
     let sql = format!(
         "SELECT p.*, d.name AS dir_name FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \

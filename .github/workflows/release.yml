@@ -224,8 +224,19 @@ jobs:
           new_code="${NEW_CODE}"
 
           # 历史 tag：排除本次，最多取 DELTA_KEEP 个。仓库还没有任何 Release 时为空。
-          tags=$(gh release list --limit 30 --json tagName,isDraft \
-                   --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null || true)
+          #
+          # 这里**必须在命令上显式指明仓库**：本 job 没有 actions/checkout，工作目录
+          # 不是 git 仓库，gh 便无从推断仓库，只会报 "fatal: not a git repository"
+          # 然后一事无成。之前的写法还加了 `2>/dev/null || true`，把这条错误连同它的
+          # 后果一起吞掉，表现是每次发版都「共生成 0 个增量包」却一路绿灯 ——
+          # 增量功能静默失效，用户只会觉得「这功能好像没用」。
+          #
+          # 用 gh api 而不是 gh release list 的原因：后者在「一个 Release 都没有」时
+          # 退出码非 0，逼着人写 `|| true`（于是又能吞掉真错误）；gh api 对空列表稳定
+          # 返回 []。注意 gh api **不支持 --repo**，所以端点要写全 {owner}/{repo}。
+          tags=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=30" \
+                   --jq '.[] | select(.draft == false) | .tag_name')
+          [ -n "${tags}" ] || echo "没有任何历史 Release，本次不生成增量包"
 
           : > "${DIST}/delta-meta.tsv"
           count=0
@@ -237,12 +248,13 @@ jobs:
             old_dir="old/${tag}"
             mkdir -p "${old_dir}"
             # 历史 Release 里只有 .apk 才是完整包，差分文件本身要排除掉。
-            if ! gh release download "${tag}" --pattern '*.apk' --dir "${old_dir}" --clobber 2>/dev/null; then
-              echo "跳过 ${tag}：下载不到 APK 资产"
+            if ! gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+                   --pattern '*.apk' --dir "${old_dir}" --clobber; then
+              echo "::warning::跳过 ${tag}：下载不到 APK 资产"
               continue
             fi
             old_apk=$(find "${old_dir}" -maxdepth 1 -name '*.apk' | head -1)
-            [ -n "${old_apk}" ] || { echo "跳过 ${tag}：没有 APK"; continue; }
+            [ -n "${old_apk}" ] || { echo "::warning::跳过 ${tag}：没有 APK"; continue; }
 
             old_code=$(tag_to_code "${tag}")
             [ "${old_code}" -lt "${new_code}" ] || { echo "跳过 ${tag}：版本不比当前旧"; continue; }
@@ -263,6 +275,11 @@ jobs:
           done <<< "${tags}"
 
           echo "共生成 ${count} 个增量包"
+          # 有历史版本却一个差分都没出来，说明上面的循环在某处静默跳过了 ——
+          # 那正是最容易一路绿灯跑到线上、让用户永远退回全量下载的情形。
+          if [ "${count}" -eq 0 ] && [ -n "${tags}" ]; then
+            echo "::warning::有历史 Release 但没生成任何增量包，增量升级本次等于关闭"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -360,14 +377,23 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=("${DIST}"/*.apk "${DIST}"/*.patch "${DIST}"/latest.json)
+          files=("${DIST}"/*.apk "${DIST}"/*.patch "${DIST}"/*.json)
           [ ${#files[@]} -gt 0 ] || { echo "::error::没有任何可发布的资产"; exit 1; }
           printf '发布资产：\n'
           printf '  %s\n' "${files[@]}"
-          gh release create "v${NEW_NAME}" \
-            --title "HomeHub ${NEW_NAME}" \
-            --generate-notes \
-            "${files[@]}"
+
+          # 可重跑：同一个 tag 的流水线被重跑（比如补一个漏掉的增量包）时，
+          # 直接 gh release create 会因 "already exists" 硬失败，而失败点还在
+          # 最后一步 —— 前面辛苦构建的东西全白费。已存在就改覆盖上传。
+          if gh release view "v${NEW_NAME}" >/dev/null 2>&1; then
+            echo "Release v${NEW_NAME} 已存在，改为覆盖上传资产"
+            gh release upload "v${NEW_NAME}" --clobber "${files[@]}"
+          else
+            gh release create "v${NEW_NAME}" \
+              --title "HomeHub ${NEW_NAME}" \
+              --generate-notes \
+              "${files[@]}"
+          fi
 
       - name: 把清单推回 main
         env:
@@ -391,6 +417,10 @@ jobs:
             # 只在确实更新时才覆盖。并发推两个 tag 时，完成顺序不保证与版本顺序
             # 一致；若旧的那个后完成，会把清单倒灌回旧版 —— 用户那边表现为
             # 「刚发的版本反而检查不到了」，很容易被误判成客户端故障。
+            #
+            # 比的是「严格大于」而不是「大于等于」：同一个 tag 的流水线被重跑时，
+            # 版本号没变但内容可能变了（比如补上了漏掉的增量包），那时必须放行。
+            # 真正没变化的情况由下面的 `git diff --cached --quiet` 兜住，不多提交。
             current=0
             if [ -f release/latest.json ]; then
               current=$(python3 -c "
@@ -401,8 +431,8 @@ jobs:
               print(0)
           " 2>/dev/null || echo 0)
             fi
-            if [ "${current}" -ge "${NEW_CODE}" ]; then
-              echo "main 上的清单已是 code ${current}，不低于本次的 ${NEW_CODE}，不覆盖"
+            if [ "${current}" -gt "${NEW_CODE}" ]; then
+              echo "main 上的清单已是更新的版本（code ${current} > ${NEW_CODE}），不覆盖"
               exit 0
             fi
 

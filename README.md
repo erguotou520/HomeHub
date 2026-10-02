@@ -68,6 +68,40 @@ cd mobile && ./gradlew :app:assembleDebug
 
 首次启动会进入引导：生成/导入 WireGuard 密钥 → 填写隧道与服务器信息 → 授权 VPN → 连接测试。
 
+## 发布
+
+Android 客户端只在**打 tag** 时发版，工作流为 `.github/workflows/release.yml`：
+
+```bash
+git tag v1.2.1 && git push github v1.2.1
+```
+
+版本号完全由 tag 派生（`v1.2.1` → versionName `1.2.1`、versionCode `10201`）—— 写死或复用的
+versionCode 会让用户装不上更新，是这类流水线上最容易埋的坑。四个 job：
+
+| job | 做什么 |
+| --- | --- |
+| `version` | 从 tag 算版本号；只算这一次，多个 job 各算一套必然对不上 |
+| `build` | 恢复签名密钥 → 构建 → 校验签名，并核对**产物**的 versionCode 与 tag 派生值一致 |
+| `delta` | 拉最近 3 个历史版本的 APK，用 bsdiff 生成增量包 |
+| `publish` | 发 Release，并把版本清单提交回 main |
+
+清单落在 `release/latest.json`，客户端直接读它（机制见 [Android 客户端说明](mobile/README.md) 的
+「应用内更新」）。清单由 CI 提交回 main，所以**你本地会落后一个提交**，下次改动前先 `git pull`。
+
+CI 使用的 secrets：
+
+| secret | 用途 |
+| --- | --- |
+| `ANDROID_RELEASE_KEYSTORE_BASE64` | `mobile/release.jks` 的 base64（`base64 -i release.jks \| tr -d '\n'`） |
+| `ANDROID_RELEASE_KEYSTORE_PASSWORD` | 与 key 密码相同 |
+| `ANDROID_RELEASE_KEY_ALIAS` | `homehub` |
+| `AMAP_KEY` | 高德 Android SDK Key |
+
+手动触发（`workflow_dispatch`）只做验证构建，不会产生 Release。
+
+⚠️ 换签名密钥会让手机上已装的旧版本**无法覆盖升级**（签名不一致），必须卸载重装。
+
 ## 文档
 
 - [需求文档 PRD](docs/PRD.md)

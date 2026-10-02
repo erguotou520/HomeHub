@@ -12,6 +12,25 @@ Kotlin + Jetpack Compose 实现的 HomeHub 手机端：相册、NAS 文件、监
 
 需要 JDK 17+ 与 Android SDK（compileSdk 35）；`local.properties` 中指定 `sdk.dir` 或设置 `ANDROID_HOME`。
 
+两项凭据都不入库，缺了照样能构建，只是对应能力不可用：
+
+| 项 | 本地开发 | CI |
+| --- | --- | --- |
+| 发布签名 | `mobile/release.jks` + `mobile/keystore.properties` | secret `ANDROID_RELEASE_KEYSTORE_BASE64` / `..._PASSWORD` / `..._ALIAS` |
+| 高德 SDK Key | `local.properties` 的 `amapKey` | secret `AMAP_KEY` |
+
+缺签名时 `release` 退回 debug 签名（新克隆的仓库开箱即可构建）；缺高德 Key 时构建照常，只是地图页拿不到数据。
+
+### 发版
+
+打 tag 即发布，版本号完全由 tag 派生（`v1.2.1` → versionName `1.2.1`、versionCode `10201`）：
+
+```bash
+git tag v1.2.1 && git push github v1.2.1
+```
+
+CI 会构建、签名、生成增量包与版本清单并发布 Release，详见根 README 的「发布」。
+
 ## 模块结构
 
 ```
@@ -40,6 +59,7 @@ app/src/main/java/me/erguotou/homehub/
 │                          # DirectoryPicker.kt：可下钻的目录选择器（上传 / 复制 / 移动共用）
 ├── util/                  # FileKinds.kt 文件类型判定、OfficeText.kt OOXML 文本抽取
 │                          # TempFiles.kt「用其他应用打开」的临时副本目录
+├── update/                # 应用内更新：BsPatch 差分、清单、双通道下载、安装
 └── work/UploadWorker.kt   # WorkManager 后台分片上传（断点续传 + 进度通知）
 ```
 
@@ -132,6 +152,44 @@ app/src/main/java/me/erguotou/homehub/
 内联预览的取舍：Android 上没有轻量的原生 Office 渲染器（Apache POI ≈11 MB 且中端机 OOM、
 腾讯 TBS 需下载 40 MB+ 内核、WebView 方案要打包三套 JS 引擎且中文版式不可靠），因此
 `docx/xlsx/pptx` 走本地文本抽取，版式交给系统应用；PDF 用平台 `PdfRenderer` 真正内联。
+
+## 应用内更新
+
+全量包已接近 100 MB（高德 SDK + WireGuard native + Media3 + Compose），所以按
+**增量优先、全量兜底**做，`update/` 下四个文件各管一段。
+
+- 更新检查读仓库里的静态清单 `release/latest.json`（CI 发版时更新），**不经过服务端** ——
+  没有服务端要维护，也没有限流。
+- 取用走双通道：先直连，失败后把原始地址套在 `https://proxy.erguotou.me/` 前面重试。
+  实测本机直连 `raw.githubusercontent.com` 会被**直接拒绝连接**（curl 错误码 7，55 ms 就返回），
+  所以第二条通道不是锦上添花。
+- 清单的 `deltas` 列出可用的增量包（含"从哪个版本、旧包 sha256 是什么"）。客户端先比版本号，
+  命中之后才去算本机 APK 的指纹 —— 那要读完 93 MB，没命中就不该付这个代价。
+- 合并结果必须与清单里全量包的 sha256 **完全一致**：v2/v3 签名覆盖整个文件的字节，
+  差一个字节系统就拒装。对不上就静默退回全量，宁可多下一次，也不把装不上的包递出去。
+
+### 增量为什么必须是二进制差分
+
+不能用「只下发变化的几个文件再重新打包」：重打包会改变字节布局，而客户端手里没有私钥，
+签名必然失效。bsdiff 把新包**逐字节**还原出来，签名因此仍然有效 —— 这是它能被系统当成
+合法升级包的前提。
+
+代价是要带一个 bzip2 实现（JDK 与 Android 都没有），这里用 commons-compress，只引
+`BZip2CompressorInputStream`，包体增加约 1.3 MB。
+
+本机实测：93.31 MB 的包 → 94.63 MB 的新包，**增量只有 1.72 MB（省 98.2%）**，
+客户端合并耗时 1.2 秒。复现方式：
+
+```bash
+bsdiff old.apk new.apk real.patch
+HOMEHUB_BSDIFF_DIR=$PWD ./gradlew :app:testDebugUnitTest --tests '*BsPatchTest*'
+```
+
+### 安装这一步无法全自动
+
+系统弹框绕不过去：普通应用不能静默安装，用户必须点一次「安装」，首次还要先允许
+「安装未知应用」。代码能做的是把包准备好，并把失败原因区分开（签名冲突、空间不足、
+用户取消），见 `update/ApkInstaller.kt`。
 
 ## 地图（高德）
 

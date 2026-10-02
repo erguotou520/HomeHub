@@ -196,11 +196,27 @@ jobs:
           NEW_CODE: ${{ needs.version.outputs.code }}
         run: |
           set -euo pipefail
-          # 产物名里带的是版本名，versionCode 由同一套映射反推，避免依赖 aapt2。
+          # 产物名里带的是版本名，versionCode 由 tag 反推，避免依赖 aapt2。
+          # 映射必须与 version job 的保持一致（major*10000 + minor*100 + patch）。
+          # 反推错不会发错版：客户端要求 fromVersionCode 与 fromSha256 同时命中，
+          # 对不上就退回全量下载，不会合出一个坏包。
           tag_to_code() {
-            local v="${1#v}"
-            IFS='.' read -r a b c <<< "${v}"
-            echo $(( ${a:-0} * 10000 + ${b:-0} * 100 + ${c:-0} ))
+            local v="${1#v}" a b c
+            local -a seg=()
+            # 按点切分后只取前三段。不能靠 `read a b c`：它会把余下的都塞进 c，
+            # 于是 v1.0.0.1 断成 c="0.1"、被剥成 1，跟 v1.0.1 撞成同一个号。
+            IFS='.' read -r -a seg <<< "${v}"
+
+            # 每段只保留前导数字。历史 tag 可能是 v1.0.0-beta 这种东西，直接丢进
+            # 算术求值会在 set -u 下撞上未定义变量（"beta: unbound variable"），
+            # 把整个 job 打掉 —— 而这件事发生在「差分」这么边缘的环节上，
+            # 排查起来会非常费解。
+            a=$(printf '%s' "${seg[0]:-0}" | tr -cd '0-9'); a=${a:-0}
+            b=$(printf '%s' "${seg[1]:-0}" | tr -cd '0-9'); b=${b:-0}
+            c=$(printf '%s' "${seg[2]:-0}" | tr -cd '0-9'); c=${c:-0}
+
+            # 10# 强制十进制：不加的话 v1.08.0 会被当八进制，报 "value too great for base"。
+            printf '%s' "$(( 10#${a} * 10000 + 10#${b} * 100 + 10#${c} ))"
           }
 
           new_apk=$(find "${DIST}" -maxdepth 1 -name '*.apk' | head -1)
@@ -356,21 +372,53 @@ jobs:
       - name: 把清单推回 main
         env:
           NEW_NAME: ${{ needs.version.outputs.name }}
+          NEW_CODE: ${{ needs.version.outputs.code }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # 清单要落在 main 上，App 才能从 raw 地址匿名读到它。
           # 本 workflow 只由 tag 触发，这次提交不会反过来再触发一次发布。
-          git fetch origin main
-          git checkout -B main origin/main
-          mkdir -p release
-          cp "${DIST}/latest.json" release/latest.json
-          git add release/latest.json
-          if git diff --cached --quiet; then
-            echo "清单内容没有变化，跳过提交"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(release): 版本清单更新至 ${NEW_NAME} [skip ci]"
-          git push origin main
+
+          # 每次尝试都从最新 main 重新起一个提交。不 rebase 的原因：并发的两次
+          # 发布改的是同一个文件 release/latest.json，rebase 必然冲突；而「以
+          # 最新 main 为基、重新写一遍这个文件」天然幂等，重试总能收敛。
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git checkout -B main origin/main
+
+            # 只在确实更新时才覆盖。并发推两个 tag 时，完成顺序不保证与版本顺序
+            # 一致；若旧的那个后完成，会把清单倒灌回旧版 —— 用户那边表现为
+            # 「刚发的版本反而检查不到了」，很容易被误判成客户端故障。
+            current=0
+            if [ -f release/latest.json ]; then
+              current=$(python3 -c "
+          import json
+          try:
+              print(int(json.load(open('release/latest.json')).get('versionCode') or 0))
+          except Exception:
+              print(0)
+          " 2>/dev/null || echo 0)
+            fi
+            if [ "${current}" -ge "${NEW_CODE}" ]; then
+              echo "main 上的清单已是 code ${current}，不低于本次的 ${NEW_CODE}，不覆盖"
+              exit 0
+            fi
+
+            mkdir -p release
+            cp "${DIST}/latest.json" release/latest.json
+            git add release/latest.json
+            if git diff --cached --quiet; then
+              echo "清单内容没有变化，跳过提交"
+              exit 0
+            fi
+            git commit -m "chore(release): 版本清单更新至 ${NEW_NAME} [skip ci]"
+            if git push origin main; then
+              exit 0
+            fi
+            echo "第 ${attempt} 次推送被拒（main 上有并发提交），拉最新后重试"
+            sleep 2
+          done
+          echo "::error::三次尝试后仍无法把清单推上 main"
+          exit 1

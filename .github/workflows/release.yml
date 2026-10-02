@@ -1,0 +1,376 @@
+name: Release
+
+# 只有打 tag 才会发版（v1.2.3）。手动触发只做一次验证构建，不产生 Release。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 顶层默认是 read，发 Release 与把清单推回 main 都需要写权限。
+permissions:
+  contents: write
+
+env:
+  # 保留最近多少个历史版本用于生成增量包。值越大，用户越容易命中增量下载，
+  # 但每次发版需要下载的旧 APK 也越多（每个约 100 MB）。
+  DELTA_KEEP: '3'
+  BUILD_TOOLS: '35.0.0'
+  ANDROID_PLATFORM: 'android-35'
+  DIST: dist
+
+jobs:
+  # ------------------------------------------------------------------
+  # 版本号由 tag 派生，且只算这一次 —— 多个 job 各算一套必然对不上。
+  # ------------------------------------------------------------------
+  version:
+    name: 解析版本号
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.resolve.outputs.name }}
+      code: ${{ steps.resolve.outputs.code }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      is_release: ${{ steps.resolve.outputs.is_release }}
+    steps:
+      - name: 从 tag 派生
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            name="${tag#v}"
+            is_release=true
+            if [[ ! "${name}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::tag 必须形如 v1.2.3，当前是 ${tag}"
+              exit 1
+            fi
+          else
+            # 手动触发：造一个不会跟正式版撞车的版本号，仅用于验证构建链路。
+            tag=""
+            name="0.0.${GITHUB_RUN_NUMBER}"
+            is_release=false
+          fi
+          IFS='.' read -r major minor patch <<< "${name}"
+          # versionCode 必须跨版本严格递增，否则安卓拒绝覆盖安装。
+          code=$(( ${major:-0} * 10000 + ${minor:-0} * 100 + ${patch:-0} ))
+          {
+            echo "name=${name}"
+            echo "code=${code}"
+            echo "tag=${tag}"
+            echo "is_release=${is_release}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "versionName=${name}  versionCode=${code}  is_release=${is_release}"
+
+  # ------------------------------------------------------------------
+  # 构建 + 签名。任何一步缺失密钥都会点名报错，而不是留一个隐式 exit 1。
+  # ------------------------------------------------------------------
+  build:
+    name: 构建签名 APK
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # setup-android 的默认 packages 里含已被 Google 下架的 `tools` 包，
+      # 会让 sdkmanager 以 exit 1 结束整个 action（构建步骤根本跑不到）。
+      - name: 设置 Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: 安装 build-tools 与 platform
+        run: sdkmanager "build-tools;${BUILD_TOOLS}" "platforms;${ANDROID_PLATFORM}"
+
+      - name: 校验密钥齐备
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          AMAP_KEY: ${{ secrets.AMAP_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${KEYSTORE_BASE64}" ] || missing+=(ANDROID_RELEASE_KEYSTORE_BASE64)
+          [ -n "${KEYSTORE_PASSWORD}" ] || missing+=(ANDROID_RELEASE_KEYSTORE_PASSWORD)
+          [ -n "${KEY_ALIAS}" ] || missing+=(ANDROID_RELEASE_KEY_ALIAS)
+          [ -n "${AMAP_KEY}" ] || missing+=(AMAP_KEY)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::缺少 ${missing[*]}；请在 Settings → Secrets and variables → Actions 中配置后重跑。"
+            exit 1
+          fi
+
+      - name: 恢复签名密钥
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          # 两个文件都不入库（见 .gitignore），由 secret 在构建前落盘。
+          printf '%s' "${KEYSTORE_BASE64}" | base64 --decode > mobile/release.jks
+          chmod 600 mobile/release.jks
+          {
+            echo "storeFile=../release.jks"
+            echo "storePassword=${KEYSTORE_PASSWORD}"
+            echo "keyAlias=${KEY_ALIAS}"
+            echo "keyPassword=${KEYSTORE_PASSWORD}"
+          } > mobile/keystore.properties
+
+      - name: 构建 release
+        env:
+          AMAP_KEY: ${{ secrets.AMAP_KEY }}
+        run: |
+          set -euo pipefail
+          cd mobile
+          ./gradlew :app:assembleRelease --no-daemon --console=plain \
+            -PappVersionCode=${{ needs.version.outputs.code }} \
+            -PappVersionName=${{ needs.version.outputs.name }}
+
+      - name: 校验签名与版本号
+        run: |
+          set -euo pipefail
+          apk=$(find mobile/app/build/outputs/apk/release -name '*.apk' | head -1)
+          [ -n "${apk}" ] || { echo "::error::未找到 release APK"; exit 1; }
+          "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose "${apk}"
+          badging=$("${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2" dump badging "${apk}" | grep '^package')
+          echo "${badging}"
+          echo "${badging}" | grep -q "versionCode='${{ needs.version.outputs.code }}'" \
+            || { echo "::error::产物的 versionCode 与 tag 派生值不一致"; exit 1; }
+
+      - name: 收集产物
+        id: apk
+        run: |
+          set -euo pipefail
+          apk=$(find mobile/app/build/outputs/apk/release -name '*.apk' | head -1)
+          mkdir -p "${DIST}"
+          # 资产名必须是 ASCII：中文名会被 GitHub 改写成 default.apk，
+          # 多个同类资产还会撞成同一个名字互相覆盖且不报错。
+          out="${DIST}/homehub-${{ needs.version.outputs.name }}.apk"
+          cp "${apk}" "${out}"
+          sha=$(sha256sum "${out}" | awk '{print $1}')
+          size=$(stat -c%s "${out}")
+          {
+            echo "path=${out}"
+            echo "sha256=${sha}"
+            echo "size=${size}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "APK ${size} bytes  sha256=${sha}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homehub-apk
+          path: ${{ env.DIST }}/*.apk
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 增量包：对最近几个历史版本各生成一个 old→new 的二进制差分。
+  # ------------------------------------------------------------------
+  delta:
+    name: 生成增量包
+    needs: [version, build]
+    if: needs.version.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: homehub-apk
+          path: ${{ env.DIST }}
+
+      - name: 安装 bsdiff
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bsdiff
+
+      - name: 生成差分
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_NAME: ${{ needs.version.outputs.name }}
+          NEW_CODE: ${{ needs.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          # 产物名里带的是版本名，versionCode 由同一套映射反推，避免依赖 aapt2。
+          tag_to_code() {
+            local v="${1#v}"
+            IFS='.' read -r a b c <<< "${v}"
+            echo $(( ${a:-0} * 10000 + ${b:-0} * 100 + ${c:-0} ))
+          }
+
+          new_apk=$(find "${DIST}" -maxdepth 1 -name '*.apk' | head -1)
+          [ -n "${new_apk}" ] || { echo "::error::未拿到本次构建的 APK"; exit 1; }
+          new_code="${NEW_CODE}"
+
+          # 历史 tag：排除本次，最多取 DELTA_KEEP 个。仓库还没有任何 Release 时为空。
+          tags=$(gh release list --limit 30 --json tagName,isDraft \
+                   --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null || true)
+
+          : > "${DIST}/delta-meta.tsv"
+          count=0
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            [ "${tag}" = "v${NEW_NAME}" ] && continue
+            [ "${count}" -ge "${DELTA_KEEP}" ] && break
+
+            old_dir="old/${tag}"
+            mkdir -p "${old_dir}"
+            # 历史 Release 里只有 .apk 才是完整包，差分文件本身要排除掉。
+            if ! gh release download "${tag}" --pattern '*.apk' --dir "${old_dir}" --clobber 2>/dev/null; then
+              echo "跳过 ${tag}：下载不到 APK 资产"
+              continue
+            fi
+            old_apk=$(find "${old_dir}" -maxdepth 1 -name '*.apk' | head -1)
+            [ -n "${old_apk}" ] || { echo "跳过 ${tag}：没有 APK"; continue; }
+
+            old_code=$(tag_to_code "${tag}")
+            [ "${old_code}" -lt "${new_code}" ] || { echo "跳过 ${tag}：版本不比当前旧"; continue; }
+
+            old_sha=$(sha256sum "${old_apk}" | awk '{print $1}')
+            patch="${DIST}/homehub-${old_code}-to-${new_code}.patch"
+            echo "生成 ${tag}（code ${old_code}）→ ${NEW_NAME}（code ${new_code}）"
+            bsdiff "${old_apk}" "${new_apk}" "${patch}"
+
+            p_sha=$(sha256sum "${patch}" | awk '{print $1}')
+            p_size=$(stat -c%s "${patch}")
+            full_size=$(stat -c%s "${new_apk}")
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "${old_code}" "${old_sha}" "$(basename "${patch}")" "${p_sha}" "${p_size}" \
+              >> "${DIST}/delta-meta.tsv"
+            echo "  $(basename "${patch}") ${p_size} bytes，对比全量 ${full_size} bytes"
+            count=$((count + 1))
+          done <<< "${tags}"
+
+          echo "共生成 ${count} 个增量包"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homehub-delta
+          path: |
+            ${{ env.DIST }}/*.patch
+            ${{ env.DIST }}/delta-meta.tsv
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 发 Release + 把版本清单推回 main（App 从 raw 地址读它）。
+  # ------------------------------------------------------------------
+  publish:
+    name: 发布 Release
+    needs: [version, build, delta]
+    if: needs.version.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      # 同一 tag 的发布串行，避免并发创建 Release 互相冲突。
+      group: gh-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: homehub-*
+          path: ${{ env.DIST }}
+          merge-multiple: true
+
+      - name: 生成版本清单
+        env:
+          NEW_NAME: ${{ needs.version.outputs.name }}
+          NEW_CODE: ${{ needs.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+
+          dist = pathlib.Path(os.environ['DIST'])
+          name = os.environ['NEW_NAME']
+          code = int(os.environ['NEW_CODE'])
+          repo = os.environ['REPO'] if 'REPO' in os.environ else os.environ['GITHUB_REPOSITORY']
+
+          apk_name = f'homehub-{name}.apk'
+          apk = dist / apk_name
+          if not apk.exists():
+              raise SystemExit(f'缺少 {apk}')
+
+          def sha256(p):
+              h = hashlib.sha256()
+              with open(p, 'rb') as fh:
+                  for chunk in iter(lambda: fh.read(1 << 20), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          base = f'https://github.com/{repo}/releases/download/v{name}'
+          manifest = {
+              'versionName': name,
+              'versionCode': code,
+              'tag': f'v{name}',
+              'releaseUrl': f'https://github.com/{repo}/releases/tag/v{name}',
+              'apk': {
+                  'url': f'{base}/{apk_name}',
+                  'size': apk.stat().st_size,
+                  'sha256': sha256(apk),
+              },
+              'deltas': [],
+          }
+
+          meta = dist / 'delta-meta.tsv'
+          if meta.exists():
+              for line in meta.read_text().splitlines():
+                  if not line.strip():
+                      continue
+                  from_code, from_sha, patch_name, patch_sha, patch_size = line.split('\t')
+                  manifest['deltas'].append({
+                      'fromVersionCode': int(from_code),
+                      'fromSha256': from_sha,
+                      'url': f'{base}/{patch_name}',
+                      'size': int(patch_size),
+                      'sha256': patch_sha,
+                  })
+
+          out = dist / 'latest.json'
+          out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
+          print(out.read_text())
+          PY
+
+      - name: 创建 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_NAME: ${{ needs.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("${DIST}"/*.apk "${DIST}"/*.patch "${DIST}"/latest.json)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::没有任何可发布的资产"; exit 1; }
+          printf '发布资产：\n'
+          printf '  %s\n' "${files[@]}"
+          gh release create "v${NEW_NAME}" \
+            --title "HomeHub ${NEW_NAME}" \
+            --generate-notes \
+            "${files[@]}"
+
+      - name: 把清单推回 main
+        env:
+          NEW_NAME: ${{ needs.version.outputs.name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 清单要落在 main 上，App 才能从 raw 地址匿名读到它。
+          # 本 workflow 只由 tag 触发，这次提交不会反过来再触发一次发布。
+          git fetch origin main
+          git checkout -B main origin/main
+          mkdir -p release
+          cp "${DIST}/latest.json" release/latest.json
+          git add release/latest.json
+          if git diff --cached --quiet; then
+            echo "清单内容没有变化，跳过提交"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(release): 版本清单更新至 ${NEW_NAME} [skip ci]"
+          git push origin main

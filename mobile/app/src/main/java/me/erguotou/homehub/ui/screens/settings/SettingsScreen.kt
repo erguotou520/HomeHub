@@ -116,6 +116,8 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
                 }
             }
 
+            UpdateSection()
+
             SettingsSection(
                 title = "服务器",
                 icon = Icons.Outlined.Dns,

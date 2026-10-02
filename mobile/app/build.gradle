@@ -13,6 +13,25 @@ if (keystorePropsFile.exists()) {
 }
 def hasReleaseSigning = keystoreProps.containsKey('storeFile')
 
+// 高德 SDK Key 同样不入库：优先读 local.properties 的 amapKey，其次读环境变量
+// AMAP_KEY（CI 从 secret 注入）。缺失时构建照常进行，只是地图页拿不到数据。
+def localPropsFile = rootProject.file('local.properties')
+def localProps = new Properties()
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def amapKey = localProps.getProperty('amapKey') ?: System.getenv('AMAP_KEY') ?: ''
+if (amapKey.isEmpty()) {
+    logger.lifecycle(
+        "WARNING: 未配置高德 Key（local.properties 的 amapKey 或环境变量 AMAP_KEY），地图页将不可用")
+}
+
+// 版本号由 CI 从 git tag 派生后经 -P 注入（v1.2.1 → 1.2.1 / 10201）。
+// 本地不传参时用这里的默认值 —— 只影响手搓的测试包，正式包一律由 tag 决定。
+// versionCode 必须跨版本单调递增，否则安卓不允许覆盖安装，更新会卡在「解析包时出现问题」。
+def injectedVersionCode = (project.findProperty('appVersionCode') ?: '1').toString().toInteger()
+def injectedVersionName = (project.findProperty('appVersionName') ?: '1.0').toString()
+
 android {
     namespace 'me.erguotou.homehub'
     compileSdk 35
@@ -21,8 +40,8 @@ android {
         applicationId "me.erguotou.homehub"
         minSdk 30
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        versionCode injectedVersionCode
+        versionName injectedVersionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -31,9 +50,10 @@ android {
             abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
 
-        // 高德 Android SDK Key 内置在构建里（GeoMapView 运行时注入）。
-        // 这是产品自带的地图能力，用户不需要也不应该在应用内配置它。
-        buildConfigField "String", "AMAP_KEY", '"c96f0a79bce0906acef5d17bdbd1423b"'
+        // 高德 Android SDK Key（GeoMapView 运行时经 MapsInitializer 注入）。
+        // 这是产品自带的地图能力，用户不需要在应用内配置它 —— 但源码里不留明文，
+        // 值从 local.properties / 环境变量取（见文件开头）。
+        buildConfigField "String", "AMAP_KEY", "\"${amapKey}\""
     }
 
     signingConfigs {
@@ -118,6 +138,14 @@ dependencies {
     // Map (geo view): AMap Android SDK. The jar ships arm64-v8a / armeabi-v7a
     // native libraries only, so restrict the ABIs instead of shipping stubs.
     implementation libs.amap.map3d
+
+    // 应用 bsdiff 增量补丁（标准 BSDIFF40 容器，三段数据均是 bzip2 压缩）。
+    // BZip2CompressorInputStream 内部要用 commons-io 的 CloseShieldInputStream，
+    // 所以 commons-io 不能排；另外两个传递依赖用不上，排掉省体积。
+    implementation(libs.commons.compress) {
+        exclude group: 'commons-codec'
+        exclude group: 'org.apache.commons', module: 'commons-lang3'
+    }
 
     coreLibraryDesugaring libs.desugar.jdk.libs
     testImplementation libs.junit

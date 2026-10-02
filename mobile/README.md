@@ -161,8 +161,11 @@ app/src/main/java/me/erguotou/homehub/
 - 更新检查读仓库里的静态清单 `release/latest.json`（CI 发版时更新），**不经过服务端** ——
   没有服务端要维护，也没有限流。
 - 取用走双通道：先直连，失败后把原始地址套在 `https://proxy.erguotou.me/` 前面重试。
-  实测本机直连 `raw.githubusercontent.com` 会被**直接拒绝连接**（curl 错误码 7，55 ms 就返回），
-  所以第二条通道不是锦上添花。
+  实测本机直连 `raw.githubusercontent.com` 会被**直接拒绝连接**（curl 错误码 7，3 ms 就返回），
+  所以第二条通道不是锦上添花。直连失败的形态有两种，代价差三个数量级 —— **拒绝**是毫秒级
+  返回，**黑洞**（SYN 被丢弃）却要等满 connectTimeout；实测本机直连 `github.com` 就属于后者
+  （20 s 仍未建连），而走加速 1.1 s 就回来了。所以「直连优先」只是首次的默认值：哪条通道
+  成功了就**按主机记住它**，后续请求优先复用，免得每次下载都先白等 15 秒。
 - 清单的 `deltas` 列出可用的增量包（含"从哪个版本、旧包 sha256 是什么"）。客户端先比版本号，
   命中之后才去算本机 APK 的指纹 —— 那要读完 93 MB，没命中就不该付这个代价。
 - 合并结果必须与清单里全量包的 sha256 **完全一致**：v2/v3 签名覆盖整个文件的字节，
@@ -185,6 +188,11 @@ bsdiff old.apk new.apk real.patch
 HOMEHUB_BSDIFF_DIR=$PWD ./gradlew :app:testDebugUnitTest --tests '*BsPatchTest*'
 ```
 
+仓库里那份小素材（`src/test/resources/bspatch/`，120 KB）不必手搓，用
+`android-incremental-update` 技能里的 `scripts/make-delta-fixture.sh <输出目录>`
+生成：内容确定性可复现，且会用系统 `bspatch` 自检一遍。它刻意覆盖了 bsdiff 的三种
+控制块（原地替换 / 插入 / 删除），比随便找两个文件做差分更能测出问题。
+
 ### 安装这一步无法全自动
 
 系统弹框绕不过去：普通应用不能静默安装，用户必须点一次「安装」，首次还要先允许
@@ -196,11 +204,13 @@ HOMEHUB_BSDIFF_DIR=$PWD ./gradlew :app:testDebugUnitTest --tests '*BsPatchTest*'
 相册「地点」视图使用 **高德地图 Android SDK**（`com.amap.api:3dmap:10.0.600`）渲染服务端
 `/api/photos/geo` 的聚合点：
 
-1. Key 已内置在构建里（`app/build.gradle` 的 `buildConfigField "AMAP_KEY"`），
-   用户**不需要**在应用内配置；
+1. Key 在构建时注入 `BuildConfig.AMAP_KEY`：本地开发从**不入库**的 `local.properties`
+   读 `amapKey=`（或环境变量 `AMAP_KEY`），CI 从同名 secret 读。仓库里没有明文 Key，
+   未配置时构建会打一条 WARNING，应用内**不需要**用户配置；
 2. `GeoMapView.kt` 在 `MapView` 创建前调用 `MapsInitializer.setApiKey(BuildConfig.AMAP_KEY)`，
    因此无需在 `AndroidManifest.xml` 里声明 `com.amap.api.v2.apikey`；
-3. 换 Key 只改 `build.gradle`，并在高德后台登记包名 `me.erguotou.homehub` 与对应签名 SHA1。
+3. 换 Key 只改 `local.properties`（或 CI secret），并在高德后台登记包名
+   `me.erguotou.homehub` 与对应签名 SHA1。
 
 两点注意事项：
 

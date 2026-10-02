@@ -11,9 +11,13 @@ import java.io.File
 /**
  * 补丁应用器的往返测试，数据由真实的 `bsdiff` 命令生成（见 resources/bspatch）。
  *
+ * 素材不是手搓的：用 `android-incremental-update` 技能里的
+ * `scripts/make-delta-fixture.sh` 生成，内容确定性可复现，改了算法想换一套
+ * 数据直接重跑即可。
+ *
  * 用例覆盖了 bsdiff 三种控制块组合：原地替换（diff+extra）、插入（extra+正
  * seek）、以及跨 64 KB 缓冲边界的连续区段。旧包 120000 字节、新包 126750
- * 字节、补丁 17228 字节 —— 补丁比全量小 86%，正是增量下发的收益所在。
+ * 字节、补丁 12335 字节 —— 补丁只有全量的 10%，正是增量下发的收益所在。
  */
 class BsPatchTest {
 

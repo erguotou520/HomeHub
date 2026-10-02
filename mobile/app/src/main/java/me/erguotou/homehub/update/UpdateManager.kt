@@ -65,7 +65,13 @@ class UpdateManager(private val context: Context) {
         val work = File(context.cacheDir, "update").apply { mkdirs() }
         val apk = File(work, "homehub-${manifest.versionName ?: manifest.versionCode}.apk")
         if (apk.exists()) apk.delete()
-        // 上次可能留下半截的 .part，清掉避免误当成续传起点。
+        // 连同上次残留的 .part 一起清掉，让这次下载从头开始。
+        //
+        // 看起来浪费了 UpdateClient 的断点续传，但那套续传是**单次调用内**用的：
+        // 第一条通道下到一半断了，换第二条通道接着下。跨用户操作复用就不安全了 ——
+        // 上一个 .part 可能是代理返回错误页时写下的（HTTP 200 而非 206），
+        // 再拿它去续，只会把垃圾接在垃圾后面，最后卡在「校验失败」反复重试。
+        // 相比之下，重下一次 99 MB 是明确、可见、用户能理解的代价。
         File("${apk.absolutePath}.part").takeIf { it.exists() }?.delete()
 
         // 增量优先：对不上（没有该旧版本的补丁、或本机包指纹不同）就落到全量。

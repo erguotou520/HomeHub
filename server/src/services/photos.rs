@@ -9,8 +9,8 @@ use sqlx::Row;
 use crate::db::Db;
 use crate::models::dir::DirRecord;
 use crate::models::photo::{
-    DuplicateGroup, GeoPoint, PersonGroupSummary, PhotoAsset, PhotoItem, PhotoTag, TagSummary,
-    TimelineGroup, TreeGroup,
+    DuplicateGroup, FolderNode, GeoPoint, PersonGroupSummary, PhotoAsset, PhotoItem, PhotoTag,
+    TagSummary, TimelineGroup, TreeGroup,
 };
 use crate::services::dirs::DirRegistry;
 use crate::services::exif::PhotoMeta;
@@ -665,6 +665,192 @@ pub async fn tree(
         }
     }
     Ok(groups)
+}
+
+/// 目录视图「按层浏览」的入参。
+pub struct TreeParams {
+    /// 只看某一个目录；`None` = 全部相册目录（顶层那种「目录列表」）。
+    pub dir_id: Option<i64>,
+    /// 当前所在的层 —— 该目录内的相对路径，空串表示目录根。
+    pub path: String,
+    pub limit: i64,
+    /// 照片的 keyset 游标 `(taken_at, id)`，与 `/api/photos/list` 同一个形状。
+    pub before: Option<(i64, i64)>,
+}
+
+/// 目录视图的一层。
+pub struct TreePage {
+    pub folders: Vec<FolderNode>,
+    pub photos: PhotoPage,
+}
+
+/// 目录视图按层取数。
+///
+/// 旧的 [`tree`] 一次返回整库（真库 4118 张 → **3.2 MB / 3.0 s**），而打开「目录」
+/// 首屏真正要的只有一行 —— 顶层有几个目录、各多少张。这里把「一层」拆出来：
+/// 能进入的子文件夹 + 就放在这一层的照片（keyset 分页），首屏因此降到几 KB。
+///
+/// 文件夹清单只在第一页返回：续页请求只为照片而来、客户端手上已经有清单了，
+/// 再扫一遍全表纯属白花钱（`before` 非空即续页）。
+pub async fn browse_tree(db: &Db, registry: &DirRegistry, p: &TreeParams) -> Result<TreePage> {
+    let album_dirs = registry.album_dirs();
+    let folders = if p.before.is_some() {
+        Vec::new()
+    } else {
+        folders_at(db, &album_dirs, p.dir_id, &p.path).await?
+    };
+    let photos = match p.dir_id {
+        // 顶层是一份「有哪些目录」的清单，它自己没有直属照片。
+        None => PhotoPage {
+            items: Vec::new(),
+            total: 0,
+            has_more: false,
+            next_before: None,
+        },
+        Some(dir_id) => folder_photos(db, &album_dirs, dir_id, &p.path, p.limit, p.before).await?,
+    };
+    Ok(TreePage { folders, photos })
+}
+
+/// 某一层的直接子文件夹，每个带上「它下面所有照片」的聚合计数。
+async fn folders_at(
+    db: &Db,
+    album_dirs: &[DirRecord],
+    dir_id: Option<i64>,
+    path: &str,
+) -> Result<Vec<FolderNode>> {
+    let Some(dir_id) = dir_id else {
+        // 顶层：一个目录一行。`LEFT JOIN` 让空目录也露个面（count 0）。
+        if album_dirs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = album_dirs
+            .iter()
+            .map(|d| d.id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT d.id, d.name, COUNT(p.id) FROM dirs d \
+             LEFT JOIN photo_assets p ON p.dir_id = d.id AND p.status = 'ok' \
+             WHERE d.id IN ({ids}) GROUP BY d.id, d.name ORDER BY d.name"
+        );
+        let rows: Vec<(i64, String, i64)> = sqlx::query_as(&sql).fetch_all(db).await?;
+        return Ok(rows
+            .into_iter()
+            .map(|(id, name, count)| FolderNode {
+                dir_id: id,
+                dir_name: name.clone(),
+                path: String::new(),
+                name,
+                count,
+            })
+            .collect());
+    };
+
+    // 目录没注册成相册（或被停用）时不该还能浏览它的内容。
+    let Some(dir_name) = album_dirs.iter().find(|d| d.id == dir_id).map(|d| d.name.clone())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    // 切掉当前层之后剩下的那一段：里面还有 `/` 的是子文件夹，没有的就是直接
+    // 摆在这一层的文件名 —— 后者归照片查询管，这里用 `HAVING seg IS NOT NULL`
+    // 滤掉。长度交给 SQLite 自己算（`length()` 按字符计，Rust 的 `len()` 按
+    // 字节计，中文目录名上两者不相等）。
+    let sql = "SELECT CASE WHEN instr(s, '/') > 0 THEN substr(s, 1, instr(s, '/') - 1) END AS seg, \
+               COUNT(*) FROM ( \
+                 SELECT substr(p.rel_path, length(?) + 1) AS s FROM photo_assets p \
+                 WHERE p.status = 'ok' AND p.dir_id = ? AND substr(p.rel_path, 1, length(?)) = ? \
+               ) GROUP BY seg HAVING seg IS NOT NULL ORDER BY COUNT(*) DESC, seg";
+    let rows: Vec<(String, i64)> = sqlx::query_as(sql)
+        .bind(&prefix)
+        .bind(dir_id)
+        .bind(&prefix)
+        .bind(&prefix)
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(seg, count)| FolderNode {
+            dir_id,
+            dir_name: dir_name.clone(),
+            path: if path.is_empty() {
+                seg.clone()
+            } else {
+                format!("{path}/{seg}")
+            },
+            name: seg,
+            count,
+        })
+        .collect())
+}
+
+/// 就放在 `path` 这一层里的照片（不含子文件夹里的），keyset 分页。
+async fn folder_photos(
+    db: &Db,
+    album_dirs: &[DirRecord],
+    dir_id: i64,
+    path: &str,
+    limit: i64,
+    before: Option<(i64, i64)>,
+) -> Result<PhotoPage> {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    let mut filters = album_clause(album_dirs, "p");
+    filters.push_str(&format!(" AND p.dir_id = {dir_id}"));
+    // `path` 为空时 prefix 也是空串：`substr(rel_path, 1, 0) = ''` 恒真，而
+    // 「后面不再有 `/`」正好就是目录根下那几张 —— 顶层与子层共用同一个条件。
+    filters.push_str(
+        " AND substr(p.rel_path, 1, length(?)) = ? \
+           AND instr(substr(p.rel_path, length(?) + 1), '/') = 0",
+    );
+
+    // 游标只收窄数据查询：`total` 必须描述整层，否则每页都报「总数 = 页大小」。
+    let mut data_filters = filters.clone();
+    if let Some((bt, bi)) = before {
+        data_filters.push_str(&format!(
+            " AND (COALESCE(p.taken_at, p.mtime) < {bt} \
+             OR (COALESCE(p.taken_at, p.mtime) = {bt} AND p.id < {bi}))"
+        ));
+    }
+
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM photo_assets p WHERE p.status = 'ok'{}",
+        filters
+    );
+    let data_sql = format!(
+        "{} {} ORDER BY COALESCE(p.taken_at, p.mtime) DESC, p.id DESC LIMIT ?",
+        SELECT_PHOTO, data_filters
+    );
+
+    let mut count_q = sqlx::query_as::<_, (i64,)>(&count_sql);
+    let mut data_q = sqlx::query_as::<_, PhotoRow>(&data_sql);
+    for _ in 0..3 {
+        count_q = count_q.bind(&prefix);
+        data_q = data_q.bind(&prefix);
+    }
+
+    let total = count_q.fetch_one(db).await.map(|r| r.0).unwrap_or(0);
+    // 多取一行用来判断还有没有下一页，再截回去 —— 与 `list` 同一套。
+    let mut rows = data_q.bind(limit + 1).fetch_all(db).await?;
+    let has_more = rows.len() as i64 > limit;
+    rows.truncate(limit.max(0) as usize);
+    let next_before = rows.last().map(|r| (r.sort_time(), r.id));
+
+    Ok(PhotoPage {
+        items: to_items(db, rows).await?,
+        total,
+        has_more,
+        next_before,
+    })
 }
 
 /// 分类列表的排序键，也是它的游标。
@@ -1957,5 +2143,138 @@ mod listing_tests {
         .expect("offset page");
         assert_eq!(legacy.items.len(), 2);
         assert_eq!(legacy.items[0].id, page.items[2].id);
+    }
+
+    /// 两个相册目录 + 带层级的 rel_path，用来验证「按层浏览」。
+    async fn browse_library() -> (Db, DirRegistry) {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        sqlx::migrate!("./migrations")
+            .run(&db)
+            .await
+            .expect("run migrations");
+        let config: crate::config::Config = serde_yaml::from_str(
+            "dirs:\n  - name: photos\n    path: /tmp/homehub-test-photos\n    marks: [album]\n  \
+             - name: trips\n    path: /tmp/homehub-test-trips\n    marks: [album]\n",
+        )
+        .expect("parse config");
+        let registry = DirRegistry::bootstrap(db.clone(), &config)
+            .await
+            .expect("bootstrap registry");
+        (db, registry)
+    }
+
+    async fn add_photo_in(db: &Db, registry: &DirRegistry, dir: &str, taken: i64, path: &str) -> i64 {
+        let dir_id = registry.by_name(dir).expect("dir").id;
+        sqlx::query(
+            "INSERT INTO photo_assets \
+                (dir_id, rel_path, fingerprint, size, mtime, taken_at, status, compressed, \
+                 media_kind, created_at, updated_at) \
+             VALUES (?, ?, '', 1, ?, ?, 'ok', 0, 'photo', 0, 0)",
+        )
+        .bind(dir_id)
+        .bind(path)
+        .bind(taken)
+        .bind(taken)
+        .execute(db)
+        .await
+        .expect("insert photo")
+        .last_insert_rowid()
+    }
+
+    fn level(dir_id: i64, path: &str, limit: i64, before: Option<(i64, i64)>) -> TreeParams {
+        TreeParams { dir_id: Some(dir_id), path: path.to_string(), limit, before }
+    }
+
+    #[tokio::test]
+    async fn browsing_a_level_splits_its_folders_from_its_own_photos() {
+        let (db, registry) = browse_library().await;
+        // photos/ 根下 3 张、photos/2016/ 下 2 张、photos/2016/spring/ 下 2 张、
+        // trips/ 下 1 张。
+        for i in 0..3 {
+            add_photo_in(&db, &registry, "photos", at(2026, 10, 1, 9) + i as i64, &format!("root{i}.jpg")).await;
+        }
+        for i in 0..2 {
+            add_photo_in(&db, &registry, "photos", at(2026, 10, 2, 9) + i as i64, &format!("2016/a{i}.jpg")).await;
+        }
+        for i in 0..2 {
+            add_photo_in(&db, &registry, "photos", at(2026, 10, 3, 9) + i as i64, &format!("2016/spring/s{i}.jpg")).await;
+        }
+        add_photo_in(&db, &registry, "trips", at(2026, 10, 4, 9), "beach.jpg").await;
+
+        // 顶层：一个目录一行，计数是该目录下全部照片。
+        let top = browse_tree(
+            &db,
+            &registry,
+            &TreeParams { dir_id: None, path: String::new(), limit: 60, before: None },
+        )
+        .await
+        .expect("top level");
+        assert_eq!(
+            top.folders.iter().map(|f| (f.name.as_str(), f.count)).collect::<Vec<_>>(),
+            vec![("photos", 7), ("trips", 1)]
+        );
+        assert!(top.photos.items.is_empty(), "顶层是目录清单，它自己没有照片");
+
+        let photos_dir = registry.by_name("photos").expect("dir").id;
+
+        // 目录根：子文件夹只有 2016（计数聚合到 spring 里的两张），直属照片 3 张。
+        let root = browse_tree(&db, &registry, &level(photos_dir, "", 60, None))
+            .await
+            .expect("root level");
+        assert_eq!(
+            root.folders.iter().map(|f| (f.name.as_str(), f.count)).collect::<Vec<_>>(),
+            vec![("2016", 4)]
+        );
+        assert_eq!(root.photos.total, 3, "子文件夹里的照片不该混进这一层");
+        assert!(root.photos.items.iter().all(|p| !p.rel_path.contains('/')));
+
+        // 进入 2016：子文件夹 2016/spring，照片是 2016/ 下那两张。
+        let second = browse_tree(&db, &registry, &level(photos_dir, "2016", 60, None))
+            .await
+            .expect("second level");
+        assert_eq!(
+            second.folders.iter().map(|f| (f.path.as_str(), f.count)).collect::<Vec<_>>(),
+            vec![("2016/spring", 2)]
+        );
+        assert_eq!(second.photos.total, 2);
+        assert!(second
+            .photos
+            .items
+            .iter()
+            .all(|p| p.rel_path.starts_with("2016/") && !p.rel_path.starts_with("2016/spring/")));
+    }
+
+    #[tokio::test]
+    async fn folder_photos_page_without_repeating_or_losing_one() {
+        let (db, registry) = browse_library().await;
+        for i in 0..7 {
+            add_photo_in(&db, &registry, "photos", at(2026, 10, 5, 9) + i as i64, &format!("b{i}.jpg")).await;
+        }
+        let dir_id = registry.by_name("photos").expect("dir").id;
+        let all = browse_tree(&db, &registry, &level(dir_id, "", 60, None))
+            .await
+            .expect("whole level");
+        assert_eq!(all.photos.total, 7);
+
+        let mut seen: Vec<i64> = Vec::new();
+        let mut before = None;
+        for _ in 0..10 {
+            let page = browse_tree(&db, &registry, &level(dir_id, "", 2, before))
+                .await
+                .expect("page");
+            if before.is_some() {
+                assert!(page.folders.is_empty(), "续页不该再回一遍文件夹清单");
+            }
+            seen.extend(page.photos.items.iter().map(|p| p.id));
+            if !page.photos.has_more {
+                break;
+            }
+            before = page.photos.next_before;
+        }
+        assert_eq!(seen, all.photos.items.iter().map(|p| p.id).collect::<Vec<_>>());
     }
 }

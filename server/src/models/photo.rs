@@ -153,6 +153,21 @@ pub struct TreeGroup {
     pub items: Vec<PhotoItem>,
 }
 
+/// One enterable folder in the 目录 (browse-by-folder) view.
+///
+/// `count` aggregates every photo at or below the folder, so the number is
+/// meaningful before drilling in. `path` is the folder's path relative to its
+/// own dir; the top level (a dir itself) has an empty one.
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderNode {
+    pub dir_id: i64,
+    pub dir_name: String,
+    pub path: String,
+    /// Display label: the dir name at the top level, else the last path segment.
+    pub name: String,
+    pub count: i64,
+}
+
 /// Duplicate detection result.
 #[derive(Debug, Clone, Serialize)]
 pub struct DuplicateGroup {

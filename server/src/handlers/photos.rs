@@ -91,6 +91,14 @@ pub struct GeoQuery {
 #[derive(Deserialize, Default)]
 pub struct TreeQuery {
     pub dir_id: Option<i64>,
+    /// 当前所在的层（该目录内的相对路径）。缺省 = 目录根。
+    pub path: Option<String>,
+    /// 本页最多返回多少张照片。**缺省即旧的整库一次性返回** —— 管理端相册页与
+    /// 已发布的客户端仍走那条路，不能动。
+    pub limit: Option<i64>,
+    /// 照片的 keyset 游标，与 `list` 同形：上一页最后一张的 `(taken_at, id)`。
+    pub before: Option<i64>,
+    pub before_id: Option<i64>,
 }
 
 /// 分类列表分页。三个 `after_*` 是**一个**游标（`(photo_count, tag, kind)`）拆成
@@ -200,8 +208,39 @@ pub async fn tree(
     State(state): State<AppState>,
     Query(q): Query<TreeQuery>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let groups = crate::services::photos::tree(&state.db, &state.registry, q.dir_id).await?;
-    Ok(Json(serde_json::json!({ "groups": groups })))
+    // 不带 `limit` = 整库一次性返回的旧行为（管理端相册页与已发布的客户端仍
+    // 依赖它）。带上 `limit` 才是「按层浏览」，见 `browse_tree`。
+    let Some(limit) = q.limit else {
+        let groups = crate::services::photos::tree(&state.db, &state.registry, q.dir_id).await?;
+        return Ok(Json(serde_json::json!({ "groups": groups })));
+    };
+    reject_half_cursor(&[q.before.is_some(), q.before_id.is_some()], "before / before_id")?;
+    let before = match (q.before, q.before_id) {
+        (Some(t), Some(id)) => Some((t, id)),
+        _ => None,
+    };
+    let page = crate::services::photos::browse_tree(
+        &state.db,
+        &state.registry,
+        &crate::services::photos::TreeParams {
+            dir_id: q.dir_id,
+            // 首尾的 `/` 会让前缀比较落空（`/a` 匹配不上 `a/…`），在这里归一。
+            path: q.path.unwrap_or_default().trim_matches('/').to_string(),
+            limit: limit.clamp(1, 1000),
+            before,
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "folders": page.folders,
+        "photos": {
+            "items": page.photos.items,
+            "total": page.photos.total,
+            "has_more": page.photos.has_more,
+            "next_before": page.photos.next_before.map(|(t, _)| t),
+            "next_before_id": page.photos.next_before.map(|(_, id)| id),
+        },
+    })))
 }
 
 pub async fn tags(

@@ -228,7 +228,12 @@ fun AlbumScreen(
                         }
                     }
 
-                    if (state.loading && state.groups.isEmpty() && state.filtered.isEmpty()) {
+                    // 全屏 spinner 只在屏幕确实没东西可显示时出现。判据取自当前
+                    // 视图真正显示的那份数据（`hasContent`）：切到「分类」时时间
+                    // 轴的照片还留在 state 里，拿它当「有内容」就会放行，于是先闪
+                    // 一个「还没有标签」再跳成数据。列表已有数据时旧内容留在原地，
+                    // 刷新在它下面跑 —— 缓存优先不受影响。
+                    if (state.loading && !state.hasContent) {
                         Loading()
                         return@PullToRefreshBox
                     }
@@ -283,10 +288,12 @@ fun AlbumScreen(
                         AlbumView.PEOPLE -> PeopleList(state.people, vm::url) { p ->
                             vm.filterByPerson(p.id, p.name)
                         }
-                        AlbumView.GEO -> when {
-                            state.loading && state.points.isEmpty() -> Loading()
-                            state.points.isEmpty() -> Empty("没有带 GPS 信息的照片")
-                            else -> AMapView(
+                        // 请求还在飞、points 还空着的情况上面那道守卫已经接管，
+                        // 能走到这里的「空」就是接口真的返回了空。
+                        AlbumView.GEO -> if (state.points.isEmpty()) {
+                            Empty("没有带 GPS 信息的照片")
+                        } else {
+                            AMapView(
                                 context = LocalContext.current,
                                 points = state.points,
                                 onSelect = { point -> vm.filterByGeo(point) }

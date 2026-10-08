@@ -67,6 +67,30 @@ data class AlbumUiState(
 
     /** Photos that sit directly in the current 目录 level. */
     val treePhotos: List<PhotoItem> get() = photosAt(trees, treeStack)
+
+    /**
+     * 当前视图（含筛选态）手上是否已经有能显示的东西。
+     *
+     * 全屏 spinner 只能顶替「什么都没有」的屏幕：列表里已经有数据时（切回一个
+     * 已在内存里的视图）旧内容要留在原地，刷新在它下面进行 —— 这就是缓存优先。
+     * 判据必须取屏幕上真正显示的那份数据，不能取一个共用的标志位：切到「分类」
+     * 时时间轴的照片还在 [groups] 里，用它去判「有没有内容」会得真，于是守卫放
+     * 行、落到空的标签列表上，先闪一个「还没有标签」再跳成数据。
+     *
+     * 反过来，请求回来确实为空（`loading == false` 且这里仍然为假）时，空状态
+     * 才是对的答案 —— 所以空列表不在这里兜底。
+     */
+    val hasContent: Boolean
+        get() {
+            if (activeFilter != null) return filtered.isNotEmpty()
+            return when (view) {
+                AlbumView.TIMELINE -> groups.isNotEmpty()
+                AlbumView.TREE -> trees.isNotEmpty()
+                AlbumView.TAGS -> tags.isNotEmpty()
+                AlbumView.PEOPLE -> people.isNotEmpty()
+                AlbumView.GEO -> points.isNotEmpty()
+            }
+        }
 }
 
 /**
@@ -166,9 +190,16 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh() = select(_state.value.view)
 
+    /**
+     * 起一次加载，并把 `loading` 立刻打开。
+     *
+     * 标志位写在 `launch` **外面**：视图/筛选可能刚换过，而新旧数据并存于同一个
+     * state 里，屏幕此刻按新视图去取只会取到空。若 `loading` 要等到协程被调度
+     * 才为真，中间那一帧就会闪一次空状态 —— 与 [loadTimeline] 的做法保持一致。
+     */
     private fun <T> load(block: suspend () -> Result<T>, apply: (T) -> Unit) {
+        _state.value = _state.value.copy(loading = true, error = null)
         viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, error = null)
             block().fold(
                 onSuccess = {
                     apply(it)

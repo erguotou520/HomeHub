@@ -64,6 +64,11 @@ pub struct ListQuery {
     pub ids: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Keyset 分页游标 —— 上一页最后一条的 `(taken_at, id)`，只返回比它更旧的
+    /// 条目。两个值必须成对出现，且与 `offset` 互斥。缺省即 `limit`+`offset` 的
+    /// 旧路子（管理端仍这么用）。
+    pub before: Option<i64>,
+    pub before_id: Option<i64>,
 }
 
 impl ListQuery {
@@ -86,6 +91,38 @@ pub struct GeoQuery {
 #[derive(Deserialize, Default)]
 pub struct TreeQuery {
     pub dir_id: Option<i64>,
+}
+
+/// 分类列表分页。三个 `after_*` 是**一个**游标（`(photo_count, tag, kind)`）拆成
+/// 三个参数，要么都给要么都不给 —— 半截游标会退化成"从头开始"，见 [cursor_of]。
+#[derive(Deserialize, Default)]
+pub struct TagsQuery {
+    /// 本页最多返回多少条。缺省 = 一次返回全部（管理端仍走这条路）。
+    pub limit: Option<i64>,
+    pub after_count: Option<i64>,
+    pub after_tag: Option<String>,
+    pub after_kind: Option<String>,
+}
+
+/// 人物列表分页。游标 `(photo_count, id)` 拆成两个参数。
+#[derive(Deserialize, Default)]
+pub struct PeopleQuery {
+    pub limit: Option<i64>,
+    pub after_count: Option<i64>,
+    pub after_id: Option<i64>,
+}
+
+/// 游标必须整份给出或整份缺席。
+///
+/// 半截游标不能当成「没有游标」处理：那会让客户端把第一页反复当下一页拉，
+/// 看着永远成功、内容却永远停在开头。分类（3 个字段）和人物（2 个字段）共用它。
+fn reject_half_cursor(parts: &[bool], what: &str) -> Result<(), crate::models::AppError> {
+    if parts.iter().any(|p| *p) && !parts.iter().all(|p| *p) {
+        return Err(crate::models::AppError::BadRequest(format!(
+            "{what} must be sent together or not at all"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Default)]
@@ -169,16 +206,61 @@ pub async fn tree(
 
 pub async fn tags(
     State(state): State<AppState>,
+    Query(q): Query<TagsQuery>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let tags = crate::services::photos::tag_summary(&state.db, &state.registry).await?;
-    Ok(Json(serde_json::json!({ "tags": tags })))
+    reject_half_cursor(
+        &[q.after_count.is_some(), q.after_tag.is_some(), q.after_kind.is_some()],
+        "after_count / after_tag / after_kind",
+    )?;
+    let after = match (q.after_count, q.after_tag, q.after_kind) {
+        (Some(count), Some(tag), Some(kind)) => Some((count, tag, kind)),
+        _ => None,
+    };
+    let page = crate::services::photos::tag_summary(
+        &state.db,
+        &state.registry,
+        &crate::services::photos::TagParams {
+            limit: q.limit.map(|n| n.clamp(1, 1000)),
+            after,
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "tags": page.tags,
+        "has_more": page.has_more,
+        "next_count": page.next_after.as_ref().map(|(c, _, _)| *c),
+        "next_tag": page.next_after.as_ref().map(|(_, t, _)| t),
+        "next_kind": page.next_after.as_ref().map(|(_, _, k)| k),
+    })))
 }
 
 pub async fn people(
     State(state): State<AppState>,
+    Query(q): Query<PeopleQuery>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
-    let people = crate::services::photos::people(&state.db, &state.registry).await?;
-    Ok(Json(serde_json::json!({ "people": people })))
+    reject_half_cursor(
+        &[q.after_count.is_some(), q.after_id.is_some()],
+        "after_count / after_id",
+    )?;
+    let after = match (q.after_count, q.after_id) {
+        (Some(count), Some(id)) => Some((count, id)),
+        _ => None,
+    };
+    let page = crate::services::photos::people(
+        &state.db,
+        &state.registry,
+        &crate::services::photos::PersonParams {
+            limit: q.limit.map(|n| n.clamp(1, 1000)),
+            after,
+        },
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "people": page.people,
+        "has_more": page.has_more,
+        "next_count": page.next_after.map(|(c, _)| c),
+        "next_id": page.next_after.map(|(_, id)| id),
+    })))
 }
 
 pub async fn geo(
@@ -196,7 +278,18 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let ids = q.ids();
-    let (items, total) = crate::services::photos::list(
+    reject_half_cursor(&[q.before.is_some(), q.before_id.is_some()], "before / before_id")?;
+    let before = match (q.before, q.before_id) {
+        (Some(t), Some(id)) => Some((t, id)),
+        _ => None,
+    };
+    // 游标与 offset 是两条互斥的路：同时给了只能说明调用方在混用，与其猜不如拒。
+    if before.is_some() && q.offset.unwrap_or(0) != 0 {
+        return Err(crate::models::AppError::BadRequest(
+            "before / before_id and offset are two different paginations — use one".into(),
+        ));
+    }
+    let page = crate::services::photos::list(
         &state.db,
         &state.registry,
         &PhotoQuery {
@@ -210,10 +303,17 @@ pub async fn list(
             ids,
             limit: q.limit.unwrap_or(200).clamp(1, 1000),
             offset: q.offset.unwrap_or(0).max(0),
+            before,
         },
     )
     .await?;
-    Ok(Json(serde_json::json!({ "items": items, "total": total })))
+    Ok(Json(serde_json::json!({
+        "items": page.items,
+        "total": page.total,
+        "has_more": page.has_more,
+        "next_before": page.next_before.map(|(t, _)| t),
+        "next_before_id": page.next_before.map(|(_, id)| id),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -338,7 +438,7 @@ pub async fn semantic(
         // 4. Materialise items in similarity order.
         let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
         let score_of: HashMap<i64, f32> = hits.iter().copied().collect();
-        let (items, _) = crate::services::photos::list(
+        let page = crate::services::photos::list(
             &state.db,
             &state.registry,
             &PhotoQuery {
@@ -352,10 +452,11 @@ pub async fn semantic(
                 ids: ids.clone(),
                 limit: ids.len() as i64,
                 offset: 0,
+                before: None,
             },
         )
         .await?;
-        let mut items = items;
+        let mut items = page.items;
         items.sort_by(|a, b| {
             let sa = score_of.get(&a.id).copied().unwrap_or(-1.0);
             let sb = score_of.get(&b.id).copied().unwrap_or(-1.0);
@@ -515,4 +616,28 @@ pub async fn duplicates(
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let groups = crate::services::dedup::scan(&state.db, &state.registry).await?;
     Ok(Json(serde_json::json!({ "groups": groups })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 半截游标必须被拒，而不是被当成「没有游标」。
+    ///
+    /// 当成没有游标的话，客户端会把第一页反复当下一页拉：请求全部成功、界面看着
+    /// 正常，内容却永远停在前 60 条 —— 正是最难被发现的那种坏法。
+    #[test]
+    fn half_a_cursor_is_rejected() {
+        assert!(reject_half_cursor(&[false, false, false], "c").is_ok());
+        assert!(reject_half_cursor(&[true, true, true], "c").is_ok());
+        assert!(reject_half_cursor(&[true, false, false], "c").is_err());
+        assert!(reject_half_cursor(&[false, true, false], "c").is_err());
+        assert!(reject_half_cursor(&[false, false, true], "c").is_err());
+        assert!(reject_half_cursor(&[false, true, true], "c").is_err());
+        assert!(reject_half_cursor(&[true, false, true], "c").is_err());
+        assert!(reject_half_cursor(&[true, true, false], "c").is_err());
+        // 二元组（人物、list 的 before）也走同一套规则。
+        assert!(reject_half_cursor(&[true, false], "c").is_err());
+        assert!(reject_half_cursor(&[false, false], "c").is_ok());
+    }
 }

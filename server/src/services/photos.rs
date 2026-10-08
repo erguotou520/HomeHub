@@ -208,6 +208,21 @@ pub struct PhotoQuery {
     pub ids: Vec<i64>,
     pub limit: i64,
     pub offset: i64,
+    /// Keyset position: `(taken_at, id)` of the previous page's last item.
+    /// Same shape and same reason as the timeline's cursor — a page boundary
+    /// lands inside a burst often enough that a bare `t < before` would skip
+    /// the rest of that second. Only consulted with a `limit`; `offset` is the
+    /// legacy knob and must be 0 when a cursor is given.
+    pub before: Option<(i64, i64)>,
+}
+
+/// One page of `/api/photos/list` plus what it takes to ask for the next one.
+pub struct PhotoPage {
+    pub items: Vec<PhotoItem>,
+    /// 过滤后的总条数。分页的客户端用不上它（那正是分页要避免的），管理端还在显示。
+    pub total: i64,
+    pub has_more: bool,
+    pub next_before: Option<(i64, i64)>,
 }
 
 const SELECT_PHOTO: &str = "SELECT p.*, d.name AS dir_name FROM photo_assets p \
@@ -234,7 +249,7 @@ fn album_clause(album_dirs: &[DirRecord], alias: &str) -> String {
     format!(" AND {alias}.dir_id IN ({ids})")
 }
 
-pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Vec<PhotoItem>, i64)> {
+pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<PhotoPage> {
     let album_dirs = registry.album_dirs();
     let mut filters = album_clause(&album_dirs, "p");
 
@@ -277,13 +292,26 @@ pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Ve
         filters.push_str(&format!(" AND p.id IN ({})", ids));
     }
 
+    // The cursor narrows the *data* query only: the count has to describe the
+    // whole filtered set, otherwise every page would report "total = page size".
+    let mut data_filters = filters.clone();
+    if let Some((bt, bi)) = q.before {
+        data_filters.push_str(&format!(
+            " AND (COALESCE(p.taken_at, p.mtime) < {bt} \
+             OR (COALESCE(p.taken_at, p.mtime) = {bt} AND p.id < {bi}))"
+        ));
+    }
+
     let count_sql = format!(
         "SELECT COUNT(*) FROM photo_assets p WHERE p.status = 'ok'{}",
         filters
     );
+    // limit + 1: the spare row is what tells us a next page exists. Truncated
+    // back to `limit` below, so callers that ignore `has_more` (the admin, the
+    // semantic search re-ranking) see exactly what they asked for.
     let data_sql = format!(
         "{} {} ORDER BY COALESCE(p.taken_at, p.mtime) DESC, p.id DESC LIMIT ? OFFSET ?",
-        SELECT_PHOTO, filters
+        SELECT_PHOTO, data_filters
     );
 
     let mut count_q = sqlx::query_as::<_, (i64,)>(&count_sql);
@@ -293,9 +321,23 @@ pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Ve
         data_q = data_q.bind(tag);
     }
     let total = count_q.fetch_one(db).await.map(|r| r.0).unwrap_or(0);
-    let rows = data_q.bind(q.limit).bind(q.offset).fetch_all(db).await?;
+    let mut rows = data_q
+        .bind(q.limit + 1)
+        .bind(q.offset)
+        .fetch_all(db)
+        .await?;
 
-    Ok((to_items(db, rows).await?, total))
+    let has_more = rows.len() as i64 > q.limit;
+    rows.truncate(q.limit.max(0) as usize);
+    // Handed back verbatim as the next `before` / `before_id`.
+    let next_before = rows.last().map(|r| (r.sort_time(), r.id));
+
+    Ok(PhotoPage {
+        items: to_items(db, rows).await?,
+        total,
+        has_more,
+        next_before,
+    })
 }
 
 /// Bucket size of the timeline views (`group=day|month|year`).
@@ -625,7 +667,41 @@ pub async fn tree(
     Ok(groups)
 }
 
-pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSummary>> {
+/// 分类列表的排序键，也是它的游标。
+///
+/// 三元组而不是二元组：同一个 tag 会同时以 `object` 和 `scene` 两种 kind 出现
+/// （真库 455 行里有 11 个，`cup` / `vase` / `umbrella` …），只按 `(photo_count,
+/// tag)` 排序就有并列，游标会把并列的那几行漏掉或重复发。
+pub type TagCursor = (i64, String, String);
+
+#[derive(Debug, Clone, Default)]
+pub struct TagParams {
+    /// 本页最多返回多少条。**`None` = 一次返回全部**（管理端相册页仍走这条路）。
+    pub limit: Option<i64>,
+    /// 上一页最后一行的 `(photo_count, tag, kind)`。
+    pub after: Option<TagCursor>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TagPage {
+    pub tags: Vec<TagSummary>,
+    pub has_more: bool,
+    /// 原样回传作为下一页的 `after`。
+    pub next_after: Option<TagCursor>,
+}
+
+/// 标签（分类）一览，按照片数从多到少。
+///
+/// 三层查询，慢的那部分只对一页的行做：
+///
+/// 1. 聚合出 `(tag, kind, photo_count)`；
+/// 2. 游标过滤 + `LIMIT n+1`（多取一行用来判断还有没有下一页）；
+/// 3. 给这一页的 n 行各取三张封面。
+///
+/// 封面那三段相关子查询必须留在**最外层**。放在第一层时它们按 455 个分组逐组
+/// 求值，实测 296 ms；挪到 LIMIT 之后只对 60 行求值，实测约 100 ms。所以这里
+/// 不是「把三个查询拼起来」那么简单 —— 层次本身就是性能。
+pub async fn tag_summary(db: &Db, registry: &DirRegistry, p: &TagParams) -> Result<TagPage> {
     let albums = registry.album_dirs();
     // One clause per alias: the three cover subqueries each alias their own copy
     // of `photo_assets` (p2/p3/p5), so the outer fragment does not reach them.
@@ -633,30 +709,67 @@ pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSumma
     let cover_rel_album = album_clause(&albums, "p2");
     let cover_dir_album = album_clause(&albums, "p3");
     let cover_fp_album = album_clause(&albums, "p5");
+
+    let agg = format!(
+        "SELECT t.tag AS tag, t.kind AS kind, COUNT(*) AS photo_count \
+         FROM photo_tags t JOIN photo_assets p ON p.id = t.photo_id \
+         WHERE p.status = 'ok'{} GROUP BY t.kind, t.tag",
+        clause
+    );
+
+    let limit_sql = match p.limit {
+        Some(n) => format!(" LIMIT {}", n + 1),
+        None => String::new(),
+    };
+    let page_sql = match &p.after {
+        Some(_) => format!(
+            "SELECT * FROM ({agg}) \
+             WHERE (photo_count < ? OR (photo_count = ? AND tag > ?) \
+             OR (photo_count = ? AND tag = ? AND kind > ?)) \
+             ORDER BY photo_count DESC, tag, kind{limit_sql}"
+        ),
+        None => {
+            format!("SELECT * FROM ({agg}) ORDER BY photo_count DESC, tag, kind{limit_sql}")
+        }
+    };
+
     let sql = format!(
-        "SELECT t.tag AS tag, t.kind AS kind, COUNT(*) AS photo_count, \
+        "SELECT s.tag AS tag, s.kind AS kind, s.photo_count AS photo_count, \
                 (SELECT p2.rel_path FROM photo_tags t2 JOIN photo_assets p2 ON p2.id = t2.photo_id \
-                  WHERE t2.tag = t.tag AND t2.kind = t.kind AND p2.status = 'ok'{} \
+                  WHERE t2.tag = s.tag AND t2.kind = s.kind AND p2.status = 'ok'{} \
                   ORDER BY COALESCE(p2.taken_at, p2.mtime) DESC LIMIT 1) AS cover_rel, \
                 (SELECT d2.name FROM photo_tags t3 JOIN photo_assets p3 ON p3.id = t3.photo_id \
                    JOIN dirs d2 ON d2.id = p3.dir_id \
-                  WHERE t3.tag = t.tag AND t3.kind = t.kind AND p3.status = 'ok'{} \
+                  WHERE t3.tag = s.tag AND t3.kind = s.kind AND p3.status = 'ok'{} \
                   ORDER BY COALESCE(p3.taken_at, p3.mtime) DESC LIMIT 1) AS cover_dir, \
                 (SELECT p5.fingerprint FROM photo_tags t5 JOIN photo_assets p5 ON p5.id = t5.photo_id \
-                  WHERE t5.tag = t.tag AND t5.kind = t.kind AND p5.status = 'ok'{} \
+                  WHERE t5.tag = s.tag AND t5.kind = s.kind AND p5.status = 'ok'{} \
                   ORDER BY COALESCE(p5.taken_at, p5.mtime) DESC LIMIT 1) AS cover_fp \
-         FROM photo_tags t JOIN photo_assets p ON p.id = t.photo_id \
-         WHERE p.status = 'ok'{} \
-         GROUP BY t.kind, t.tag ORDER BY photo_count DESC, t.tag",
-        cover_rel_album, cover_dir_album, cover_fp_album, clause
+         FROM ({page_sql}) s ORDER BY s.photo_count DESC, s.tag, s.kind",
+        cover_rel_album, cover_dir_album, cover_fp_album
     );
-    let rows = sqlx::query(&sql).fetch_all(db).await?;
-    let mut out = Vec::new();
+
+    let mut q = sqlx::query(&sql);
+    // 绑定顺序 == `?` 在文本里出现的顺序。封面那三段子查询写在最外层 SELECT 里、
+    // 却没有占位符（它们靠 `s.tag` / `s.kind` 相关），所以这里的六个 `?` 全是
+    // 子查询 WHERE 里的。
+    if let Some((count, tag, kind)) = &p.after {
+        q = q
+            .bind(*count)
+            .bind(*count)
+            .bind(tag.clone())
+            .bind(*count)
+            .bind(tag.clone())
+            .bind(kind.clone());
+    }
+    let rows = q.fetch_all(db).await?;
+
+    let mut tags = Vec::with_capacity(rows.len());
     for row in rows {
         let cover_rel: Option<String> = row.try_get("cover_rel").ok().flatten();
         let cover_dir: Option<String> = row.try_get("cover_dir").ok().flatten();
         let cover_fp: Option<String> = row.try_get("cover_fp").ok().flatten();
-        out.push(TagSummary {
+        tags.push(TagSummary {
             tag: row.try_get("tag")?,
             kind: row.try_get("kind")?,
             photo_count: row.try_get("photo_count")?,
@@ -665,15 +778,55 @@ pub async fn tag_summary(db: &Db, registry: &DirRegistry) -> Result<Vec<TagSumma
                 .map(|(rel, dir)| thumb_url(&dir, &rel, cover_fp.as_deref().unwrap_or(""))),
         });
     }
-    Ok(out)
+
+    let has_more = match p.limit {
+        Some(n) => tags.len() as i64 > n,
+        None => false,
+    };
+    if let Some(n) = p.limit {
+        tags.truncate(n as usize);
+    }
+    let next_after = match p.limit {
+        Some(_) => tags
+            .last()
+            .map(|t| (t.photo_count, t.tag.clone(), t.kind.clone())),
+        None => None,
+    };
+    Ok(TagPage {
+        tags,
+        has_more,
+        next_after,
+    })
 }
 
-pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSummary>> {
+#[derive(Debug, Clone, Default)]
+pub struct PersonParams {
+    /// 本页最多返回多少条。**`None` = 一次返回全部**。
+    pub limit: Option<i64>,
+    /// 上一页最后一行的 `(photo_count, id)`；`id` 在 person_groups 里唯一，
+    /// 所以这个二元组足够定序，不像标签那样还要带上 kind。
+    pub after: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PersonPage {
+    pub people: Vec<PersonGroupSummary>,
+    pub has_more: bool,
+    pub next_after: Option<(i64, i64)>,
+}
+
+pub async fn people(
+    db: &Db,
+    registry: &DirRegistry,
+    p: &PersonParams,
+) -> Result<PersonPage> {
     let albums = registry.album_dirs();
     let ids: Vec<String> = albums.iter().map(|d| d.id.to_string()).collect();
     let in_clause = if ids.is_empty() { "0".into() } else { ids.join(",") };
 
-    let sql = format!(
+    // 四个相关子查询都留在这里 —— 人物组一共一百多行（标签是它的四倍），
+    // 分页在这里主要是为了让响应体变小，不是为了省这点聚合。
+    let base = format!(
         "SELECT g.id AS id, g.name AS name, \
                 (SELECT COUNT(*) FROM faces f WHERE f.group_id = g.id) AS face_count, \
                 (SELECT COUNT(DISTINCT f2.photo_id) FROM faces f2 JOIN photo_assets p2 ON p2.id = f2.photo_id \
@@ -688,11 +841,29 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
                 (SELECT p5.fingerprint FROM faces f5 JOIN photo_assets p5 ON p5.id = f5.photo_id \
                    WHERE f5.group_id = g.id AND p5.status = 'ok' AND p5.dir_id IN ({ids}) \
                    ORDER BY COALESCE(p5.taken_at, p5.mtime) DESC LIMIT 1) AS cover_fp \
-         FROM person_groups g ORDER BY photo_count DESC, g.id",
+         FROM person_groups g",
         ids = in_clause
     );
-    let rows = sqlx::query(&sql).fetch_all(db).await?;
-    let mut out = Vec::new();
+
+    let limit_sql = match p.limit {
+        Some(n) => format!(" LIMIT {}", n + 1),
+        None => String::new(),
+    };
+    let sql = match p.after {
+        Some(_) => format!(
+            "SELECT * FROM ({base}) WHERE (photo_count < ? OR (photo_count = ? AND id > ?)) \
+             ORDER BY photo_count DESC, id{limit_sql}"
+        ),
+        None => format!("SELECT * FROM ({base}) ORDER BY photo_count DESC, id{limit_sql}"),
+    };
+
+    let mut q = sqlx::query(&sql);
+    if let Some((count, id)) = p.after {
+        q = q.bind(count).bind(count).bind(id);
+    }
+    let rows = q.fetch_all(db).await?;
+
+    let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let cover_rel: Option<String> = row.try_get("cover_rel").ok().flatten();
         let cover_dir: Option<String> = row.try_get("cover_dir").ok().flatten();
@@ -707,7 +878,23 @@ pub async fn people(db: &Db, registry: &DirRegistry) -> Result<Vec<PersonGroupSu
                 .map(|(rel, dir)| thumb_url(&dir, &rel, cover_fp.as_deref().unwrap_or(""))),
         });
     }
-    Ok(out)
+
+    let has_more = match p.limit {
+        Some(n) => out.len() as i64 > n,
+        None => false,
+    };
+    if let Some(n) = p.limit {
+        out.truncate(n as usize);
+    }
+    let next_after = match p.limit {
+        Some(_) => out.last().map(|p| (p.photo_count, p.id)),
+        None => None,
+    };
+    Ok(PersonPage {
+        people: out,
+        has_more,
+        next_after,
+    })
 }
 
 /// Aggregated geo clusters (grid size in degrees).
@@ -1452,5 +1639,323 @@ mod timeline_tests {
         let jan = local_midnight(Granularity::Year.bucket_start(d));
         let dec = local_midnight(Granularity::Month.bucket_start(d));
         assert!(jan < dec);
+    }
+}
+
+/// 分类 / 人物 / 筛选照片列表的分页。
+///
+/// 三条路径共一个坑：**排序键必须唯一**。标签的 `(photo_count, tag)` 不够 ——
+/// 同一个 tag 会以 object / scene 两种 kind 出现；人物的 `photo_count` 不够 ——
+/// 并列得拿 id 破；照片的 `taken_at` 不够 —— 连拍同秒好几张。任何一处漏了，
+/// 游标都会在并列处漏行或重复，而且**是静默的**：页数看着正常，只少东西。
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    fn at(y: i32, m: u32, d: u32, h: u32) -> i64 {
+        local_midnight(chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()) + h as i64 * 3600
+    }
+
+    async fn empty_library() -> (Db, DirRegistry) {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        sqlx::migrate!("./migrations")
+            .run(&db)
+            .await
+            .expect("run migrations");
+        let config: crate::config::Config = serde_yaml::from_str(
+            "dirs:\n  - name: photos\n    path: /tmp/homehub-test-photos\n    marks: [album]\n",
+        )
+        .expect("parse config");
+        let registry = DirRegistry::bootstrap(db.clone(), &config)
+            .await
+            .expect("bootstrap registry");
+        (db, registry)
+    }
+
+    async fn add_photo(db: &Db, registry: &DirRegistry, taken: i64, path: &str) -> i64 {
+        let dir_id = registry.by_name("photos").expect("dir").id;
+        sqlx::query(
+            "INSERT INTO photo_assets \
+                (dir_id, rel_path, fingerprint, size, mtime, taken_at, status, compressed, \
+                 media_kind, created_at, updated_at) \
+             VALUES (?, ?, '', 1, ?, ?, 'ok', 0, 'photo', 0, 0)",
+        )
+        .bind(dir_id)
+        .bind(path)
+        .bind(taken)
+        .bind(taken)
+        .execute(db)
+        .await
+        .expect("insert photo")
+        .last_insert_rowid()
+    }
+
+    async fn tag(db: &Db, photo_id: i64, tag: &str, kind: &str) {
+        sqlx::query(
+            "INSERT INTO photo_tags (photo_id, tag, kind, confidence) VALUES (?, ?, ?, 1.0)",
+        )
+        .bind(photo_id)
+        .bind(tag)
+        .bind(kind)
+        .execute(db)
+        .await
+        .expect("insert tag");
+    }
+
+    async fn person(db: &Db, name: &str) -> i64 {
+        sqlx::query("INSERT INTO person_groups (name, created_at) VALUES (?, 0)")
+            .bind(name)
+            .execute(db)
+            .await
+            .expect("insert person")
+            .last_insert_rowid()
+    }
+
+    async fn face(db: &Db, photo_id: i64, group_id: i64) {
+        sqlx::query(
+            "INSERT INTO faces (photo_id, box_x, box_y, box_w, box_h, group_id, created_at) \
+             VALUES (?, 0, 0, 1, 1, ?, 0)",
+        )
+        .bind(photo_id)
+        .bind(group_id)
+        .execute(db)
+        .await
+        .expect("insert face");
+    }
+
+    /// 30 张照片，外加一批刻意造出并列的标签。
+    async fn tag_library() -> (Db, DirRegistry, Vec<i64>) {
+        let (db, registry) = empty_library().await;
+        let mut ids = Vec::new();
+        for i in 0..30 {
+            ids.push(
+                add_photo(
+                    &db,
+                    &registry,
+                    at(2026, 10, 1, 10) + i as i64,
+                    &format!("p{i:02}.jpg"),
+                )
+                .await,
+            );
+        }
+        // 30 个计数都是 1 的标签：光靠 photo_count 完全并列。
+        for (i, id) in ids.iter().enumerate() {
+            tag(&db, *id, &format!("solo{i:02}"), "object").await;
+        }
+        // 同名跨 kind、计数也相同 —— 只按 (photo_count, tag) 定序时这两行并列，
+        // 游标会从那两行之间漏掉一行。
+        tag(&db, ids[0], "dup", "object").await;
+        tag(&db, ids[1], "dup", "object").await;
+        tag(&db, ids[2], "dup", "scene").await;
+        tag(&db, ids[3], "dup", "scene").await;
+        // 一个计数最大的标签，保证第一页不是并列区。
+        for id in ids.iter().take(10) {
+            tag(&db, *id, "pop", "object").await;
+        }
+        (db, registry, ids)
+    }
+
+    #[tokio::test]
+    async fn tag_pages_never_lose_or_repeat_a_tied_tag() {
+        let (db, registry, _) = tag_library().await;
+
+        let all = tag_summary(&db, &registry, &TagParams::default())
+            .await
+            .expect("all tags")
+            .tags;
+        assert_eq!(all.len(), 33, "30 solo + dup(object) + dup(scene) + pop");
+        assert!(
+            all.iter().all(|t| t.cover_url.is_some()),
+            "封面在改成分页后被弄丢了 —— 三层查询的最外层没接上"
+        );
+        let want: Vec<(String, String)> =
+            all.iter().map(|t| (t.tag.clone(), t.kind.clone())).collect();
+
+        for per_page in [1, 2, 3, 5, 7, 16, 33] {
+            let mut got: Vec<(String, String)> = Vec::new();
+            let mut after = None;
+            let mut pages = 0;
+            loop {
+                let page = tag_summary(
+                    &db,
+                    &registry,
+                    &TagParams {
+                        limit: Some(per_page),
+                        after,
+                    },
+                )
+                .await
+                .expect("tag page");
+                pages += 1;
+                assert!(pages < 100, "per_page={per_page} 没有终止");
+                got.extend(page.tags.iter().map(|t| (t.tag.clone(), t.kind.clone())));
+                if !page.has_more {
+                    break;
+                }
+                after = page.next_after;
+                assert!(after.is_some(), "per_page={per_page} 说还有下一页却没给游标");
+            }
+            assert_eq!(got, want, "per_page={per_page} 漏了或重复了标签");
+        }
+    }
+
+    #[tokio::test]
+    async fn person_pages_never_lose_or_repeat_a_tied_person() {
+        let (db, registry) = empty_library().await;
+        let mut ids = Vec::new();
+        for i in 0..30 {
+            ids.push(
+                add_photo(
+                    &db,
+                    &registry,
+                    at(2026, 10, 1, 10) + i as i64,
+                    &format!("p{i:02}.jpg"),
+                )
+                .await,
+            );
+        }
+        // 25 个人物：前 5 个各 2 张、其余各 1 张 —— 两段内部都完全并列，
+        // 只有 id 能破。
+        for g in 0..25usize {
+            let who = person(&db, &format!("p{g:02}")).await;
+            let n = if g < 5 { 2 } else { 1 };
+            for k in 0..n {
+                face(&db, ids[(g + k) % ids.len()], who).await;
+            }
+        }
+
+        let all = people(&db, &registry, &PersonParams::default())
+            .await
+            .expect("all people")
+            .people;
+        assert_eq!(all.len(), 25);
+        let want: Vec<i64> = all.iter().map(|p| p.id).collect();
+
+        for per_page in [1, 2, 3, 7, 25] {
+            let mut got = Vec::new();
+            let mut after = None;
+            let mut pages = 0;
+            loop {
+                let page = people(
+                    &db,
+                    &registry,
+                    &PersonParams {
+                        limit: Some(per_page),
+                        after,
+                    },
+                )
+                .await
+                .expect("person page");
+                pages += 1;
+                assert!(pages < 100, "per_page={per_page} 没有终止");
+                got.extend(page.people.iter().map(|p| p.id));
+                if !page.has_more {
+                    break;
+                }
+                after = page.next_after;
+                assert!(after.is_some(), "per_page={per_page} 说还有下一页却没给游标");
+            }
+            assert_eq!(got, want, "per_page={per_page} 漏了或重复了人物");
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_photo_pages_cover_a_burst_exactly_once() {
+        let (db, registry) = empty_library().await;
+        // 同秒 5 张 —— 游标只比时间就会在同秒处静默漏照片。
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            ids.push(add_photo(&db, &registry, at(2026, 10, 1, 10), &format!("burst-{i}.jpg")).await);
+        }
+        for i in 0..4 {
+            ids.push(
+                add_photo(&db, &registry, at(2026, 9, 30, 8) + i as i64, &format!("old-{i}.jpg"))
+                    .await,
+            );
+        }
+        for id in &ids {
+            tag(&db, *id, "pop", "object").await;
+        }
+        // 跟连拍同一秒、但没打这个标签：分页必须完全不看它。
+        add_photo(&db, &registry, at(2026, 10, 1, 10), "outsider.jpg").await;
+
+        // 期望顺序 == 一次不分页的 `ORDER BY taken_at DESC, id DESC`。
+        let mut want = vec![ids[4], ids[3], ids[2], ids[1], ids[0]];
+        want.extend([ids[8], ids[7], ids[6], ids[5]]);
+
+        for per_page in [1, 2, 4, 5, 9] {
+            let mut got = Vec::new();
+            let mut before = None;
+            let mut pages = 0;
+            loop {
+                let page = list(
+                    &db,
+                    &registry,
+                    &PhotoQuery {
+                        tag: Some("pop".into()),
+                        limit: per_page,
+                        offset: 0,
+                        before,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("photo page");
+                pages += 1;
+                assert!(pages < 100, "per_page={per_page} 没有终止");
+                assert_eq!(
+                    page.total, 9,
+                    "total 必须是整个筛选结果，不是这一页 —— 否则每页都说「一共 9 张」"
+                );
+                got.extend(page.items.iter().map(|p| p.id));
+                if !page.has_more {
+                    break;
+                }
+                before = page.next_before;
+                assert!(before.is_some(), "per_page={per_page} 说还有下一页却没给游标");
+            }
+            assert_eq!(got, want, "per_page={per_page} 漏了或重复了照片");
+        }
+    }
+
+    #[tokio::test]
+    async fn first_page_without_a_cursor_still_reports_has_more() {
+        let (db, registry, _) = tag_library().await;
+        let page = list(
+            &db,
+            &registry,
+            &PhotoQuery {
+                tag: Some("pop".into()),
+                limit: 3,
+                offset: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first page");
+        assert_eq!(page.items.len(), 3, "多取的那一行必须被截掉");
+        assert!(page.has_more, "明明还有 7 张，却说不分页了");
+        assert_eq!(page.total, 10);
+
+        // 老路子（offset）不受影响：调用方拿到的还是它要的条数。
+        let legacy = list(
+            &db,
+            &registry,
+            &PhotoQuery {
+                tag: Some("pop".into()),
+                limit: 2,
+                offset: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("offset page");
+        assert_eq!(legacy.items.len(), 2);
+        assert_eq!(legacy.items[0].id, page.items[2].id);
     }
 }

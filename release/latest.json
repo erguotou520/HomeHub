@@ -1,34 +1,34 @@
 {
-  "versionName": "1.0.3",
-  "versionCode": 10003,
-  "tag": "v1.0.3",
-  "releaseUrl": "https://github.com/erguotou520/HomeHub/releases/tag/v1.0.3",
+  "versionName": "1.0.4",
+  "versionCode": 10004,
+  "tag": "v1.0.4",
+  "releaseUrl": "https://github.com/erguotou520/HomeHub/releases/tag/v1.0.4",
   "apk": {
-    "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.3/homehub-1.0.3.apk",
-    "size": 99238501,
-    "sha256": "9238cb855b9895e583b6237707576d352d7ab6bd768ba5fd5a5f8df91549d8d4"
+    "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.4/homehub-1.0.4.apk",
+    "size": 99271273,
+    "sha256": "1c42ddf421ff34686b771f474e1f835932ef7aae013a0c86d36f979603970c9b"
   },
   "deltas": [
     {
+      "fromVersionCode": 10003,
+      "fromSha256": "9238cb855b9895e583b6237707576d352d7ab6bd768ba5fd5a5f8df91549d8d4",
+      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.4/homehub-10003-to-10004.patch",
+      "size": 739733,
+      "sha256": "e412bd9fbf47531ad68744cd501150b977f32bb667d8791b780fca4d7f98ce8d"
+    },
+    {
       "fromVersionCode": 10002,
       "fromSha256": "45b6aa573581f767b2391e46c71a8c19611cfef2598b3de70c4ec0dbcde962c1",
-      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.3/homehub-10002-to-10003.patch",
-      "size": 811852,
-      "sha256": "da446eb24d556314d47b99ca870fcc7619c604635b90a6cee41d44cc0a3b6934"
+      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.4/homehub-10002-to-10004.patch",
+      "size": 872430,
+      "sha256": "58a60ddfe94f8bfc6e6da8f6440c23cdff5c3d0e83c0a15bf9f1a3a7ebaadd67"
     },
     {
       "fromVersionCode": 10001,
       "fromSha256": "8a7584368349d5fc1f1bb1db3f1737563b586f3e5272c5506d6e3bb379d644be",
-      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.3/homehub-10001-to-10003.patch",
-      "size": 814584,
-      "sha256": "511e6aa32a59f42d32202bf6c007cf8519c5f6dcb4d76aa467a70c2f5539b14e"
-    },
-    {
-      "fromVersionCode": 10000,
-      "fromSha256": "b1526fd1199145e1ff797188295bfcd2546fe971e03f643279bffb39ab7522d1",
-      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.3/homehub-10000-to-10003.patch",
-      "size": 787662,
-      "sha256": "b3baa5a80b4c032765d74a7d76d77fcae58e4b7cf378951738688ed26aaa2aa7"
+      "url": "https://github.com/erguotou520/HomeHub/releases/download/v1.0.4/homehub-10001-to-10004.patch",
+      "size": 872067,
+      "sha256": "a4dc2aeab31270e31e5399ac55ae6f9415ad2255157113e91913e642afe44d11"
     }
   ]
 }

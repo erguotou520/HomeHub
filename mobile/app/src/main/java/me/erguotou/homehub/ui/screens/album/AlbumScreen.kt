@@ -278,6 +278,7 @@ fun AlbumScreen(
                             stack = state.treeStack,
                             folders = state.treeFolders,
                             photos = state.treePhotos,
+                            paging = state.treePaging,
                             urlResolver = vm::url,
                             onOpenFolder = { vm.treeEnter(it) },
                             onGoUp = { vm.treeUp() },
@@ -286,7 +287,8 @@ fun AlbumScreen(
                                 viewerList = list
                                 viewerPhoto = photo
                             },
-                            onLongClick = { menuPhoto = it }
+                            onLongClick = { menuPhoto = it },
+                            onLoadMore = { vm.loadTreePhotosMore() }
                         )
                         AlbumView.TAGS -> TagList(
                             tags = state.tags,
@@ -634,6 +636,12 @@ private fun ListFooter(
  * folder on the server. A rightward drag anywhere in the list goes up a level
  * too.
  *
+ * The level comes from the server ([Repository.treeLevel]) rather than being
+ * folded out of a whole-library response: the folders directly below, plus the
+ * photos sitting in this one, paged. The old call shipped every photo in the
+ * library to render what is usually a single row — 3.2 MB and 3 s on the real
+ * library, for a first screen that needs one line of JSON.
+ *
  * The breadcrumb starts with a Home icon (back to 全部目录); each segment
  * jumps straight to that level. It scrolls horizontally so deep paths stay
  * reachable instead of being ellipsised away.
@@ -643,12 +651,14 @@ private fun FolderBrowser(
     stack: List<TreeNode>,
     folders: List<TreeNode>,
     photos: List<PhotoItem>,
+    paging: Paging,
     urlResolver: (String) -> String,
     onOpenFolder: (TreeNode) -> Unit,
     onGoUp: () -> Unit,
     onJumpTo: (Int) -> Unit,
     onOpenPhoto: (PhotoItem, List<PhotoItem>) -> Unit,
-    onLongClick: (PhotoItem) -> Unit
+    onLongClick: (PhotoItem) -> Unit,
+    onLoadMore: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -706,7 +716,10 @@ private fun FolderBrowser(
             return@Column
         }
 
+        val gridState = rememberLazyGridState()
+        PrefetchNextPage(gridState, paging.hasMore, onLoadMore)
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Fixed(3),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -722,7 +735,7 @@ private fun FolderBrowser(
                     )
                 }
         ) {
-            items(folders, key = { "d:${it.dirName}/${it.path}" }, span = { GridItemSpan(maxLineSpan) }) { node ->
+            items(folders, key = { "d:${it.dirId}/${it.path}" }, span = { GridItemSpan(maxLineSpan) }) { node ->
                 FolderRow(node) { onOpenFolder(node) }
             }
             items(photos, key = { it.id }) { photo ->
@@ -732,6 +745,9 @@ private fun FolderBrowser(
                     onClick = { onOpenPhoto(photo, photos) },
                     onLongClick = { onLongClick(photo) }
                 )
+            }
+            item(key = "tree-footer", span = { GridItemSpan(maxLineSpan) }) {
+                ListFooter(paging, atEnd = !paging.hasMore, onRetry = onLoadMore)
             }
         }
     }

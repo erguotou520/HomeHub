@@ -36,8 +36,21 @@ interface ApiService {
         @Query("before_id") beforeId: Long? = null
     ): TimelineResponse
 
+    /**
+     * 目录视图的一层。
+     *
+     * 服务端「带 `limit` 即按层浏览、不带即整库一把拉」，这里固定带 `limit`。
+     * `before` / `before_id` 是这一层照片的游标（上一页最后一张的 `(taken_at, id)`），
+     * 与 `/api/photos/list` 同一个形状。
+     */
     @GET("api/photos/tree")
-    suspend fun tree(@Query("dir_id") dirId: Long? = null): TreeResponse
+    suspend fun treeLevel(
+        @Query("dir_id") dirId: Long? = null,
+        @Query("path") path: String? = null,
+        @Query("limit") limit: Int,
+        @Query("before") before: Long? = null,
+        @Query("before_id") beforeId: Long? = null
+    ): TreeLevelResponse
 
     /** 分类列表。带 `limit` 即分页；`after_*` 是上一页的游标（要么都给要么都不给）。 */
     @GET("api/photos/tags")

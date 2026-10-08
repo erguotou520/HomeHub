@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import me.erguotou.homehub.data.FolderNode
 import me.erguotou.homehub.data.GeoPoint
 import me.erguotou.homehub.data.ImageOp
 import me.erguotou.homehub.data.PersonCursor
@@ -17,7 +18,6 @@ import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.data.TagCursor
 import me.erguotou.homehub.data.TagSummary
 import me.erguotou.homehub.data.TimelineGroup
-import me.erguotou.homehub.data.TreeGroup
 import java.util.Locale
 
 enum class AlbumView { TIMELINE, TREE, TAGS, PEOPLE, GEO }
@@ -35,11 +35,13 @@ private const val TIMELINE_GROUP = "day"
 /**
  * One level of the 目录 drill-down.
  *
- * The server's `tree` listing is flat — each [TreeGroup] is keyed by
- * (dir_name, folder-path-inside-that-dir) — so the hierarchy is rebuilt here
- * rather than adding another endpoint. [path] "" means the dir's own root.
+ * Every level is a round trip now: the server answers with the folders directly
+ * below it plus the photos sitting in it (see [Repository.treeLevel]). [dirId]
+ * and [path] are exactly what that request needs back — the breadcrumb keeps
+ * them so a jump to an earlier level can ask for it again.
  */
 data class TreeNode(
+    val dirId: Long,
     val label: String,
     val dirName: String,
     val path: String,
@@ -82,7 +84,11 @@ data class AlbumUiState(
     val kind: MediaKind = MediaKind.ALL,
     val groups: List<TimelineGroup> = emptyList(),
     val timelinePaging: Paging = Paging(),
-    val trees: List<TreeGroup> = emptyList(),
+    /** 目录视图当前这一层的子文件夹（服务端算好，含各自聚合计数）。 */
+    val treeFolders: List<TreeNode> = emptyList(),
+    /** 目录视图当前这一层**直属**的照片（不含子文件夹里的），分页追加。 */
+    val treePhotos: List<PhotoItem> = emptyList(),
+    val treePaging: Paging = Paging(),
     val tags: List<TagSummary> = emptyList(),
     val tagPaging: Paging = Paging(),
     val people: List<PersonGroup> = emptyList(),
@@ -94,12 +100,6 @@ data class AlbumUiState(
     /** Breadcrumb of the 目录 view; empty = the list of album dirs. */
     val treeStack: List<TreeNode> = emptyList()
 ) {
-    /** Child folders of the current 目录 level. */
-    val treeFolders: List<TreeNode> get() = childrenOf(trees, treeStack)
-
-    /** Photos that sit directly in the current 目录 level. */
-    val treePhotos: List<PhotoItem> get() = photosAt(trees, treeStack)
-
     /**
      * 当前视图（含筛选态）手上是否已经有能显示的东西。
      *
@@ -117,7 +117,7 @@ data class AlbumUiState(
             if (activeFilter != null) return filtered.isNotEmpty()
             return when (view) {
                 AlbumView.TIMELINE -> groups.isNotEmpty()
-                AlbumView.TREE -> trees.isNotEmpty()
+                AlbumView.TREE -> treeFolders.isNotEmpty() || treePhotos.isNotEmpty()
                 AlbumView.TAGS -> tags.isNotEmpty()
                 AlbumView.PEOPLE -> people.isNotEmpty()
                 AlbumView.GEO -> points.isNotEmpty()
@@ -145,38 +145,20 @@ fun mergeTimeline(loaded: List<TimelineGroup>, page: List<TimelineGroup>): List<
 }
 
 /**
- * Folders one level below [stack].
+ * 服务端给的文件夹清单换成界面用的节点。
  *
- * With an empty stack this is the list of configured album dirs; otherwise the
- * direct child folders of `stack.last()`. A folder's count aggregates every
- * photo at or below it, so the number stays meaningful before drilling in.
+ * 层级不再由客户端从「整库结构」里折出来 —— 那次折叠正是要拿到全量数据的原因，
+ * 而全量数据是真库上 3.2 MB 的响应。现在每一层都由服务端算好（[FolderNode.count]
+ * 也已经聚合到子文件夹），这里只做一次搬家。
  */
-private fun childrenOf(trees: List<TreeGroup>, stack: List<TreeNode>): List<TreeNode> {
-    if (stack.isEmpty()) {
-        return trees.groupBy { it.dirName }
-            .map { (dir, groups) ->
-                TreeNode(dir, dir, "", groups.sumOf { it.count.toInt() })
-            }
-            .sortedBy { it.label }
-    }
-    val cur = stack.last()
-    val prefix = if (cur.path.isEmpty()) "" else cur.path + "/"
-    val counts = linkedMapOf<String, Int>()
-    trees.filter { it.dirName == cur.dirName && it.path.startsWith(prefix) && it.path != cur.path }
-        .forEach { group ->
-            val segment = group.path.removePrefix(prefix).substringBefore('/')
-            if (segment.isNotEmpty()) counts[segment] = (counts[segment] ?: 0) + group.count.toInt()
-        }
-    return counts.map { (segment, count) ->
-        TreeNode(segment, cur.dirName, if (cur.path.isEmpty()) segment else "${cur.path}/$segment", count)
-    }
-}
-
-/** Photos stored directly in the current 目录 level. */
-private fun photosAt(trees: List<TreeGroup>, stack: List<TreeNode>): List<PhotoItem> {
-    if (stack.isEmpty()) return emptyList()
-    val cur = stack.last()
-    return trees.firstOrNull { it.dirName == cur.dirName && it.path == cur.path }?.items ?: emptyList()
+private fun List<FolderNode>.toTreeNodes(): List<TreeNode> = map {
+    TreeNode(
+        dirId = it.dirId,
+        label = it.name,
+        dirName = it.dirName,
+        path = it.path,
+        count = it.count.toInt()
+    )
 }
 
 class AlbumViewModel(app: Application) : AndroidViewModel(app) {
@@ -191,6 +173,8 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
     private var tagCursor: TagCursor? = null
     private var personCursor: PersonCursor? = null
     private var filterCursor: Pair<Long, Long>? = null
+    /** 目录视图当前这一层照片的游标，`(taken_at, id)`，与筛选同一个形状。 */
+    private var treeCursor: Pair<Long, Long>? = null
 
     /**
      * 当前筛选怎么取下一页。
@@ -222,7 +206,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         filterFetch = null
         when (view) {
             AlbumView.TIMELINE -> loadTimeline()
-            AlbumView.TREE -> loadTree()
+            AlbumView.TREE -> loadTreeLevel()
             AlbumView.TAGS -> loadTags()
             AlbumView.PEOPLE -> loadPeople()
             AlbumView.GEO -> loadGeo()
@@ -452,10 +436,89 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadTree() = load(
-        block = { repository.tree() },
-        apply = { _state.value = _state.value.copy(trees = it) }
-    )
+    /**
+     * 取「目录」当前这一层：子文件夹 + 直属照片的首页。
+     *
+     * 不复用 [load]，理由与 [loadTimeline] 一样 —— 它必须在请求出发**之前**丢掉
+     * 上一个游标，否则慢一拍的那次「上一层续页」会把别层的照片追到这一层后面。
+     *
+     * 换层时把 [AlbumUiState.treeFolders] / [AlbumUiState.treePhotos] 一并清空：
+     * 钻一层是换一份数据集，不是切视图，留着上一层的缩略图会让人以为没点动。
+     * `loading` 在协程外就置上，所以屏幕直接交给全屏 spinner，不闪空状态。
+     */
+    private fun loadTreeLevel() {
+        val generation = ++listGeneration
+        val cur = _state.value.treeStack.lastOrNull()
+        treeCursor = null
+        _state.value = _state.value.copy(
+            loading = true,
+            error = null,
+            treeFolders = emptyList(),
+            treePhotos = emptyList(),
+            treePaging = Paging()
+        )
+        viewModelScope.launch {
+            val result = repository.treeLevel(cur?.dirId, cur?.path.orEmpty())
+            if (generation != listGeneration) return@launch
+            result.fold(
+                onSuccess = { page ->
+                    treeCursor = page.photos.cursor
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        treeFolders = page.folders.toTreeNodes(),
+                        treePhotos = page.photos.items,
+                        treePaging = pagingFrom(page.photos.hasMore, page.photos.cursor)
+                    )
+                },
+                onFailure = { e ->
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        error = e.message ?: e.javaClass.simpleName
+                    )
+                }
+            )
+        }
+    }
+
+    /**
+     * 续拉目录视图这一层的照片。
+     *
+     * 与其它 `load*More` 同一套规矩：只在该视图可见、没有页在飞、服务端确实说了
+     * 还有下一页时才动手；失败时已经上屏的照片留在原地，底部换成「点击重试」。
+     */
+    fun loadTreePhotosMore() {
+        val current = _state.value
+        val paging = current.treePaging
+        if (current.loading || paging.loadingMore || !paging.hasMore) return
+        if (current.view != AlbumView.TREE || current.activeFilter != null) return
+        val from = treeCursor ?: return
+        val cur = current.treeStack.lastOrNull() ?: return
+        val generation = listGeneration
+        _state.value = current.copy(treePaging = paging.copy(loadingMore = true, error = null))
+        viewModelScope.launch {
+            val result = repository.treeLevel(cur.dirId, cur.path, from)
+            if (generation != listGeneration) return@launch
+            result.fold(
+                onSuccess = { page ->
+                    page.photos.cursor?.let { treeCursor = it }
+                    val state = _state.value
+                    // 续页只为照片而来；即便服务端多给了文件夹清单也不再塞一遍。
+                    _state.value = state.copy(
+                        treePhotos = state.treePhotos + page.photos.items,
+                        treePaging = pagingFrom(page.photos.hasMore, page.photos.cursor)
+                    )
+                },
+                onFailure = { e ->
+                    _state.value = _state.value.copy(
+                        treePaging = _state.value.treePaging.copy(
+                            loadingMore = false,
+                            error = e.message ?: e.javaClass.simpleName
+                        )
+                    )
+                }
+            )
+        }
+    }
 
     private fun loadTags() = load(
         block = { repository.tagsPage() },
@@ -487,6 +550,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
     /** Drill into a folder in the 目录 view. */
     fun treeEnter(node: TreeNode) {
         _state.value = _state.value.copy(treeStack = _state.value.treeStack + node)
+        loadTreeLevel()
     }
 
     /** Go up one folder. Returns false when already at the top level. */
@@ -494,6 +558,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         val stack = _state.value.treeStack
         if (stack.isEmpty()) return false
         _state.value = _state.value.copy(treeStack = stack.dropLast(1))
+        loadTreeLevel()
         return true
     }
 
@@ -506,6 +571,7 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(
             treeStack = if (index < 0) emptyList() else stack.take(index + 1)
         )
+        loadTreeLevel()
     }
 
     /**
@@ -538,10 +604,6 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
 
     fun filterByPerson(id: Long, name: String?) = setFilter(name ?: "人物 #$id") { before ->
         repository.photos(personId = id, before = before)
-    }
-
-    fun filterByTree(group: TreeGroup) = setFilter("${group.dirName}/${group.path}") { before ->
-        repository.photos(dirId = group.dirId, before = before)
     }
 
     /** Drill into one map cluster: the server filters by the cluster's ids. */

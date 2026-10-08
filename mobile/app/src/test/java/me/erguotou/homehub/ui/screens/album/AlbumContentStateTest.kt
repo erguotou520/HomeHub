@@ -5,7 +5,6 @@ import me.erguotou.homehub.data.PersonGroup
 import me.erguotou.homehub.data.PhotoItem
 import me.erguotou.homehub.data.TagSummary
 import me.erguotou.homehub.data.TimelineGroup
-import me.erguotou.homehub.data.TreeGroup
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -35,7 +34,9 @@ class AlbumContentStateTest {
         TimelineGroup(key = "2026-10-08", label = "10月8日", year = 2026, month = 10, count = 1, items = listOf(photo(1)))
     )
     private val tags = listOf(TagSummary(tag = "猫", kind = "object", photoCount = 3))
-    private val trees = listOf(TreeGroup(dirId = 1, dirName = "photos", path = "", count = 1, items = listOf(photo(1))))
+    private val treeFolders = listOf(
+        TreeNode(dirId = 1, label = "photos", dirName = "photos", path = "", count = 1)
+    )
     private val people = listOf(PersonGroup(id = 7, name = "小明", photoCount = 2))
     private val points = listOf(GeoPoint(lat = 31.2, lng = 121.4, count = 5, photoIds = listOf(1, 2)))
 
@@ -56,7 +57,7 @@ class AlbumContentStateTest {
             loading = true,
             groups = timeline,
             tags = tags,
-            trees = trees,
+            treeFolders = treeFolders,
             people = people,
             points = points,
         )
@@ -125,7 +126,7 @@ class AlbumContentStateTest {
         val empty = AlbumUiState(view = AlbumView.TAGS, loading = false, groups = timeline)
         assertFalse(empty.hasContent)
 
-        assertFalse(AlbumUiState(view = AlbumView.TREE, loading = false, trees = emptyList()).hasContent)
+        assertFalse(AlbumUiState(view = AlbumView.TREE, loading = false).hasContent)
         assertFalse(AlbumUiState(view = AlbumView.PEOPLE, loading = false, people = emptyList()).hasContent)
         assertFalse(AlbumUiState(view = AlbumView.GEO, loading = false, points = emptyList()).hasContent)
         assertFalse(AlbumUiState(view = AlbumView.TIMELINE, loading = false, groups = emptyList()).hasContent)
@@ -138,5 +139,34 @@ class AlbumContentStateTest {
     @Test
     fun `初始态没有内容`() {
         assertFalse(AlbumUiState().hasContent)
+    }
+
+    @Test
+    fun `目录层文件夹与照片任一到齐都算有内容`() {
+        // 这一层的两份数据是分开到的：先有子文件夹，照片还在路上。
+        val foldersOnly = AlbumUiState(
+            view = AlbumView.TREE,
+            loading = true,
+            treeFolders = treeFolders
+        )
+        assertTrue(foldersOnly.hasContent)
+
+        val photosOnly = AlbumUiState(
+            view = AlbumView.TREE,
+            loading = true,
+            treePhotos = listOf(photo(1))
+        )
+        assertTrue(photosOnly.hasContent)
+    }
+
+    @Test
+    fun `钻进下一层时两份旧数据都清掉，屏幕交给 spinner`() {
+        // 换层不是切视图，是换一份数据集：留着上一层的缩略图会让人以为没点动。
+        val drilling = AlbumUiState(view = AlbumView.TREE, loading = true)
+        assertFalse(drilling.hasContent)
+
+        // 数据到了（哪怕是空目录）就该落定，不能变成永远转圈。
+        val arrived = drilling.copy(loading = false, treeFolders = treeFolders)
+        assertTrue(arrived.hasContent)
     }
 }

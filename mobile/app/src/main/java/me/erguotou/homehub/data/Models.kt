@@ -46,12 +46,19 @@ data class TimelineGroup(
     val items: List<PhotoItem> = emptyList()
 )
 
-data class TreeGroup(
+/**
+ * 目录视图里一个能进入的文件夹（`/api/photos/tree?limit=…` 的一行）。
+ *
+ * [count] 是它**下面所有**照片数（含子文件夹），所以没进去也看得出大小。
+ * [path] 是它在所属目录内的相对路径，顶层（目录本身）为空串。
+ */
+data class FolderNode(
     @SerializedName("dir_id") val dirId: Long,
     @SerializedName("dir_name") val dirName: String,
-    val path: String,
-    val count: Long = 0,
-    val items: List<PhotoItem> = emptyList()
+    val path: String = "",
+    /** 展示名：顶层是目录名，其余是路径的最后一段。 */
+    val name: String,
+    val count: Long = 0
 )
 
 data class TagSummary(
@@ -276,7 +283,16 @@ data class TimelineResponse(
             return takenAt to id
         }
 }
-data class TreeResponse(val groups: List<TreeGroup> = emptyList())
+/**
+ * 目录视图的一层：能进入的子文件夹 + 就摆在这一层的照片（分页）。
+ *
+ * 不再是「整库一次性返回」——真库上那份响应是 3.2 MB / 3.0 s，而打开「目录」
+ * 首屏要的只是一行。`folders` 只在第一页有内容，续页请求只为照片而来。
+ */
+data class TreeLevelResponse(
+    val folders: List<FolderNode> = emptyList(),
+    val photos: PhotoListResponse = PhotoListResponse()
+)
 /**
  * 分类列表的一页。
  *

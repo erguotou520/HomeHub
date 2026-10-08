@@ -66,8 +66,19 @@ class Repository(private val context: Context) {
         api().timeline(group, kind, null, limit, before?.first, before?.second)
     }
 
-    suspend fun tree(dirId: Long? = null): Result<List<TreeGroup>> = runCatching {
-        api().tree(dirId).groups
+    /**
+     * 目录视图的一层。
+     *
+     * `dirId == null` 且 `path` 为空 = 顶层那份「有哪些目录」的清单，服务端只回
+     * 一行 JSON。旧的全量 `tree` 在真库上是 **3.2 MB / 3.0 s**，而首屏真正要的
+     * 只是这一行 —— 这就是「目录 tab 打开慢」的全部原因。
+     */
+    suspend fun treeLevel(
+        dirId: Long?,
+        path: String,
+        before: Pair<Long, Long>? = null
+    ): Result<TreeLevelResponse> = runCatching {
+        api().treeLevel(dirId, path, TREE_PAGE, before?.first, before?.second)
     }
 
     /**
@@ -316,5 +327,8 @@ class Repository(private val context: Context) {
 
         /** 筛选视图（分类 / 人物 / 目录 / 地点）里的照片页大小。 */
         const val FILTER_PAGE = 120
+
+        /** 目录视图一层的照片页大小，与筛选视图同一个量级。 */
+        const val TREE_PAGE = 120
     }
 }

@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -184,7 +185,10 @@ fun AlbumScreen(
         ) { padding ->
             val pullState = rememberPullToRefreshState()
             PullToRefreshBox(
-                isRefreshing = state.loading,
+                // 下拉指示器只在「已经有内容、正在刷新它」时出现。屏幕还空着的时候
+                // 全屏 spinner 已经把「在加载」说清楚了，再叠一个下拉圈就是两个圈
+                // 同时转 —— 判据与下面那道守卫用同一个 `hasContent`。
+                isRefreshing = state.loading && state.hasContent,
                 onRefresh = { vm.refresh() },
                 state = pullState,
                 modifier = Modifier.padding(padding).fillMaxSize()
@@ -246,12 +250,14 @@ fun AlbumScreen(
                         FilterHeader(state.activeFilter!!) { vm.clearFilter() }
                         PhotoGrid(
                             photos = state.filtered,
+                            paging = state.filterPaging,
                             urlResolver = vm::url,
                             onOpen = { photo, list ->
                                 viewerList = list
                                 viewerPhoto = photo
                             },
-                            onLongClick = { menuPhoto = it }
+                            onLongClick = { menuPhoto = it },
+                            onLoadMore = { vm.loadFilteredMore() }
                         )
                         return@PullToRefreshBox
                     }
@@ -259,9 +265,7 @@ fun AlbumScreen(
                     when (state.view) {
                         AlbumView.TIMELINE -> TimelineGrid(
                             groups = state.groups,
-                            hasMore = state.hasMore,
-                            loadingMore = state.loadingMore,
-                            moreError = state.moreError,
+                            paging = state.timelinePaging,
                             urlResolver = vm::url,
                             onLoadMore = { vm.loadMore() },
                             onOpen = { photo, list ->
@@ -284,10 +288,20 @@ fun AlbumScreen(
                             },
                             onLongClick = { menuPhoto = it }
                         )
-                        AlbumView.TAGS -> TagList(state.tags, vm::url, vm::filterByTag)
-                        AlbumView.PEOPLE -> PeopleList(state.people, vm::url) { p ->
-                            vm.filterByPerson(p.id, p.name)
-                        }
+                        AlbumView.TAGS -> TagList(
+                            tags = state.tags,
+                            paging = state.tagPaging,
+                            urlResolver = vm::url,
+                            onOpen = vm::filterByTag,
+                            onLoadMore = { vm.loadTagsMore() }
+                        )
+                        AlbumView.PEOPLE -> PeopleList(
+                            people = state.people,
+                            paging = state.personPaging,
+                            urlResolver = vm::url,
+                            onOpen = { p -> vm.filterByPerson(p.id, p.name) },
+                            onLoadMore = { vm.loadPeopleMore() }
+                        )
                         // 请求还在飞、points 还空着的情况上面那道守卫已经接管，
                         // 能走到这里的「空」就是接口真的返回了空。
                         AlbumView.GEO -> if (state.points.isEmpty()) {
@@ -443,18 +457,29 @@ private fun FilterHeader(filter: String, onClear: () -> Unit) {
     }
 }
 
+/**
+ * The filtered photo grid (分类 / 人物 / 目录 / 地点 drill-down).
+ *
+ * Paged like the timeline: the server used to hand back at most 300 photos and
+ * nothing ever asked for more, so the 301st was simply unreachable.
+ */
 @Composable
 private fun PhotoGrid(
     photos: List<PhotoItem>,
+    paging: Paging,
     urlResolver: (String) -> String,
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
-    onLongClick: (PhotoItem) -> Unit
+    onLongClick: (PhotoItem) -> Unit,
+    onLoadMore: () -> Unit
 ) {
     if (photos.isEmpty()) {
         Empty("没有照片")
         return
     }
+    val gridState = rememberLazyGridState()
+    PrefetchNextPage(gridState, paging.hasMore, onLoadMore)
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Adaptive(minSize = 108.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -468,6 +493,9 @@ private fun PhotoGrid(
                 onLongClick = { onLongClick(photo) }
             )
         }
+        item(key = "photo-footer", span = { GridItemSpan(maxLineSpan) }) {
+            ListFooter(paging, atEnd = !paging.hasMore, onRetry = onLoadMore)
+        }
     }
 }
 
@@ -476,7 +504,39 @@ private fun PhotoGrid(
  * request is in flight before the user reaches the footer, small enough that it
  * is not fired while the first screen is still being looked at.
  */
-private const val TIMELINE_PREFETCH_ROWS = 8
+private const val PREFETCH_ROWS = 8
+
+/**
+ * 滚到离末尾 [PREFETCH_ROWS] 行时叫一次 [onLoadMore]。
+ *
+ * 四条分页列表（时间轴 / 分类 / 人物 / 筛选后的照片）共用它：它们的触发条件
+ * 本来就该一致，各写一份迟早会漂。
+ *
+ * 触发条件里带上条目总数（`totalItems`）是必须的：一页填不满屏幕时 `nearEnd`
+ * 会一直为真，只认 `nearEnd` 的话，第二页之后再也无人举手。[onLoadMore] 自己
+ * 会拒绝叠加请求。
+ */
+@Composable
+private fun PrefetchNextPage(
+    gridState: LazyGridState,
+    hasMore: Boolean,
+    onLoadMore: () -> Unit
+) {
+    val nearEnd by remember(gridState) {
+        derivedStateOf {
+            val info = gridState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 &&
+                last >= info.totalItemsCount - PREFETCH_ROWS
+        }
+    }
+    val totalItems by remember(gridState) {
+        derivedStateOf { gridState.layoutInfo.totalItemsCount }
+    }
+    LaunchedEffect(nearEnd, totalItems, hasMore) {
+        if (nearEnd && hasMore) onLoadMore()
+    }
+}
 
 /**
  * System-gallery style timeline: a three-column grid whose day headers stick
@@ -490,9 +550,7 @@ private const val TIMELINE_PREFETCH_ROWS = 8
 @Composable
 private fun TimelineGrid(
     groups: List<me.erguotou.homehub.data.TimelineGroup>,
-    hasMore: Boolean,
-    loadingMore: Boolean,
-    moreError: String?,
+    paging: Paging,
     urlResolver: (String) -> String,
     onLoadMore: () -> Unit,
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
@@ -503,23 +561,7 @@ private fun TimelineGrid(
         return
     }
     val gridState = rememberLazyGridState()
-    val nearEnd by remember(gridState) {
-        derivedStateOf {
-            val info = gridState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            info.totalItemsCount > 0 &&
-                last >= info.totalItemsCount - TIMELINE_PREFETCH_ROWS
-        }
-    }
-    // Keyed on the item count as well as `nearEnd`: a page that does not fill
-    // the screen leaves `nearEnd` true, so without the re-key nothing would ask
-    // for the page after it. `loadMore` itself refuses to stack requests.
-    val totalItems by remember(gridState) {
-        derivedStateOf { gridState.layoutInfo.totalItemsCount }
-    }
-    LaunchedEffect(nearEnd, totalItems) {
-        if (nearEnd && hasMore) onLoadMore()
-    }
+    PrefetchNextPage(gridState, paging.hasMore, onLoadMore)
 
     LazyVerticalGrid(
         state = gridState,
@@ -546,21 +588,15 @@ private fun TimelineGrid(
             }
         }
         item(key = "timeline-footer", span = { GridItemSpan(maxLineSpan) }) {
-            TimelineFooter(
-                loadingMore = loadingMore,
-                moreError = moreError,
-                atEnd = !hasMore,
-                onRetry = onLoadMore
-            )
+            ListFooter(paging, atEnd = !paging.hasMore, onRetry = onLoadMore)
         }
     }
 }
 
-/** End-of-list state: a spinner while a page is on its way, a retry when one failed. */
+/** End-of-list state, shared by every paged grid: spinner / retry / 没有更多了. */
 @Composable
-private fun TimelineFooter(
-    loadingMore: Boolean,
-    moreError: String?,
+private fun ListFooter(
+    paging: Paging,
     atEnd: Boolean,
     onRetry: () -> Unit
 ) {
@@ -569,8 +605,8 @@ private fun TimelineFooter(
         contentAlignment = Alignment.Center
     ) {
         when {
-            moreError != null -> TextButton(onClick = onRetry) { Text("加载失败，点击重试") }
-            loadingMore -> Row(verticalAlignment = Alignment.CenterVertically) {
+            paging.error != null -> TextButton(onClick = onRetry) { Text("加载失败，点击重试") }
+            paging.loadingMore -> Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(16.dp),
                     strokeWidth = 2.dp
@@ -733,19 +769,27 @@ private fun FolderRow(node: TreeNode, onOpen: () -> Unit) {
 @Composable
 private fun TagList(
     tags: List<me.erguotou.homehub.data.TagSummary>,
+    paging: Paging,
     urlResolver: (String) -> String,
-    onOpen: (String) -> Unit
+    onOpen: (String) -> Unit,
+    onLoadMore: () -> Unit
 ) {
     if (tags.isEmpty()) {
         Empty("还没有标签，等待识别任务完成")
         return
     }
+    val gridState = rememberLazyGridState()
+    PrefetchNextPage(gridState, paging.hasMore, onLoadMore)
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Adaptive(minSize = 108.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
+        // 不给 key：同一屏里 (tag, kind) 唯一，但服务端游标已经保证两页不重叠，
+        // 再加一层 key 只会把「万一重复」变成直接崩。分类是几百条的量级，
+        // 位置标识足够。
         items(tags) { tag ->
             Card(modifier = Modifier.clickable { onOpen(tag.tag) }) {
                 // Caption goes BELOW the cover: overlaying it on the thumbnail
@@ -775,20 +819,28 @@ private fun TagList(
                 }
             }
         }
+        item(key = "tag-footer", span = { GridItemSpan(maxLineSpan) }) {
+            ListFooter(paging, atEnd = !paging.hasMore, onRetry = onLoadMore)
+        }
     }
 }
 
 @Composable
 private fun PeopleList(
     people: List<me.erguotou.homehub.data.PersonGroup>,
+    paging: Paging,
     urlResolver: (String) -> String,
-    onOpen: (me.erguotou.homehub.data.PersonGroup) -> Unit
+    onOpen: (me.erguotou.homehub.data.PersonGroup) -> Unit,
+    onLoadMore: () -> Unit
 ) {
     if (people.isEmpty()) {
         Empty("还没有人像分组")
         return
     }
+    val gridState = rememberLazyGridState()
+    PrefetchNextPage(gridState, paging.hasMore, onLoadMore)
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Adaptive(minSize = 108.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -814,6 +866,9 @@ private fun PeopleList(
                     )
                 }
             }
+        }
+        item(key = "people-footer", span = { GridItemSpan(maxLineSpan) }) {
+            ListFooter(paging, atEnd = !paging.hasMore, onRetry = onLoadMore)
         }
     }
 }

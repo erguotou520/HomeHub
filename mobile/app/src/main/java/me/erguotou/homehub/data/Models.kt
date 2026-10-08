@@ -227,8 +227,26 @@ data class DuplicateGroup(
 
 data class PhotoListResponse(
     val items: List<PhotoItem> = emptyList(),
-    val total: Long = 0
-)
+    /** 过滤后的总条数：整个结果集，不是这一页。 */
+    val total: Long = 0,
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    /** 本页最后一条的 `(taken_at, id)`，原样回传作为下一页的游标。 */
+    @SerializedName("next_before") val nextBefore: Long? = null,
+    @SerializedName("next_before_id") val nextBeforeId: Long? = null
+) {
+    /**
+     * 游标要么齐、要么当没有。
+     *
+     * 半截游标当成有效的话，下一页会从头开始重复发第一页 —— 请求全部成功、界面
+     * 看着正常，内容却停在原处。
+     */
+    val cursor: Pair<Long, Long>?
+        get() {
+            val t = nextBefore ?: return null
+            val i = nextBeforeId ?: return null
+            return t to i
+        }
+}
 
 /** Natural-language semantic search result (`/api/photos/semantic`). */
 data class SemanticResponse(
@@ -259,8 +277,51 @@ data class TimelineResponse(
         }
 }
 data class TreeResponse(val groups: List<TreeGroup> = emptyList())
-data class TagsResponse(val tags: List<TagSummary> = emptyList())
-data class PeopleResponse(val people: List<PersonGroup> = emptyList())
+/**
+ * 分类列表的一页。
+ *
+ * `has_more` / `next_*` 只在客户端带了 `limit` 时才有内容 —— 不带 limit 的调用
+ * （还没升级的服务端也算）会一次给全部，`hasMore` 便一直是 false。
+ *
+ * 游标是**三元组**：同一个标签会同时以 object 和 scene 两种 kind 出现（真库
+ * 455 条里有 11 个），只按 `(照片数, 标签)` 定序时这些行并列，游标会在并列处
+ * 漏掉一条。
+ */
+data class TagsResponse(
+    val tags: List<TagSummary> = emptyList(),
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    @SerializedName("next_count") val nextCount: Long? = null,
+    @SerializedName("next_tag") val nextTag: String? = null,
+    @SerializedName("next_kind") val nextKind: String? = null
+) {
+    /** 三个字段齐了才算游标；半截一律当没有。 */
+    val cursor: TagCursor?
+        get() {
+            val count = nextCount ?: return null
+            val tag = nextTag ?: return null
+            val kind = nextKind ?: return null
+            return TagCursor(count, tag, kind)
+        }
+}
+
+data class TagCursor(val count: Long, val tag: String, val kind: String)
+
+/** 人物列表的一页。`id` 在 person_groups 里唯一，所以二元组就够定序。 */
+data class PeopleResponse(
+    val people: List<PersonGroup> = emptyList(),
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    @SerializedName("next_count") val nextCount: Long? = null,
+    @SerializedName("next_id") val nextId: Long? = null
+) {
+    val cursor: PersonCursor?
+        get() {
+            val count = nextCount ?: return null
+            val id = nextId ?: return null
+            return PersonCursor(count, id)
+        }
+}
+
+data class PersonCursor(val count: Long, val id: Long)
 data class GeoResponse(val points: List<GeoPoint> = emptyList())
 
 /** `GET /api/geo/reverse` — place name for a map cluster centre. */

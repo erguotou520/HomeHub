@@ -39,11 +39,22 @@ interface ApiService {
     @GET("api/photos/tree")
     suspend fun tree(@Query("dir_id") dirId: Long? = null): TreeResponse
 
+    /** 分类列表。带 `limit` 即分页；`after_*` 是上一页的游标（要么都给要么都不给）。 */
     @GET("api/photos/tags")
-    suspend fun tags(): TagsResponse
+    suspend fun tags(
+        @Query("limit") limit: Int? = null,
+        @Query("after_count") afterCount: Long? = null,
+        @Query("after_tag") afterTag: String? = null,
+        @Query("after_kind") afterKind: String? = null
+    ): TagsResponse
 
+    /** 人物列表，分页参数同 [tags]。 */
     @GET("api/photos/people")
-    suspend fun people(): PeopleResponse
+    suspend fun people(
+        @Query("limit") limit: Int? = null,
+        @Query("after_count") afterCount: Long? = null,
+        @Query("after_id") afterId: Long? = null
+    ): PeopleResponse
 
     @GET("api/photos/geo")
     suspend fun geo(@Query("precision") precision: Double? = null): GeoResponse
@@ -65,8 +76,11 @@ interface ApiService {
         @Query("has_gps") hasGps: Boolean? = null,
         @Query("kind") kind: String? = null,
         @Query("ids") ids: String? = null,
-        @Query("limit") limit: Int = 300,
-        @Query("offset") offset: Int = 0
+        @Query("limit") limit: Int? = null,
+        @Query("offset") offset: Int = 0,
+        /** Keyset 游标：上一页最后一条的 `(taken_at, id)`。与 offset 互斥。 */
+        @Query("before") before: Long? = null,
+        @Query("before_id") beforeId: Long? = null
     ): PhotoListResponse
 
     /** Natural-language photo search (Chinese-CLIP cosine ranking). */

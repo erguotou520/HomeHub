@@ -70,9 +70,20 @@ class Repository(private val context: Context) {
         api().tree(dirId).groups
     }
 
-    suspend fun tags(): Result<List<TagSummary>> = runCatching { api().tags().tags }
+    /**
+     * 分类（标签）列表的一页。
+     *
+     * 一页 60 条。服务端每条还要单独算封面，页太大是「算」和「传」两头一起拖：
+     * 455 个标签一次全量是 71 KB / 296 ms，拆成一页 60 条是 ~10 KB / ~100 ms。
+     */
+    suspend fun tagsPage(after: TagCursor? = null): Result<TagsResponse> = runCatching {
+        api().tags(TAG_PAGE, after?.count, after?.tag, after?.kind)
+    }
 
-    suspend fun people(): Result<List<PersonGroup>> = runCatching { api().people().people }
+    /** 人物列表的一页；分页理由同 [tagsPage]。 */
+    suspend fun peoplePage(after: PersonCursor? = null): Result<PeopleResponse> = runCatching {
+        api().people(TAG_PAGE, after?.count, after?.id)
+    }
 
     suspend fun geo(precision: Double = 0.02): Result<List<GeoPoint>> = runCatching {
         api().geo(precision).points
@@ -87,6 +98,12 @@ class Repository(private val context: Context) {
         api().geoReverse(lat, lng).label
     }
 
+    /**
+     * 一页照片 —— 时间轴之外的那些筛选视图（分类 / 人物 / 目录 / 地点）。
+     *
+     * [before] 是 `(taken_at, id)` 游标。这里曾经写死 `limit=300` 且从不翻页，
+     * 于是「某个分类下有 600 张」时后 300 张根本取不到。分页顺带把这个洞补上了。
+     */
     suspend fun photos(
         dirId: Long? = null,
         tag: String? = null,
@@ -96,9 +113,23 @@ class Repository(private val context: Context) {
         /** "photo" | "video" media filter. */
         kind: String? = null,
         /** Explicit ids — used when drilling into one geo cluster on the map. */
-        ids: List<Long>? = null
-    ): Result<List<PhotoItem>> = runCatching {
-        api().list(dirId, tag, personId, from, to, null, kind, ids?.joinToString(",")).items
+        ids: List<Long>? = null,
+        before: Pair<Long, Long>? = null
+    ): Result<PhotoListResponse> = runCatching {
+        api().list(
+            dirId = dirId,
+            tag = tag,
+            personId = personId,
+            from = from,
+            to = to,
+            kind = kind,
+            ids = ids?.joinToString(","),
+            limit = FILTER_PAGE,
+            // 游标分页与 offset 是两条路，这里只走游标。
+            offset = 0,
+            before = before?.first,
+            beforeId = before?.second
+        )
     }
 
     /** Range-streaming URL for video playback (server resolves the path). */
@@ -274,5 +305,16 @@ class Repository(private val context: Context) {
          * measured, and ~40 grid rows to scroll before the next page is wanted.
          */
         const val TIMELINE_PAGE = 120
+
+        /**
+         * 分类 / 人物列表的页大小。
+         *
+         * 每条还要配一张封面缩略图，所以页数不能按纯字节算：60 条一页在真机
+         * （4118 张的库）实测 455 个标签由「一次 71 KB」降到「每页约 10 KB」。
+         */
+        const val TAG_PAGE = 60
+
+        /** 筛选视图（分类 / 人物 / 目录 / 地点）里的照片页大小。 */
+        const val FILTER_PAGE = 120
     }
 }

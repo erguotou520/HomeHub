@@ -26,6 +26,9 @@ enum class MediaKind(val apiValue: String?, val label: String) {
     VIDEOS("video", "视频")
 }
 
+/** Timeline bucket size requested from the server (one header per day). */
+private const val TIMELINE_GROUP = "day"
+
 /**
  * One level of the 目录 drill-down.
  *
@@ -46,6 +49,10 @@ data class AlbumUiState(
     val error: String? = null,
     val kind: MediaKind = MediaKind.ALL,
     val groups: List<TimelineGroup> = emptyList(),
+    /** Timeline paging: another page exists / one is in flight / the last failed. */
+    val hasMore: Boolean = false,
+    val loadingMore: Boolean = false,
+    val moreError: String? = null,
     val trees: List<TreeGroup> = emptyList(),
     val tags: List<TagSummary> = emptyList(),
     val people: List<PersonGroup> = emptyList(),
@@ -60,6 +67,25 @@ data class AlbumUiState(
 
     /** Photos that sit directly in the current 目录 level. */
     val treePhotos: List<PhotoItem> get() = photosAt(trees, treeStack)
+}
+
+/**
+ * Append [page] to the timeline already on screen.
+ *
+ * A page boundary lands wherever the item count runs out, so it regularly falls
+ * inside a day: the new page then opens with the very group the list already
+ * ends with. Those two are stitched into one — appending them as-is would show
+ * the day twice and hand the grid two items with the same key, which
+ * LazyVerticalGrid treats as a crash.
+ */
+fun mergeTimeline(loaded: List<TimelineGroup>, page: List<TimelineGroup>): List<TimelineGroup> {
+    if (loaded.isEmpty()) return page
+    if (page.isEmpty()) return loaded
+    val tail = loaded.last()
+    val head = page.first()
+    if (tail.key != head.key) return loaded + page
+    // Both pages report the server's full-day count, so `count` needs no merge.
+    return loaded.dropLast(1) + tail.copy(items = tail.items + head.items) + page.drop(1)
 }
 
 /**
@@ -104,6 +130,17 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(AlbumUiState())
     val state: StateFlow<AlbumUiState> = _state.asStateFlow()
 
+    /** Keyset cursor of the last timeline page; null until one has landed. */
+    private var timelineCursor: Pair<Long, Long>? = null
+
+    /**
+     * Bumped on every from-scratch timeline load. A page that lands after one
+     * (the user switched 全部/照片/视频 mid-flight) belongs to a list that is no
+     * longer on screen, so it is dropped instead of being appended to a
+     * different filter's photos.
+     */
+    private var timelineGeneration = 0
+
     fun url(relative: String): String = repository.absolute(relative)
 
     init {
@@ -147,10 +184,86 @@ class AlbumViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadTimeline() = load(
-        block = { repository.timeline("day", _state.value.kind.apiValue) },
-        apply = { _state.value = _state.value.copy(groups = it) }
-    )
+    /**
+     * Load the newest timeline page from scratch.
+     *
+     * Deliberately not routed through [load]: it has to invalidate the cursor
+     * and any in-flight page before the request goes out, and to ignore the
+     * answer if a newer reload has started meanwhile.
+     */
+    private fun loadTimeline() {
+        val generation = ++timelineGeneration
+        timelineCursor = null
+        _state.value = _state.value.copy(
+            loading = true,
+            error = null,
+            hasMore = false,
+            loadingMore = false,
+            moreError = null
+        )
+        viewModelScope.launch {
+            val result = repository.timelinePage(TIMELINE_GROUP, _state.value.kind.apiValue)
+            if (generation != timelineGeneration) return@launch
+            result.fold(
+                onSuccess = { page ->
+                    timelineCursor = page.cursor
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        groups = page.groups,
+                        hasMore = page.hasMore && page.cursor != null
+                    )
+                },
+                onFailure = { e ->
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        error = e.message ?: e.javaClass.simpleName
+                    )
+                }
+            )
+        }
+    }
+
+    /**
+     * Fetch the next timeline page and append it.
+     *
+     * Called from the grid's scroll callback, so it is a no-op unless the
+     * timeline is the visible list, a page is not already in flight and the
+     * server said there is more.
+     */
+    fun loadMore() {
+        val current = _state.value
+        if (current.loading || current.loadingMore || !current.hasMore) return
+        if (current.view != AlbumView.TIMELINE || current.activeFilter != null) return
+        val from = timelineCursor ?: return
+        val generation = timelineGeneration
+        _state.value = current.copy(loadingMore = true, moreError = null)
+        viewModelScope.launch {
+            val result = repository.timelinePage(
+                group = TIMELINE_GROUP,
+                kind = _state.value.kind.apiValue,
+                before = from
+            )
+            if (generation != timelineGeneration) return@launch
+            result.fold(
+                onSuccess = { page ->
+                    page.cursor?.let { timelineCursor = it }
+                    val state = _state.value
+                    _state.value = state.copy(
+                        groups = mergeTimeline(state.groups, page.groups),
+                        hasMore = page.hasMore && page.cursor != null,
+                        loadingMore = false
+                    )
+                },
+                onFailure = { e ->
+                    // Keep the photos already on screen; the footer offers a retry.
+                    _state.value = _state.value.copy(
+                        loadingMore = false,
+                        moreError = e.message ?: e.javaClass.simpleName
+                    )
+                }
+            )
+        }
+    }
 
     private fun loadTree() = load(
         block = { repository.tree() },

@@ -298,94 +298,279 @@ pub async fn list(db: &Db, registry: &DirRegistry, q: &PhotoQuery) -> Result<(Ve
     Ok((to_items(db, rows).await?, total))
 }
 
-/// Media grouped by year / month / day, aggregated across every album directory.
-pub async fn timeline(
-    db: &Db,
-    registry: &DirRegistry,
-    group: &str,
-    kind: Option<&str>,
-    from: Option<i64>,
-    to: Option<i64>,
-    limit_per_group: i64,
-) -> Result<Vec<TimelineGroup>> {
-    let albums = registry.album_dirs();
-    let clause = album_clause(&albums, "p");
-    let mut sql = format!(
-        "SELECT p.*, d.name AS dir_name FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \
-         WHERE p.status = 'ok'{}",
-        clause
-    );
-    if let Some(kind) = kind {
-        let k = if kind == "video" { "video" } else { "photo" };
-        sql.push_str(&format!(" AND p.media_kind = '{}'", k));
-    }
-    if let Some(from) = from {
-        sql.push_str(&format!(" AND COALESCE(p.taken_at, p.mtime) >= {}", from));
-    }
-    if let Some(to) = to {
-        sql.push_str(&format!(" AND COALESCE(p.taken_at, p.mtime) <= {}", to));
-    }
-    sql.push_str(" ORDER BY COALESCE(p.taken_at, p.mtime) DESC, p.id DESC");
+/// Bucket size of the timeline views (`group=day|month|year`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Granularity {
+    Year,
+    Month,
+    Day,
+}
 
-    let rows = sqlx::query_as::<_, PhotoRow>(&sql).fetch_all(db).await?;
-    let items = to_items(db, rows).await?;
-
-    let granularity = match group {
-        "day" => 2,
-        "month" => 1,
-        _ => 0,
-    };
-    let today = chrono::Local::now().date_naive();
-    let mut groups: Vec<TimelineGroup> = Vec::new();
-    for item in items {
-        let dt = chrono::DateTime::from_timestamp(item.taken_at, 0);
-        let (year, month, day) = match dt.map(|d| d.with_timezone(&chrono::Local)) {
-            Some(d) => (d.year(), d.month(), d.day()),
-            None => (1970, 1, 1),
-        };
-        let (key, label) = match granularity {
-            2 => {
-                let key = format!("{:04}-{:02}-{:02}", year, month, day);
-                let date = chrono::NaiveDate::from_ymd_opt(year, month, day);
-                let label = match date {
-                    Some(d) if d == today => "今天".to_string(),
-                    Some(d) if d == today.pred_opt().unwrap_or(today) => "昨天".to_string(),
-                    Some(d) if d.year() == today.year() => {
-                        format!("{}月{}日 星期{}", month, day, weekday_cn(d))
-                    }
-                    _ => format!("{}年{}月{}日", year, month, day),
-                };
-                (key, label)
-            }
-            1 => (
-                format!("{:04}-{:02}", year, month),
-                format!("{}年{}月", year, month),
-            ),
-            _ => (format!("{:04}", year), format!("{}年", year)),
-        };
-
-        let slot = match groups.iter_mut().find(|g| g.key == key) {
-            Some(g) => {
-                g.count += 1;
-                g
-            }
-            None => {
-                groups.push(TimelineGroup {
-                    key,
-                    label,
-                    year,
-                    month: if granularity >= 1 { Some(month) } else { None },
-                    count: 1,
-                    items: Vec::new(),
-                });
-                groups.last_mut().unwrap()
-            }
-        };
-        if slot.items.len() < limit_per_group as usize {
-            slot.items.push(item);
+impl Granularity {
+    pub fn parse(group: &str) -> Self {
+        match group {
+            "day" => Granularity::Day,
+            "month" => Granularity::Month,
+            _ => Granularity::Year,
         }
     }
-    Ok(groups)
+
+    /// First day of the bucket that contains `d`.
+    fn bucket_start(&self, d: chrono::NaiveDate) -> chrono::NaiveDate {
+        match self {
+            Granularity::Year => chrono::NaiveDate::from_ymd_opt(d.year(), 1, 1),
+            Granularity::Month => chrono::NaiveDate::from_ymd_opt(d.year(), d.month(), 1),
+            Granularity::Day => Some(d),
+        }
+        .unwrap_or(d)
+    }
+
+    /// First day of the bucket *after* the one that contains `d`.
+    fn next_bucket_start(&self, d: chrono::NaiveDate) -> chrono::NaiveDate {
+        match self {
+            Granularity::Year => chrono::NaiveDate::from_ymd_opt(d.year() + 1, 1, 1),
+            Granularity::Month => {
+                let (y, m) = if d.month() == 12 {
+                    (d.year() + 1, 1)
+                } else {
+                    (d.year(), d.month() + 1)
+                };
+                chrono::NaiveDate::from_ymd_opt(y, m, 1)
+            }
+            Granularity::Day => d.succ_opt(),
+        }
+        .unwrap_or(d)
+    }
+
+    /// `(key, label, month)` of the bucket containing `d`.
+    ///
+    /// The only place that decides how a local date is named — items and counts
+    /// both go through it, so a count can never land on a different header than
+    /// the items it describes.
+    fn key_label(
+        &self,
+        d: chrono::NaiveDate,
+        today: chrono::NaiveDate,
+    ) -> (String, String, Option<u32>) {
+        match self {
+            Granularity::Day => {
+                let label = if d == today {
+                    "今天".to_string()
+                } else if Some(d) == today.pred_opt() {
+                    "昨天".to_string()
+                } else if d.year() == today.year() {
+                    format!("{}月{}日 星期{}", d.month(), d.day(), weekday_cn(d))
+                } else {
+                    format!("{}年{}月{}日", d.year(), d.month(), d.day())
+                };
+                (
+                    format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()),
+                    label,
+                    Some(d.month()),
+                )
+            }
+            Granularity::Month => (
+                format!("{:04}-{:02}", d.year(), d.month()),
+                format!("{}年{}月", d.year(), d.month()),
+                Some(d.month()),
+            ),
+            Granularity::Year => (format!("{:04}", d.year()), format!("{}年", d.year()), None),
+        }
+    }
+}
+
+/// Local calendar date of a unix timestamp.
+fn local_date(ts: i64) -> chrono::NaiveDate {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|d| d.with_timezone(&chrono::Local).date_naive())
+        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+}
+
+/// Unix timestamp of local midnight on `d`.
+///
+/// Bucket boundaries are derived here, in Rust, instead of with SQLite's
+/// `localtime` modifier: item buckets and count buckets have to agree exactly,
+/// and the only way to guarantee that is for both to run through
+/// [Granularity::key_label] over the same clock.
+fn local_midnight(d: chrono::NaiveDate) -> i64 {
+    use chrono::TimeZone;
+    d.and_hms_opt(0, 0, 0)
+        .and_then(|t| chrono::Local.from_local_datetime(&t).earliest())
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}
+
+/// Timeline query. Two modes share one implementation:
+///
+/// * **legacy** (`page_limit == None`) — every matching item in one response,
+///   at most `per_group` items carried per bucket. The admin 相册 page uses it.
+/// * **paged** (`page_limit == Some(n)`) — a keyset page of at most `n` items,
+///   newest first, continuing from `before`. `per_group` is deliberately
+///   ignored here: the item cap already bounds a bucket, and applying both would
+///   punch a hole in the page — items dropped by `per_group` sit *after* the
+///   cursor, so no later page could ever reach them.
+#[derive(Debug, Clone, Default)]
+pub struct TimelineParams {
+    pub group: String,
+    /// "photo" | "video"
+    pub kind: Option<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub per_group: i64,
+    pub page_limit: Option<i64>,
+    /// Keyset position: `(sort_time, id)` of the last item of the previous page.
+    /// Anything at or newer than it is excluded, so pages never overlap.
+    pub before: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TimelinePage {
+    pub groups: Vec<TimelineGroup>,
+    pub has_more: bool,
+    /// Hand back verbatim as `before`/`before_id` to fetch the next page.
+    pub next_before: Option<(i64, i64)>,
+}
+
+/// Media grouped by year / month / day, aggregated across every album directory.
+pub async fn timeline(db: &Db, registry: &DirRegistry, p: &TimelineParams) -> Result<TimelinePage> {
+    let albums = registry.album_dirs();
+    let gran = Granularity::parse(&p.group);
+    let today = chrono::Local::now().date_naive();
+
+    // Filters without the cursor: also the WHERE of the count query, which must
+    // see whole buckets rather than the slice this one page happens to carry.
+    let mut base = album_clause(&albums, "p");
+    if let Some(kind) = &p.kind {
+        let k = if kind == "video" { "video" } else { "photo" };
+        base.push_str(&format!(" AND p.media_kind = '{}'", k));
+    }
+    if let Some(from) = p.from {
+        base.push_str(&format!(" AND COALESCE(p.taken_at, p.mtime) >= {}", from));
+    }
+    if let Some(to) = p.to {
+        base.push_str(&format!(" AND COALESCE(p.taken_at, p.mtime) <= {}", to));
+    }
+
+    let mut filters = base.clone();
+    if let Some((bt, bi)) = p.before {
+        // `id` breaks ties: a camera burst puts several photos in the same
+        // second, and a bare `t < before` would silently skip the rest of that
+        // second when a page boundary lands inside it.
+        filters.push_str(&format!(
+            " AND (COALESCE(p.taken_at, p.mtime) < {bt} \
+             OR (COALESCE(p.taken_at, p.mtime) = {bt} AND p.id < {bi}))"
+        ));
+    }
+    // limit + 1: the spare row is what tells us a next page exists.
+    let limit_sql = match p.page_limit {
+        Some(n) => format!(" LIMIT {}", n + 1),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT p.*, d.name AS dir_name FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \
+         WHERE p.status = 'ok'{} ORDER BY COALESCE(p.taken_at, p.mtime) DESC, p.id DESC{}",
+        filters, limit_sql
+    );
+    let mut rows = sqlx::query_as::<_, PhotoRow>(&sql).fetch_all(db).await?;
+    let has_more = match p.page_limit {
+        Some(n) => {
+            let full = rows.len() as i64 > n;
+            rows.truncate(n as usize);
+            full
+        }
+        None => false,
+    };
+    let next_before = match p.page_limit {
+        Some(_) => rows.last().map(|r| (r.sort_time(), r.id)),
+        None => None,
+    };
+    let items = to_items(db, rows).await?;
+
+    // Exact per-bucket totals. In legacy mode every item is already here, so the
+    // bucketing loop counts them; in paged mode the buckets this page touches
+    // are counted separately, because a page that cuts a busy day in half must
+    // still report that day's full count.
+    let counts = if p.page_limit.is_some() && !items.is_empty() {
+        bucket_counts(db, &base, gran, today, &items).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut groups: Vec<TimelineGroup> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in items {
+        let d = local_date(item.taken_at);
+        let (key, label, month) = gran.key_label(d, today);
+        let idx = match index.get(&key) {
+            Some(i) => *i,
+            None => {
+                groups.push(TimelineGroup {
+                    key: key.clone(),
+                    label,
+                    year: d.year(),
+                    month,
+                    count: 0,
+                    items: Vec::new(),
+                });
+                index.insert(key, groups.len() - 1);
+                groups.len() - 1
+            }
+        };
+        let slot = &mut groups[idx];
+        slot.count += 1;
+        if p.page_limit.is_none() && slot.items.len() as i64 >= p.per_group {
+            continue;
+        }
+        slot.items.push(item);
+    }
+    if !counts.is_empty() {
+        for g in &mut groups {
+            if let Some(c) = counts.get(&g.key) {
+                g.count = *c;
+            }
+        }
+    }
+
+    Ok(TimelinePage {
+        groups,
+        has_more,
+        next_before,
+    })
+}
+
+/// Per-bucket item totals for the buckets covered by `items`.
+///
+/// Counts the distinct timestamps of the touched bucket *range* and re-buckets
+/// them through [Granularity::key_label]. The range query is a plain scan of the
+/// (indexed) sort-time column over at most a handful of buckets, which is orders
+/// of magnitude smaller than materialising the bucket's items.
+async fn bucket_counts(
+    db: &Db,
+    base_filters: &str,
+    gran: Granularity,
+    today: chrono::NaiveDate,
+    items: &[PhotoItem],
+) -> Result<std::collections::HashMap<String, i64>> {
+    let Some(newest) = items.first() else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let oldest = items.last().unwrap_or(newest);
+    let lo = local_midnight(gran.bucket_start(local_date(oldest.taken_at)));
+    let hi = local_midnight(gran.next_bucket_start(local_date(newest.taken_at)));
+    let sql = format!(
+        "SELECT COALESCE(p.taken_at, p.mtime) AS t, COUNT(*) AS c \
+         FROM photo_assets p JOIN dirs d ON d.id = p.dir_id \
+         WHERE p.status = 'ok'{} AND COALESCE(p.taken_at, p.mtime) >= {} \
+           AND COALESCE(p.taken_at, p.mtime) < {} GROUP BY t",
+        base_filters, lo, hi
+    );
+    let stamps: Vec<(i64, i64)> = sqlx::query_as(&sql).fetch_all(db).await?;
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (t, n) in stamps {
+        let (key, _, _) = gran.key_label(local_date(t), today);
+        *counts.entry(key).or_insert(0) += n;
+    }
+    Ok(counts)
 }
 
 fn weekday_cn(d: chrono::NaiveDate) -> &'static str {
@@ -958,5 +1143,314 @@ fn from_row(r: PhotoRow, tags: Vec<PhotoTag>) -> PhotoItem {
         duration_ms: r.duration_ms,
         video_codec: r.video_codec,
         tags,
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Local timestamp for `y-m-d h:00`.
+    fn at(y: i32, m: u32, d: u32, h: u32) -> i64 {
+        local_midnight(chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()) + h as i64 * 3600
+    }
+
+    /// In-memory library with one album directory holding `shots`
+    /// `(taken_at, rel_path)` rows, inserted in the given order so ids ascend.
+    async fn fixture(shots: &[(i64, &str)]) -> (Db, DirRegistry) {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        sqlx::migrate!("./migrations")
+            .run(&db)
+            .await
+            .expect("run migrations");
+        let config: crate::config::Config = serde_yaml::from_str(
+            "dirs:\n  - name: photos\n    path: /tmp/homehub-test-photos\n    marks: [album]\n",
+        )
+        .expect("parse config");
+        let registry = DirRegistry::bootstrap(db.clone(), &config)
+            .await
+            .expect("bootstrap registry");
+        let dir_id = registry.by_name("photos").expect("dir").id;
+        for (taken, path) in shots {
+            sqlx::query(
+                "INSERT INTO photo_assets \
+                    (dir_id, rel_path, fingerprint, size, mtime, taken_at, status, compressed, \
+                     media_kind, created_at, updated_at) \
+                 VALUES (?, ?, '', 1, ?, ?, 'ok', 0, 'photo', 0, 0)",
+            )
+            .bind(dir_id)
+            .bind(path)
+            .bind(taken)
+            .bind(taken)
+            .execute(&db)
+            .await
+            .expect("insert photo");
+        }
+        (db, registry)
+    }
+
+    /// Page through the timeline until `has_more` goes false.
+    ///
+    /// Returns every item across all pages, the number of requests it took and
+    /// the groups of the first page.
+    async fn page_through(
+        db: &Db,
+        registry: &DirRegistry,
+        group: &str,
+        kind: Option<&str>,
+        per_page: i64,
+    ) -> (Vec<PhotoItem>, usize, Vec<TimelineGroup>) {
+        let mut all: Vec<PhotoItem> = Vec::new();
+        let mut pages = 0usize;
+        let mut cursor: Option<(i64, i64)> = None;
+        let mut first_groups: Vec<TimelineGroup> = Vec::new();
+        loop {
+            let page = timeline(
+                db,
+                registry,
+                &TimelineParams {
+                    group: group.to_string(),
+                    kind: kind.map(|k| k.to_string()),
+                    from: None,
+                    to: None,
+                    per_group: 500,
+                    page_limit: Some(per_page),
+                    before: cursor,
+                },
+            )
+            .await
+            .expect("timeline page");
+            pages += 1;
+            if pages == 1 {
+                first_groups = page.groups.clone();
+            }
+            for g in &page.groups {
+                all.extend(g.items.iter().cloned());
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_before;
+            assert!(cursor.is_some(), "has_more without a cursor");
+            assert!(pages < 100, "paging did not terminate");
+        }
+        (all, pages, first_groups)
+    }
+
+    /// Every photo, in the exact order a single unpaged response would give.
+    ///
+    /// Ids ascend with the insertion index, so `ORDER BY taken_at DESC, id DESC`
+    /// is "timestamp descending, insertion index descending".
+    fn names_in_order(shots: &[(i64, &str)]) -> Vec<String> {
+        let mut idx: Vec<usize> = (0..shots.len()).collect();
+        idx.sort_by(|&a, &b| shots[b].0.cmp(&shots[a].0).then(b.cmp(&a)));
+        idx.into_iter().map(|i| shots[i].1.to_string()).collect()
+    }
+
+    fn shapes() -> Vec<(i64, &'static str)> {
+        vec![
+            // Same second, three photos — the tie that a `t < before` cursor
+            // would skip.
+            (at(2026, 10, 1, 10), "burst-a.jpg"),
+            (at(2026, 10, 1, 10), "burst-b.jpg"),
+            (at(2026, 10, 1, 10), "burst-c.jpg"),
+            (at(2026, 10, 1, 12), "noon.jpg"),
+            (at(2026, 9, 30, 8), "y-day-a.jpg"),
+            (at(2026, 9, 30, 8), "y-day-b.jpg"),
+            (at(2026, 9, 29, 9), "two-days.jpg"),
+            // A whole day compressed into one second.
+            (at(2026, 9, 28, 7), "old-1.jpg"),
+            (at(2026, 9, 28, 7), "old-2.jpg"),
+            (at(2026, 9, 28, 7), "old-3.jpg"),
+            (at(2026, 9, 28, 7), "old-4.jpg"),
+            (at(2026, 9, 28, 7), "old-5.jpg"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn paging_covers_every_photo_exactly_once() {
+        let shots = shapes();
+        let (db, registry) = fixture(&shots).await;
+        let want = names_in_order(&shots);
+
+        // Page sizes that do and do not land inside a same-second tie.
+        for per_page in [1, 2, 3, 4, 5, 7] {
+            let (items, pages, _) = page_through(&db, &registry, "day", None, per_page).await;
+            let got: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+            assert_eq!(got, want, "per_page={per_page} lost or reordered photos");
+            assert_eq!(
+                pages,
+                (shots.len() as f64 / per_page as f64).ceil() as usize,
+                "per_page={per_page} took an unexpected number of pages"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn group_count_is_the_whole_day_not_the_page() {
+        let shots = shapes();
+        let (db, registry) = fixture(&shots).await;
+
+        // Five items: all four of 10-01, then the newest of 09-30. The last
+        // group is therefore carried half-empty — its header must still say two.
+        let page = timeline(
+            &db,
+            &registry,
+            &TimelineParams {
+                group: "day".to_string(),
+                per_group: 500,
+                page_limit: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page");
+
+        assert!(page.has_more);
+        assert_eq!(page.groups.len(), 2);
+        let first = &page.groups[0];
+        assert_eq!((first.key.as_str(), first.count, first.items.len()), ("2026-10-01", 4, 4));
+        let last = &page.groups[1];
+        assert_eq!(
+            (last.key.as_str(), last.count, last.items.len()),
+            ("2026-09-30", 2, 1),
+            "a half-carried day must still report its full count"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_split_inside_one_day_still_reports_four() {
+        // The second page starts in the middle of 10-01 and must still say four,
+        // or the header would shrink as the user scrolls.
+        let shots = shapes();
+        let (db, registry) = fixture(&shots).await;
+        let page2 = timeline(
+            &db,
+            &registry,
+            &TimelineParams {
+                group: "day".to_string(),
+                per_group: 500,
+                page_limit: Some(3),
+                // Cursor = burst-b, the third item of page 1 (id 2), same second
+                // as burst-a and burst-c.
+                before: Some((at(2026, 10, 1, 10), 2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 2");
+        assert_eq!(page2.groups[0].key, "2026-10-01");
+        assert_eq!(page2.groups[0].count, 4);
+        assert_eq!(
+            page2.groups[0].items.len(),
+            1,
+            "only burst-a is left in that second"
+        );
+        assert_eq!(page2.groups[1].key, "2026-09-30");
+    }
+
+    #[tokio::test]
+    async fn legacy_mode_is_unchanged() {
+        let shots = shapes();
+        let (db, registry) = fixture(&shots).await;
+        let page = timeline(
+            &db,
+            &registry,
+            &TimelineParams {
+                group: "day".to_string(),
+                per_group: 500,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("legacy timeline");
+
+        assert!(!page.has_more);
+        assert!(page.next_before.is_none());
+        let total: usize = page.groups.iter().map(|g| g.items.len()).sum();
+        assert_eq!(total, shots.len());
+        assert_eq!(page.groups.len(), 4, "four distinct days");
+        let got: Vec<String> = page
+            .groups
+            .iter()
+            .flat_map(|g| g.items.iter().map(|i| i.name.clone()))
+            .collect();
+        assert_eq!(got, names_in_order(&shots));
+    }
+
+    #[tokio::test]
+    async fn per_group_truncates_items_but_not_the_count() {
+        let shots = shapes();
+        let (db, registry) = fixture(&shots).await;
+        let page = timeline(
+            &db,
+            &registry,
+            &TimelineParams {
+                group: "day".to_string(),
+                per_group: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("legacy timeline");
+        let old = page.groups.iter().find(|g| g.key == "2026-09-28").unwrap();
+        assert_eq!(old.items.len(), 2, "per_group caps the carried items");
+        assert_eq!(old.count, 5, "but the day still reports all five");
+    }
+
+    #[tokio::test]
+    async fn kind_filter_applies_to_items_and_counts() {
+        let mut shots = shapes();
+        shots.push((at(2026, 10, 1, 11), "clip.mp4"));
+        let (db, registry) = fixture(&shots).await;
+        sqlx::query("UPDATE photo_assets SET media_kind = 'video' WHERE rel_path = 'clip.mp4'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let page = timeline(
+            &db,
+            &registry,
+            &TimelineParams {
+                group: "day".to_string(),
+                kind: Some("video".to_string()),
+                per_group: 500,
+                page_limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("video page");
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(page.groups[0].key, "2026-10-01");
+        assert_eq!(page.groups[0].count, 1, "photos must not be counted as videos");
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn bucket_boundaries_are_monotonic() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+        assert_eq!(
+            Granularity::Month.next_bucket_start(d),
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        );
+        assert_eq!(
+            Granularity::Year.next_bucket_start(d),
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        );
+        assert_eq!(
+            Granularity::Day.next_bucket_start(d),
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        );
+        // Local midnight of a bucket start never lands after an item inside it.
+        let jan = local_midnight(Granularity::Year.bucket_start(d));
+        let dec = local_midnight(Granularity::Month.bucket_start(d));
+        assert!(jan < dec);
     }
 }

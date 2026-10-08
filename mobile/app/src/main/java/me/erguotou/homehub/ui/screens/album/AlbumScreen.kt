@@ -17,10 +17,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -50,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -250,7 +254,11 @@ fun AlbumScreen(
                     when (state.view) {
                         AlbumView.TIMELINE -> TimelineGrid(
                             groups = state.groups,
+                            hasMore = state.hasMore,
+                            loadingMore = state.loadingMore,
+                            moreError = state.moreError,
                             urlResolver = vm::url,
+                            onLoadMore = { vm.loadMore() },
                             onOpen = { photo, list ->
                                 viewerList = list
                                 viewerPhoto = photo
@@ -457,14 +465,29 @@ private fun PhotoGrid(
 }
 
 /**
+ * How many rows from the end the next page starts loading. Enough that the
+ * request is in flight before the user reaches the footer, small enough that it
+ * is not fired while the first screen is still being looked at.
+ */
+private const val TIMELINE_PREFETCH_ROWS = 8
+
+/**
  * System-gallery style timeline: a three-column grid whose day headers stick
  * to the top while scrolling.
+ *
+ * Paged — the server hands back one page of items plus a cursor, and reaching
+ * the end of the grid pulls the next one. The whole library in a single
+ * response is what used to make this screen spin forever on a slow link.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TimelineGrid(
     groups: List<me.erguotou.homehub.data.TimelineGroup>,
+    hasMore: Boolean,
+    loadingMore: Boolean,
+    moreError: String?,
     urlResolver: (String) -> String,
+    onLoadMore: () -> Unit,
     onOpen: (PhotoItem, List<PhotoItem>) -> Unit,
     onLongClick: (PhotoItem) -> Unit
 ) {
@@ -472,7 +495,27 @@ private fun TimelineGrid(
         Empty("还没有照片或视频。连上 WireGuard 并等待目录扫描完成。")
         return
     }
+    val gridState = rememberLazyGridState()
+    val nearEnd by remember(gridState) {
+        derivedStateOf {
+            val info = gridState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 &&
+                last >= info.totalItemsCount - TIMELINE_PREFETCH_ROWS
+        }
+    }
+    // Keyed on the item count as well as `nearEnd`: a page that does not fill
+    // the screen leaves `nearEnd` true, so without the re-key nothing would ask
+    // for the page after it. `loadMore` itself refuses to stack requests.
+    val totalItems by remember(gridState) {
+        derivedStateOf { gridState.layoutInfo.totalItemsCount }
+    }
+    LaunchedEffect(nearEnd, totalItems) {
+        if (nearEnd && hasMore) onLoadMore()
+    }
+
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -494,6 +537,50 @@ private fun TimelineGrid(
                     onLongClick = { onLongClick(photo) }
                 )
             }
+        }
+        item(key = "timeline-footer", span = { GridItemSpan(maxLineSpan) }) {
+            TimelineFooter(
+                loadingMore = loadingMore,
+                moreError = moreError,
+                atEnd = !hasMore,
+                onRetry = onLoadMore
+            )
+        }
+    }
+}
+
+/** End-of-list state: a spinner while a page is on its way, a retry when one failed. */
+@Composable
+private fun TimelineFooter(
+    loadingMore: Boolean,
+    moreError: String?,
+    atEnd: Boolean,
+    onRetry: () -> Unit
+) {
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            moreError != null -> TextButton(onClick = onRetry) { Text("加载失败，点击重试") }
+            loadingMore -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp
+                )
+                Text(
+                    "加载中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
+            atEnd -> Text(
+                "没有更多了",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            else -> Unit
         }
     }
 }

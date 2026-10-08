@@ -38,6 +38,20 @@ export interface TimelineGroup {
   items: PhotoItem[]
 }
 
+/**
+ * One page of `/api/photos/timeline`.
+ *
+ * Only sent when the request carries `limit`; without it the server answers
+ * with the whole library and `has_more` false.
+ */
+export interface TimelinePage {
+  groups: TimelineGroup[]
+  has_more: boolean
+  /** `(taken_at, id)` of the page's oldest item — pass both back to continue. */
+  next_before: number | null
+  next_before_id: number | null
+}
+
 export interface TreeGroup {
   dir_id: number
   dir_name: string

@@ -23,11 +23,17 @@ interface ApiService {
     suspend fun health(): Health
 
     // ── album views ──
+    // `limit` opts into keyset paging: the server then answers with at most
+    // `limit` items plus a `next_before`/`next_before_id` cursor. Leave it null
+    // and the whole library comes back in one (multi-megabyte) body.
     @GET("api/photos/timeline")
     suspend fun timeline(
         @Query("group") group: String = "month",
         @Query("kind") kind: String? = null,
-        @Query("per_group") perGroup: Int? = null
+        @Query("per_group") perGroup: Int? = null,
+        @Query("limit") limit: Int? = null,
+        @Query("before") before: Long? = null,
+        @Query("before_id") beforeId: Long? = null
     ): TimelineResponse
 
     @GET("api/photos/tree")

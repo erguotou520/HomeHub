@@ -47,11 +47,23 @@ class Repository(private val context: Context) {
 
     // ──────────────────────────── album ────────────────────────────
 
-    suspend fun timeline(
+    /**
+     * One page of the album timeline.
+     *
+     * [limit] is what switches the server to paged mode — the album always sets
+     * it. The whole-library response this replaces is ~700 bytes per photo, so
+     * a 4000-photo library meant a 3 MB body: on a slow link that alone blew
+     * past the client's 30 s read timeout and the album never painted.
+     *
+     * [before] is the `(taken_at, id)` cursor from the previous page.
+     */
+    suspend fun timelinePage(
         group: String = "day",
-        kind: String? = null
-    ): Result<List<TimelineGroup>> = runCatching {
-        api().timeline(group, kind).groups
+        kind: String? = null,
+        limit: Int = TIMELINE_PAGE,
+        before: Pair<Long, Long>? = null
+    ): Result<TimelineResponse> = runCatching {
+        api().timeline(group, kind, null, limit, before?.first, before?.second)
     }
 
     suspend fun tree(dirId: Long? = null): Result<List<TreeGroup>> = runCatching {
@@ -252,4 +264,15 @@ class Repository(private val context: Context) {
     }
 
     suspend fun health(): Result<Health> = runCatching { api().health() }
+
+    companion object {
+        /**
+         * Timeline page size.
+         *
+         * A timeline item serialises to roughly 700 bytes, so 120 photos is
+         * ~80 KB per page: about a second on the ~70 KB/s the WireGuard tunnel
+         * measured, and ~40 grid rows to scroll before the next page is wanted.
+         */
+        const val TIMELINE_PAGE = 120
+    }
 }

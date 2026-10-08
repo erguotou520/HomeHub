@@ -41,6 +41,13 @@ pub struct TimelineQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub per_group: Option<i64>,
+    /// 分页：本页最多返回多少条目。**缺省即不分页**（一次返回全部分组），
+    /// 管理端相册页仍走这条路；手机端每页都带 limit。
+    pub limit: Option<i64>,
+    /// 分页游标 —— 上一页最后一条的 `(taken_at, id)`，只返回比它更旧的条目。
+    /// 两个值必须成对出现。
+    pub before: Option<i64>,
+    pub before_id: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -107,18 +114,49 @@ pub async fn timeline(
     State(state): State<AppState>,
     Query(q): Query<TimelineQuery>,
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
+    use crate::models::AppError;
+
+    // A half-given cursor would restart from the newest item and re-send page 1
+    // forever, so refuse it rather than guess which half was meant.
+    let before = match (q.before, q.before_id) {
+        (Some(t), Some(id)) => Some((t, id)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::BadRequest(
+                "before and before_id must be sent together".into(),
+            ))
+        }
+    };
+    // Paging is opt-in: a cursor only makes sense with a page size. Silently
+    // ignoring either would look like it worked while returning the whole
+    // library.
+    if before.is_some() && q.limit.is_none() {
+        return Err(AppError::BadRequest(
+            "before requires limit — add limit=<n> to page".into(),
+        ));
+    }
+
     let group = q.group.unwrap_or_else(|| "month".to_string());
-    let groups = crate::services::photos::timeline(
+    let page = crate::services::photos::timeline(
         &state.db,
         &state.registry,
-        &group,
-        q.kind.as_deref(),
-        q.from,
-        q.to,
-        q.per_group.unwrap_or(500),
+        &crate::services::photos::TimelineParams {
+            group,
+            kind: q.kind,
+            from: q.from,
+            to: q.to,
+            per_group: q.per_group.unwrap_or(500).max(1),
+            page_limit: q.limit.map(|n| n.clamp(1, 1000)),
+            before,
+        },
     )
     .await?;
-    Ok(Json(serde_json::json!({ "groups": groups })))
+    Ok(Json(serde_json::json!({
+        "groups": page.groups,
+        "has_more": page.has_more,
+        "next_before": page.next_before.map(|(t, _)| t),
+        "next_before_id": page.next_before.map(|(_, id)| id),
+    })))
 }
 
 pub async fn tree(

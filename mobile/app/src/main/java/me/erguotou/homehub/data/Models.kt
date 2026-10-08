@@ -238,7 +238,26 @@ data class SemanticResponse(
     val scores: Map<String, String> = emptyMap()
 )
 
-data class TimelineResponse(val groups: List<TimelineGroup> = emptyList())
+data class TimelineResponse(
+    val groups: List<TimelineGroup> = emptyList(),
+    /**
+     * Whether the server has more photos older than [nextBefore]. False for a
+     * client that did not ask for a page (`limit` absent): the server then
+     * answers with the whole library in one body.
+     */
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    /** `(taken_at, id)` of this page's oldest item — feed back as the next cursor. */
+    @SerializedName("next_before") val nextBefore: Long? = null,
+    @SerializedName("next_before_id") val nextBeforeId: Long? = null
+) {
+    /** Null when there is nothing to continue from. */
+    val cursor: Pair<Long, Long>?
+        get() {
+            val takenAt = nextBefore ?: return null
+            val id = nextBeforeId ?: return null
+            return takenAt to id
+        }
+}
 data class TreeResponse(val groups: List<TreeGroup> = emptyList())
 data class TagsResponse(val tags: List<TagSummary> = emptyList())
 data class PeopleResponse(val people: List<PersonGroup> = emptyList())

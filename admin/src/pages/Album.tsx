@@ -1,13 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, formatBytes } from '../api/client'
-import type { DirStat, GeoPoint, PhotoItem, Stats, TimelineGroup } from '../api/types'
+import type { DirStat, GeoPoint, PhotoItem, Stats, TimelineGroup, TimelinePage } from '../api/types'
 import Icon from '../components/Icon'
 import { PhotoViewer } from '../components/PhotoViewer'
 import GeoMap from '../components/GeoMap'
 
 type AlbumView = 'timeline' | 'tree' | 'tags' | 'people' | 'geo'
 type KindFilter = 'all' | 'photo' | 'video'
+
+/** Timeline page size — same value the phone app asks for. */
+const TIMELINE_PAGE = 120
+
+/** `(before, before_id)` of a page, or null when it has no usable cursor. */
+function cursorOf(page: TimelinePage): { before: number; beforeId: number } | null {
+  if (page.next_before === null || page.next_before_id === null) return null
+  return { before: page.next_before, beforeId: page.next_before_id }
+}
+
+/**
+ * Append a timeline page.
+ *
+ * A page boundary lands wherever the item count runs out, so it regularly falls
+ * inside a day: the new page then opens with the group the list already ends
+ * with. Those two are stitched into one — appending them as-is would render the
+ * day twice, under two identical React keys.
+ *
+ * Both pages report the server's full-day count, so `count` needs no merge.
+ */
+function mergeTimeline(loaded: TimelineGroup[], page: TimelineGroup[]): TimelineGroup[] {
+  if (loaded.length === 0) return page
+  if (page.length === 0) return loaded
+  const tail = loaded[loaded.length - 1]
+  const head = page[0]
+  if (tail.key !== head.key) return [...loaded, ...page]
+  return [
+    ...loaded.slice(0, -1),
+    { ...tail, items: [...tail.items, ...head.items] },
+    ...page.slice(1),
+  ]
+}
 
 export default function Album() {
   // View and media-type filter live in the URL so they survive refresh and sharing.
@@ -36,6 +68,10 @@ export default function Album() {
     [params, setParams],
   )
   const [groups, setGroups] = useState<TimelineGroup[]>([])
+  /** Timeline paging: cursor of the last page, whether more exist, busy flag. */
+  const [timelineCursor, setTimelineCursor] = useState<{ before: number; beforeId: number } | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [moreLoading, setMoreLoading] = useState(false)
   const [tags, setTags] = useState<{ tag: string; kind: string; photo_count: number; cover_url?: string | null }[]>([])
   const [people, setPeople] = useState<{ id: number; name?: string | null; photo_count: number; cover_url?: string | null }[]>([])
   const [dirs, setDirs] = useState<DirStat[]>([])
@@ -175,12 +211,16 @@ export default function Album() {
   useEffect(() => {
     setError(null)
     if (view === 'timeline') {
+      // Paged. `limit` is what puts the server in paged mode — without it the
+      // whole library comes back in one body, which for a few thousand photos
+      // is a ~3 MB response.
       api
-        .get<{ groups: TimelineGroup[] }>('/api/photos/timeline', {
+        .get<TimelinePage>('/api/photos/timeline', {
           group: 'day',
           kind: kind === 'all' ? undefined : kind,
+          limit: TIMELINE_PAGE,
         })
-        .then((r) => setGroups(r.groups))
+        .then((r) => applyTimelinePage(r, true))
         .catch((e: Error) => setError(e.message))
     } else if (view === 'tags') {
       api
@@ -198,7 +238,38 @@ export default function Album() {
         .then((r) => setDirs(r.dirs))
         .catch((e: Error) => setError(e.message))
     }
-  }, [view])
+    // `kind` is in the deps on purpose: the 全部/照片/视频 switch only changes the
+    // URL, so without it the timeline kept showing the previous filter.
+  }, [view, kind])
+
+  /** Land a timeline page: first page replaces, later ones are appended. */
+  function applyTimelinePage(page: TimelinePage, replace: boolean) {
+    const cursor = cursorOf(page)
+    setGroups((prev) => (replace ? page.groups : mergeTimeline(prev, page.groups)))
+    setTimelineCursor(cursor)
+    setHasMore(page.has_more && cursor !== null)
+  }
+
+  /** Ask for the page after the one on screen. */
+  async function loadMoreTimeline() {
+    if (!timelineCursor || moreLoading) return
+    setMoreLoading(true)
+    try {
+      const page = await api.get<TimelinePage>('/api/photos/timeline', {
+        group: 'day',
+        kind: kind === 'all' ? undefined : kind,
+        limit: TIMELINE_PAGE,
+        before: timelineCursor.before,
+        before_id: timelineCursor.beforeId,
+      })
+      applyTimelinePage(page, false)
+    } catch (e) {
+      // Keep what is already on screen; the button stays available to retry.
+      setError(e instanceof Error ? e.message : '加载更多失败')
+    } finally {
+      setMoreLoading(false)
+    }
+  }
 
   /** Geo view refetches on its own: every zoom step re-samples on a finer grid. */
   useEffect(() => {
@@ -309,12 +380,30 @@ export default function Album() {
             return (
               <div key={g.key}>
                 <div className="section-title">
-                  {g.label} <span className="muted">{list.length} 项</span>
+                  {g.label} <span className="muted">{g.count} 项</span>
                 </div>
                 <PhotoGrid items={list} onOpen={(i) => setViewer({ items: list, index: i })} />
               </div>
             )
           })}
+          {hasMore ? (
+            <div className="row" style={{ justifyContent: 'center', padding: '12px 0' }}>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={loadMoreTimeline}
+                disabled={moreLoading}
+              >
+                {moreLoading ? '加载中…' : '加载更多'}
+              </button>
+            </div>
+          ) : (
+            groups.length > 0 && (
+              <div className="muted" style={{ textAlign: 'center', padding: '12px 0' }}>
+                没有更多了
+              </div>
+            )
+          )}
         </>
       )}
 

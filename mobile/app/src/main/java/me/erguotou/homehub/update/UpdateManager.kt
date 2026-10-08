@@ -8,7 +8,7 @@ import java.io.File
 import java.security.MessageDigest
 
 /** 准备过程的阶段，用来给界面换文案。 */
-enum class UpdateStage { DOWNLOADING, PATCHING, VERIFYING }
+enum class UpdateStage { DOWNLOADING, PATCHING, VERIFYING, INSTALLING }
 
 /** 准备结果。 */
 sealed interface UpdateResult {

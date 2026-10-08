@@ -47,11 +47,12 @@ import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.security.AppLock
 import me.erguotou.homehub.ui.components.ExportConfigButton
 import me.erguotou.homehub.ui.components.SettingsSection
+import me.erguotou.homehub.update.UpdateViewModel
 import me.erguotou.homehub.wireguard.TunnelManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onOpenSetup: () -> Unit) {
+fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
     val context = LocalContext.current
     val prefs = remember { Prefs(context) }
     val repository = remember { Repository(context) }
@@ -116,7 +117,7 @@ fun SettingsScreen(onOpenSetup: () -> Unit) {
                 }
             }
 
-            UpdateSection()
+            UpdateSection(updates)
 
             SettingsSection(
                 title = "服务器",

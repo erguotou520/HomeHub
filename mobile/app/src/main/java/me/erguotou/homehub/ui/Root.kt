@@ -31,6 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -47,7 +49,9 @@ import me.erguotou.homehub.ui.screens.album.SemanticSearchScreen
 import me.erguotou.homehub.ui.screens.files.FilesScreen
 import me.erguotou.homehub.ui.screens.monitor.MonitorScreen
 import me.erguotou.homehub.ui.screens.settings.SettingsScreen
+import me.erguotou.homehub.ui.screens.settings.UpdatePromptDialog
 import me.erguotou.homehub.ui.screens.setup.SetupScreen
+import me.erguotou.homehub.update.UpdateViewModel
 
 sealed class Tab(val route: String, val label: String, val icon: ImageVector, val iconSelected: ImageVector) {
     data object Album : Tab("album", "相册", Icons.Outlined.PhotoLibrary, Icons.Filled.PhotoLibrary)
@@ -62,6 +66,18 @@ private val TABS = listOf(Tab.Album, Tab.Files, Tab.Monitor, Tab.Settings)
 fun HomeHubRoot() {
     val navController = rememberNavController()
     var fullscreen by rememberSaveable { mutableStateOf(false) }
+
+    // 更新的状态常驻在这里：启动后那次自动检查、要不要弹升级框、设置页卡片显示的
+    // 内容，都是同一份。放在 ViewModel 里，下载/合并的长协程不会被界面重建打断。
+    val updates: UpdateViewModel = viewModel()
+
+    // 进到界面（已经解锁）之后自动查一次，每个进程只查一次。查不到、没有新版都
+    // 悄无声息，只有确实有新版才弹框。
+    LaunchedEffect(Unit) { updates.autoCheck() }
+
+    val updateState by updates.state.collectAsStateWithLifecycle()
+    val updatePrompt by updates.prompt.collectAsStateWithLifecycle()
+
     Scaffold(
         bottomBar = {
             if (!fullscreen) {
@@ -157,11 +173,25 @@ fun HomeHubRoot() {
                 composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }
                 composable(Tab.Monitor.route) { MonitorScreen() }
                 composable(Tab.Settings.route) {
-                    SettingsScreen(onOpenSetup = { navController.navigate("setup") })
+                    SettingsScreen(
+                        onOpenSetup = { navController.navigate("setup") },
+                        updates = updates
+                    )
                 }
                 composable("setup") {
                     SetupScreen(onFinished = { navController.popBackStack() })
                 }
+            }
+
+            // 自动检查发现新版本时问用户一句。位置随意（对话框自成窗口），
+            // 放在这里是为了让「谁在弹」一眼可见。
+            updatePrompt?.let {
+                UpdatePromptDialog(
+                    state = updateState,
+                    onDismiss = updates::dismissPrompt,
+                    onStart = updates::startUpdate,
+                    onRetry = updates::retry,
+                )
             }
         }
     }

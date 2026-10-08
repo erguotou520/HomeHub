@@ -83,7 +83,8 @@
         </service>
 
         <!-- 应用内更新的安装结果回调：PackageInstaller 会话完成后回到这里，
-             成功或失败都会经由 ApkInstaller.result 通知界面。 -->
+             结局由 ApkInstaller.result 通知界面。注意这条广播**可能迟到很久**
+             （换包会先杀掉进程），所以界面会按尝试编号认领，见 ApkInstaller.isApplicable。 -->
         <receiver
             android:name=".update.InstallResultReceiver"
             android:exported="false" />

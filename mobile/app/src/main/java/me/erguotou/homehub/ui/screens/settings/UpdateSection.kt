@@ -20,8 +20,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.ui.components.SettingsSection
 import me.erguotou.homehub.update.ApkInstaller
+import me.erguotou.homehub.update.InstallStart
 import me.erguotou.homehub.update.UpdateDelta
 import me.erguotou.homehub.update.UpdateManager
 import me.erguotou.homehub.update.UpdateManifest
@@ -66,20 +69,35 @@ fun UpdateSection(modifier: Modifier = Modifier) {
     val state = remember { MutableStateFlow<UpdateUiState>(UpdateUiState.Idle) }
     val current by state.collectAsState()
     val installResult by ApkInstaller.result.collectAsState()
+    // 正在等哪一次安装的结果；[ApkInstaller.NO_ATTEMPT] 表示没在等。理由见下面的用法。
+    var awaiting by remember { mutableStateOf(ApkInstaller.NO_ATTEMPT) }
 
-    LaunchedEffect(installResult) {
-        installResult?.let {
-            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
-            // 走到这里，一次安装尝试已经结束（成功、被取消、或被系统拒绝），
-            // 界面就不能再停在 Working 上：失败/取消时那会变成一块没有任何按钮的
-            // 死页面（"校验安装包" 永远转圈），用户只能杀进程。
-            // 成功时不显示额外状态 —— 覆盖安装随即替换进程，用户看到的本就是新版。
-            state.value = if (it == ApkInstaller.SUCCESS_MESSAGE) {
-                UpdateUiState.Idle
-            } else {
-                UpdateUiState.Failed(it)
-            }
+    LaunchedEffect(installResult, awaiting) {
+        val outcome = installResult ?: return@LaunchedEffect
+        if (!ApkInstaller.isApplicable(outcome, awaiting)) {
+            // 迟到、或压根不属于这次尝试的结果：悄悄丢掉。
+            //
+            // 这是「已取消安装」幽灵消息的解药。换包会把进程杀掉，而安装结果广播
+            // 随后才到 —— 系统于是**事后**冷启一个进程专门投递它（真机日志：
+            // 13:43:32 换包 → 13:43:35 `Start proc ... for broadcast
+            // {InstallResultReceiver}`）。那一刻没有任何界面在等结果，值就留在
+            // StateFlow 里；用户几分钟后打开设置页，这张卡一组合就把它当成本次
+            // 的结果弹给用户，而屏幕上「当前版本」明明已经是新的。
+            // 只有「正在等」的那一次的结果才配显示，其余一律丢弃。
             ApkInstaller.clear()
+            return@LaunchedEffect
+        }
+        awaiting = ApkInstaller.NO_ATTEMPT
+        ApkInstaller.clear()
+        Toast.makeText(context, outcome.message, Toast.LENGTH_LONG).show()
+        // 走到这里，一次安装尝试已经结束（成功、被取消、或被系统拒绝），
+        // 界面就不能再停在 Working 上：失败/取消时那会变成一块没有任何按钮的
+        // 死页面（"校验安装包" 永远转圈），用户只能杀进程。
+        // 成功时不显示额外状态 —— 覆盖安装随即替换进程，用户看到的本就是新版。
+        state.value = if (outcome.success) {
+            UpdateUiState.Idle
+        } else {
+            UpdateUiState.Failed(outcome.message)
         }
     }
 
@@ -121,8 +139,11 @@ fun UpdateSection(modifier: Modifier = Modifier) {
             when (result) {
                 is UpdateResult.Failed -> state.value = UpdateUiState.Failed(result.reason)
                 is UpdateResult.Ready -> {
-                    val error = ApkInstaller.install(context, result.apk)
-                    if (error != null) state.value = UpdateUiState.Failed(error)
+                    // 目标版本随会话一起交给系统，结果回来时用它和「已安装版本」对账。
+                    when (val start = ApkInstaller.install(context, result.apk, manifest.versionCode)) {
+                        is InstallStart.Refused -> state.value = UpdateUiState.Failed(start.reason)
+                        is InstallStart.Submitted -> awaiting = start.attempt
+                    }
                 }
             }
         }

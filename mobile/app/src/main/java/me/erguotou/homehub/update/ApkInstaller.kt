@@ -19,6 +19,14 @@ import java.io.File
  */
 object ApkInstaller {
 
+    /**
+     * 安装成功的提示文案。
+     *
+     * 界面靠它区分「装好了」和「被拒了」—— 两者都要结束「进行中」这个状态，
+     * 但只有后者需要把用户按回可重试的界面。改这里的字面值要同步改 [me.erguotou.homehub.ui.screens.settings.UpdateSection]。
+     */
+    const val SUCCESS_MESSAGE = "已更新到新版本"
+
     private val _result = MutableStateFlow<String?>(null)
 
     /** 最近一次安装结果，界面订阅它提示成功或失败。 */
@@ -79,7 +87,7 @@ class InstallResultReceiver : BroadcastReceiver() {
         )
         when (status) {
             PackageInstaller.STATUS_SUCCESS ->
-                ApkInstaller.publish("已更新到新版本")
+                ApkInstaller.publish(ApkInstaller.SUCCESS_MESSAGE)
 
             // 用户还没允许「安装未知应用」，需要把系统的授权页拉起来，
             // 否则安装会停在这一步，界面上什么都不发生。

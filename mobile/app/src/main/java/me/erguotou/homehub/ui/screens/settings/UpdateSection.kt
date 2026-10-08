@@ -70,6 +70,15 @@ fun UpdateSection(modifier: Modifier = Modifier) {
     LaunchedEffect(installResult) {
         installResult?.let {
             Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+            // 走到这里，一次安装尝试已经结束（成功、被取消、或被系统拒绝），
+            // 界面就不能再停在 Working 上：失败/取消时那会变成一块没有任何按钮的
+            // 死页面（"校验安装包" 永远转圈），用户只能杀进程。
+            // 成功时不显示额外状态 —— 覆盖安装随即替换进程，用户看到的本就是新版。
+            state.value = if (it == ApkInstaller.SUCCESS_MESSAGE) {
+                UpdateUiState.Idle
+            } else {
+                UpdateUiState.Failed(it)
+            }
             ApkInstaller.clear()
         }
     }

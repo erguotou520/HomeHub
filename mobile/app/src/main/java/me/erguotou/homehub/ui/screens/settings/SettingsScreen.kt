@@ -65,6 +65,7 @@ fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
     var useHttps by remember { mutableStateOf(prefs.useHttps) }
     var certPem by remember { mutableStateOf(prefs.serverCertPem) }
     var trustCustom by remember { mutableStateOf(prefs.trustCustomCert) }
+    var deviceToken by remember { mutableStateOf(prefs.deviceToken) }
 
     var biometric by remember { mutableStateOf(prefs.biometricLock) }
     var deleteAfterUpload by remember { mutableStateOf(prefs.deleteAfterUpload) }
@@ -95,6 +96,10 @@ fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
             onFailure = { e -> "连接失败：${e.message}" }
         )
     }
+
+    // 令牌单独一条 effect：改它不需要重探 /api/health（否则每敲一个字都探一次），
+    // 而且所有请求都是现读 Prefs，所以写进去就立刻生效。
+    LaunchedEffect(deviceToken) { prefs.deviceToken = deviceToken }
 
     Scaffold(topBar = { TopAppBar(title = { Text("设置") }) }) { padding ->
         Column(
@@ -147,6 +152,21 @@ fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
                 ToggleRow("使用 HTTPS", useHttps) { useHttps = it }
+
+                OutlinedTextField(
+                    value = deviceToken,
+                    onValueChange = { deviceToken = it },
+                    label = { Text("访问令牌") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                Text(
+                    "监控页的共享令牌，在 HomeHub 后台「监控 → 设置 → 手机访问令牌」里生成或填写，" +
+                        "两处必须完全一致。后台留空表示不校验，这里也留空即可；填错时监控页会提示 401。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 // 只有走 HTTPS 时证书固定才有意义；裸 HTTP（WireGuard 隧道内）
                 // 场景下把它藏起来，避免误导。
@@ -236,7 +256,7 @@ fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
             SettingsSection(
                 title = "配置",
                 icon = Icons.Outlined.IosShare,
-                description = "将服务器与 WireGuard 配置导出为 JSON（不含私钥），便于迁移到新设备。"
+                description = "将服务器与 WireGuard 配置导出为 JSON（不含私钥与访问令牌），便于迁移到新设备。"
             ) {
                 ExportConfigButton(prefs.exportConfig())
             }

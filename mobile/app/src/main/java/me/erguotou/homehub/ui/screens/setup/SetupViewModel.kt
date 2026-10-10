@@ -25,6 +25,8 @@ data class SetupUiState(
     val serverAddress: String = "",
     val serverPort: String = "8485",
     val useHttps: Boolean = false,
+    /** 监控数据面的共享令牌；后台没开校验时留空。 */
+    val deviceToken: String = "",
     val testing: Boolean = false,
     val testResult: String? = null,
     val saved: Boolean = false
@@ -47,7 +49,8 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
             keepalive = prefs.wgKeepalive,
             serverAddress = prefs.serverAddress,
             serverPort = prefs.serverPort.toString(),
-            useHttps = prefs.useHttps
+            useHttps = prefs.useHttps,
+            deviceToken = prefs.deviceToken
         )
     )
         private set
@@ -77,6 +80,7 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         prefs.serverAddress = state.serverAddress.trim()
         prefs.serverPort = state.serverPort.toIntOrNull() ?: 8485
         prefs.useHttps = state.useHttps
+        prefs.deviceToken = state.deviceToken
         repository.invalidate()
         state = state.copy(saved = true)
     }
@@ -111,7 +115,8 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
                 keepalive = prefs.wgKeepalive,
                 serverAddress = prefs.serverAddress,
                 serverPort = prefs.serverPort.toString(),
-                useHttps = prefs.useHttps
+                useHttps = prefs.useHttps,
+                deviceToken = prefs.deviceToken
             )
         }
         return ok

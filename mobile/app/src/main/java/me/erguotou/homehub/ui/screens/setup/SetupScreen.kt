@@ -152,6 +152,9 @@ private fun ServerStep(vm: SetupViewModel) {
         vm.update { copy(serverAddress = it) }
     })
     Field("端口", state.serverPort, { vm.update { copy(serverPort = it) } })
+    Field("访问令牌（监控用，可留空）", state.deviceToken, {
+        vm.update { copy(deviceToken = it) }
+    })
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = state.useHttps, onCheckedChange = { vm.update { copy(useHttps = it) } })
         Text("使用 HTTPS（自签证书请在设置里登记证书）")

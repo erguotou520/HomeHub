@@ -171,7 +171,7 @@ fun HomeHubRoot() {
                     }
                 }
                 composable(Tab.Files.route) { FilesScreen(onFullscreenChange = { fullscreen = it }) }
-                composable(Tab.Monitor.route) { MonitorScreen() }
+                composable(Tab.Monitor.route) { MonitorScreen(onFullscreenChange = { fullscreen = it }) }
                 composable(Tab.Settings.route) {
                     SettingsScreen(
                         onOpenSetup = { navController.navigate("setup") },

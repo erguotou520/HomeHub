@@ -125,6 +125,10 @@ dependencies {
 
     // Video playback in the album viewer
     implementation libs.media3.exoplayer
+    // HLS：监控实时预览**唯一**的取流通道 —— 手机拿到的 rtsp_url 是打码的、且通常
+    // 不在摄像头网段，直连 RTSP 必然鉴权失败，所以走服务端中继（fMP4/HLS）。
+    // 曾经为此引的 libs.media3.exoplayer.rtsp 已去掉（不再有任何直连 RTSP 的代码）。
+    implementation libs.media3.exoplayer.hls
     implementation libs.media3.ui
 
     // Background upload

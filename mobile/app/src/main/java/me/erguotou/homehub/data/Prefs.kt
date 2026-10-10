@@ -97,6 +97,19 @@ class Prefs(context: Context) {
         get() = prefs.getString(KEY_FRIGATE_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_FRIGATE_URL, value.trim()).apply()
 
+    /**
+     * 监控数据面的共享令牌，与后台「监控 → 手机访问令牌」里设的**必须完全一致**。
+     *
+     * 服务端没配令牌时留空即可；配了之后监控的每个请求（摄像头列表 / 实时 HLS /
+     * 回放分片 / 云台）都要带上它，否则服务端回 401。
+     *
+     * 和 WireGuard 私钥一样算本机凭据，所以**不进导出 JSON** —— 那个文件是拿来
+     * 传阅 / 迁移的，令牌要走别的渠道单独给。
+     */
+    var deviceToken: String
+        get() = prefs.getString(KEY_DEVICE_TOKEN, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_DEVICE_TOKEN, value.trim()).apply()
+
     fun baseUrl(): String {
         val scheme = if (useHttps) "https" else "http"
         val host = serverAddress.trim().trimEnd('/')
@@ -279,6 +292,7 @@ class Prefs(context: Context) {
         private const val KEY_LAST_UPLOAD_PATH = "last_upload_path"
         private const val KEY_LAST_FILE_DIR = "last_file_dir"
         private const val KEY_FRIGATE_URL = "frigate_url"
+        private const val KEY_DEVICE_TOKEN = "device_token"
 
         private const val WG_PRIVATE_KEY = "wg_private_key"
         private const val WG_PUBLIC_KEY = "wg_public_key"

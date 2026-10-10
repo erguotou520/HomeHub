@@ -8,9 +8,10 @@
 //!   form for — ML, compression, video, originals, trash, audit. Because the
 //!   file wins for those, editing them and restarting actually does something.
 //! * **SQLite wins for what the admin UI edits.** That is the remaining runtime
-//!   sections (`tasks`, `alerts`, `backup`) plus per-directory state such as
-//!   `dirs.enabled`. [`Config::save`] leaves those out of the file, so there is
-//!   never a second copy sitting there to be edited and silently ignored.
+//!   sections (`tasks`, `alerts`, `backup`, `security`) plus per-directory state
+//!   such as `dirs.enabled`. [`Config::save`] leaves those out of the file, so
+//!   there is never a second copy sitting there to be edited and silently
+//!   ignored.
 //!
 //! `main::load_runtime_settings` is where the two are combined at boot.
 
@@ -73,6 +74,7 @@ struct RuntimeFileSections<'a> {
     originals: &'a OriginalsConfig,
     trash: &'a TrashConfig,
     audit: &'a AuditConfig,
+    nvr: &'a NvrConfig,
 }
 
 impl<'a> From<&'a Config> for ConfigFile<'a> {
@@ -89,6 +91,7 @@ impl<'a> From<&'a Config> for ConfigFile<'a> {
                 originals: &c.runtime.originals,
                 trash: &c.runtime.trash,
                 audit: &c.runtime.audit,
+                nvr: &c.runtime.nvr,
             },
             apps: c.apps.as_ref(),
         }
@@ -167,7 +170,7 @@ impl AdminConfig {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -275,7 +278,7 @@ pub struct WgPeerConfig {
 /// so `config.yaml` stays authoritative or it could not be configured at all.
 ///
 /// Keys are the serialised names, as they appear inside `runtime:`.
-pub const ADMIN_OWNED_RUNTIME_SECTIONS: [&str; 3] = ["tasks", "alerts", "backup"];
+pub const ADMIN_OWNED_RUNTIME_SECTIONS: [&str; 4] = ["tasks", "alerts", "backup", "security"];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuntimeSettings {
@@ -297,6 +300,10 @@ pub struct RuntimeSettings {
     pub backup: BackupConfig,
     #[serde(default)]
     pub alerts: AlertConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+    #[serde(default)]
+    pub nvr: NvrConfig,
 }
 
 impl Default for RuntimeSettings {
@@ -311,6 +318,8 @@ impl Default for RuntimeSettings {
             audit: AuditConfig::default(),
             backup: BackupConfig::default(),
             alerts: AlertConfig::default(),
+            security: SecurityConfig::default(),
+            nvr: NvrConfig::default(),
         }
     }
 }
@@ -328,7 +337,29 @@ impl RuntimeSettings {
         self.originals = file.originals.clone();
         self.trash = file.trash.clone();
         self.audit = file.audit.clone();
+        self.nvr = file.nvr.clone();
     }
+}
+
+/// Data-plane access control.
+///
+/// The read-only `/api/nvr/*` routes used to be open to anyone who could reach
+/// the port — WireGuard was treated as the only boundary. That is too loose for
+/// a box that also answers on the LAN: `GET /api/nvr/cameras` hands out the
+/// camera list (with its RTSP credentials masked, but still) and the recording
+/// timeline. A shared token closes that without introducing a user system on
+/// the phone: the admin sets one here, the app sends it back verbatim.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SecurityConfig {
+    /// Shared token the app must present on `/api/nvr/*`.
+    ///
+    /// **Empty means "no check"**, which is the pre-token behaviour and stays
+    /// the default so an upgrade never locks a phone out of its own server.
+    /// Both media players and the app send it as `X-Device-Token`; an admin JWT
+    /// in `Authorization` is accepted as well, which is what keeps the web
+    /// monitor page working.
+    #[serde(rename = "device-token", default)]
+    pub device_token: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -732,6 +763,145 @@ pub struct VideoConfig {
     /// Path to `ffmpeg` used for video poster (first frame) extraction.
     #[serde(rename = "ffmpeg-path", default = "default_ffmpeg")]
     pub ffmpeg_path: String,
+}
+
+// ── NVR (docs/design/nvr.md §4) ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NvrVideoConfig {
+    /// Source stream: `main` (stream1). Kept for per-camera override headroom.
+    #[serde(default = "default_nvr_source")]
+    pub source: String,
+    /// Target resolution, e.g. `1920x1080`. Sources smaller than this are not upscaled.
+    #[serde(rename = "scale", default = "default_nvr_scale")]
+    pub scale: String,
+    /// Target fps; 0 = keep source fps.
+    #[serde(default)]
+    pub fps: u32,
+    /// x264 quality; lower = better.
+    #[serde(default = "default_nvr_crf")]
+    pub crf: u32,
+    /// Bitrate ceiling (keeps worst-case storage predictable).
+    #[serde(rename = "maxrate", default = "default_nvr_maxrate")]
+    pub maxrate: String,
+    /// VBV buffer, typically 2x maxrate.
+    #[serde(rename = "bufsize", default = "default_nvr_bufsize")]
+    pub bufsize: String,
+    /// `auto` | `libx264` | `h264_nvenc` | `h264_qsv` | `videotoolbox`.
+    #[serde(default = "default_nvr_encoder")]
+    pub encoder: String,
+    /// x264 preset (ignored by hwaccel encoders).
+    #[serde(default = "default_nvr_preset")]
+    pub preset: String,
+    /// Global audio default; per-camera `record_audio` overrides.
+    /// G.711 = 64kbps ≈ 691MB/day per camera, off by default.
+    #[serde(default)]
+    pub audio: bool,
+}
+
+fn default_nvr_source() -> String { "main".into() }
+fn default_nvr_scale() -> String { "1920x1080".into() }
+fn default_nvr_crf() -> u32 { 28 }
+fn default_nvr_maxrate() -> String { "2M".into() }
+fn default_nvr_bufsize() -> String { "4M".into() }
+fn default_nvr_encoder() -> String { "auto".into() }
+fn default_nvr_preset() -> String { "veryfast".into() }
+
+impl Default for NvrVideoConfig {
+    fn default() -> Self {
+        Self {
+            source: default_nvr_source(),
+            scale: default_nvr_scale(),
+            fps: 0,
+            crf: default_nvr_crf(),
+            maxrate: default_nvr_maxrate(),
+            bufsize: default_nvr_bufsize(),
+            encoder: default_nvr_encoder(),
+            preset: default_nvr_preset(),
+            audio: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NvrConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Empty = `{data_dir}/recordings`.
+    #[serde(rename = "record-dir", default)]
+    pub record_dir: String,
+    /// Local timezone for the directory layout (filenames only; DB stays unix seconds).
+    #[serde(default = "default_nvr_timezone")]
+    pub timezone: String,
+    /// Segment length, 10..600.
+    #[serde(rename = "segment-secs", default = "default_nvr_segment_secs")]
+    pub segment_secs: u32,
+    /// Cleanup cadence in minutes.
+    #[serde(rename = "expire-interval-mins", default = "default_nvr_expire_interval")]
+    pub expire_interval_mins: u32,
+    /// Retention in days.
+    #[serde(rename = "retain-days", default = "default_nvr_retain_days")]
+    pub retain_days: u32,
+    /// 0 = off; otherwise trim oldest-first until below this cap.
+    #[serde(rename = "max-gb", default)]
+    pub max_gb: u64,
+    /// Cache-maintenance loop interval.
+    #[serde(rename = "maintain-interval-secs", default = "default_nvr_maintain_interval")]
+    pub maintain_interval_secs: u32,
+    /// Scene-change (motion) detection: tag each segment with `motion`
+    /// (0 unknown / 1 still / 2 active) via ffmpeg scdet. Still segments are
+    /// deleted after tagging when the setting is on.
+    #[serde(rename = "motion-detect", default = "default_true")]
+    pub motion_detect: bool,
+    /// Delete "still" segments (no scene change) after scoring, saving
+    /// storage. Only effective when `motion-detect` is on.
+    #[serde(rename = "drop-still", default = "default_true")]
+    pub drop_still: bool,
+    /// scdet score window: a segment with >`still-threshold` fraction of
+    /// flagged frames is "still" (default 0.005).
+    #[serde(rename = "still-threshold", default = "default_nvr_still_threshold")]
+    pub still_threshold: f64,
+    #[serde(default)]
+    pub video: NvrVideoConfig,
+}
+
+fn default_nvr_timezone() -> String { "Asia/Shanghai".into() }
+fn default_nvr_segment_secs() -> u32 { 60 }
+fn default_nvr_expire_interval() -> u32 { 60 }
+fn default_nvr_retain_days() -> u32 { 30 }
+fn default_nvr_maintain_interval() -> u32 { 10 }
+fn default_nvr_still_threshold() -> f64 { 0.005 }
+
+impl Default for NvrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            record_dir: String::new(),
+            timezone: default_nvr_timezone(),
+            segment_secs: default_nvr_segment_secs(),
+            expire_interval_mins: default_nvr_expire_interval(),
+            retain_days: default_nvr_retain_days(),
+            max_gb: 0,
+            maintain_interval_secs: default_nvr_maintain_interval(),
+            motion_detect: true,
+            drop_still: true,
+            still_threshold: default_nvr_still_threshold(),
+            video: NvrVideoConfig::default(),
+        }
+    }
+}
+
+impl NvrConfig {
+    pub fn record_root(&self, data_dir: &str) -> PathBuf {
+        if self.record_dir.is_empty() {
+            PathBuf::from(data_dir).join("recordings")
+        } else {
+            PathBuf::from(&self.record_dir)
+        }
+    }
+    pub fn cache_dir(&self, data_dir: &str) -> PathBuf {
+        self.record_root(data_dir).join(".cache")
+    }
 }
 
 fn default_ffprobe() -> String {
@@ -1222,6 +1392,26 @@ mod tests {
 
         assert_eq!(stored.ml.backend, "onnx");
         assert_eq!(stored.tasks.max_workers, 42);
+    }
+
+    /// The device token is admin-owned, so a `security:` block smuggled into
+    /// `config.yaml` must be ignored: taking it would let the file silently
+    /// undo the token set from the browser on every restart, and an empty
+    /// value there would reopen the whole data plane.
+    #[test]
+    fn device_token_is_not_taken_from_the_file() {
+        let file: RuntimeSettings =
+            serde_yaml::from_str("security:\n  device-token: from-the-file\n").unwrap();
+        let mut stored = RuntimeSettings {
+            security: SecurityConfig {
+                device_token: "from-the-admin-ui".into(),
+            },
+            ..Default::default()
+        };
+
+        stored.apply_file_sections(&file);
+
+        assert_eq!(stored.security.device_token, "from-the-admin-ui");
     }
 
     #[test]

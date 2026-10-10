@@ -34,9 +34,11 @@ impl FromRequestParts<AppState> for Claims {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        // Header only: a `?token=` fallback used to be accepted here, but URLs
-        // end up in proxy logs, browser history and `Referer` headers, so the
-        // credential had a habit of leaking out of its transport.
+        // Header only. A `?token=` fallback used to be accepted for the NVR
+        // media routes (`<video>` cannot send headers), but those routes are
+        // now on the data plane and no longer authenticate at all, so the
+        // fallback had no remaining caller — and URLs leak into proxy logs,
+        // browser history and `Referer` headers anyway.
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)

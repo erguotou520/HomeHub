@@ -32,6 +32,7 @@ use config::{Config, ConfigStore, RuntimeSettings};
 use middleware::audit_layer::AuditLayer;
 use services::audit::AuditWriter;
 use services::dirs::DirRegistry;
+use services::nvr::NvrState;
 use services::tasks::TaskQueue;
 
 /// Shared application state.
@@ -46,6 +47,8 @@ pub struct AppState {
     pub jwt_secret: String,
     pub web_url: String,
     pub started_at: i64,
+    /// NVR state (None when `nvr.enabled` is false).
+    pub nvr: Option<std::sync::Arc<NvrState>>,
 }
 
 #[tokio::main]
@@ -132,6 +135,15 @@ async fn main() -> anyhow::Result<()> {
 
     let audit_writer = services::audit::spawn(pool.clone(), &config);
 
+    // NVR: per-camera RTSP recorders + cache maintainer + retention cleanup.
+    let nvr_state: Option<std::sync::Arc<NvrState>> = if config.runtime.nvr.enabled {
+        let nvr_pool = pool.clone();
+        let nvr_store = store.clone();
+        services::nvr::spawn(nvr_pool, nvr_store).await
+    } else {
+        None
+    };
+
     std::fs::create_dir_all(config.trash_dir()).ok();
     std::fs::create_dir_all(config.originals_dir()).ok();
 
@@ -144,12 +156,15 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret: config.global.jwt_secret.clone(),
         web_url: config.global.web_url.clone(),
         started_at: db::now(),
+        nvr: nvr_state,
     };
 
     let app = Router::new()
         // ── admin API ──
         .merge(handlers::admin::routes())
         .merge(handlers::admin::maintenance_routes())
+        // ── NVR / monitoring ──
+        .merge(handlers::nvr::routes(state.clone()))
         // ── data plane ──
         .merge(handlers::photos::routes())
         .merge(handlers::files::routes())

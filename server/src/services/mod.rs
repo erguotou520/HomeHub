@@ -15,6 +15,7 @@ pub mod hash;
 pub mod image_ops;
 pub mod media_service;
 pub mod ml;
+pub mod nvr;
 pub mod originals;
 pub mod paths;
 pub mod photos;

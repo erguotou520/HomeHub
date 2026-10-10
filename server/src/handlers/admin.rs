@@ -491,6 +491,7 @@ pub async fn get_settings(
 ) -> Result<Json<serde_json::Value>, crate::models::AppError> {
     let mut settings = state.config.get().runtime.clone();
     settings.alerts.serverchan.send_key = mask_secret(&settings.alerts.serverchan.send_key);
+    settings.security.device_token = mask_secret(&settings.security.device_token);
     Ok(Json(serde_json::to_value(settings).unwrap_or_default()))
 }
 
@@ -548,9 +549,17 @@ pub async fn update_settings(
     // Masked / blank secrets mean "unchanged" — put the stored value back.
     // Applied *after* the merge rather than before it, so it covers both a
     // client that sent the mask and one that sent nothing at all.
-    let current = state.config.get().runtime.alerts.clone();
+    //
+    // `security.device-token` follows the same rule, which is why this generic
+    // endpoint can never clear it: clearing (turning the check off) is an
+    // explicit act, served by `PUT /api/admin/nvr/device-token` with an empty
+    // value, not something a page can do by saving a form it does not own.
+    let current = state.config.get();
     if is_masked(&settings.alerts.serverchan.send_key) {
-        settings.alerts.serverchan.send_key = current.serverchan.send_key;
+        settings.alerts.serverchan.send_key = current.runtime.alerts.serverchan.send_key.clone();
+    }
+    if is_masked(&settings.security.device_token) {
+        settings.security.device_token = current.runtime.security.device_token.clone();
     }
 
     let serialized = serde_json::to_string(&settings)?;

@@ -2377,6 +2377,103 @@ button.op.danger:hover {
   font-weight: 600;
 }
 
+/* 监控预览弹层：更宽，承载视频 + 历史列表 */
+.preview-modal {
+  width: min(880px, calc(100vw - 40px));
+}
+
+.preview-stage {
+  position: relative;
+  background: #000;
+  border-radius: var(--r-md, 8px);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.preview-stage video {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  background: #000;
+}
+
+.preview-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cfd6e4;
+  font-size: 13px;
+  padding: 16px;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+/* 实时状态徽章：固定在画面左上角，连接中=灰、LIVE=红 */
+.preview-live-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+.preview-live-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.preview-live-badge.on {
+  color: #fff;
+  background: rgba(224, 65, 65, 0.85);
+}
+.preview-live-badge.on::before {
+  background: #fff;
+  animation: cam-rec-blink 1.6s ease-in-out infinite;
+}
+
+/* 实时 / 历史切换：位于播放区下方，右侧对齐辅助说明 */
+.preview-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.preview-tabs .preview-note {
+  margin-left: auto;
+}
+
+.preview-note {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.preview-history .preview-note {
+  margin-top: 8px;
+}
+
+.preview-history {
+  max-height: 38vh;
+  overflow: auto;
+}
+
+.preview-history .table {
+  margin: 0 0 8px;
+}
+
 .modal p {
   margin: 0 0 12px;
   color: var(--text-2);
@@ -2413,6 +2510,58 @@ button.op.danger:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 统一弹层：标题行右上关闭 + 内容区 + 底部操作区 */
+.modal-close {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.modal-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.modal-body {
+  padding: 16px;
+}
+
+.modal-body > form {
+  margin: 0;
+}
+
+/* 弹层底部操作区：主操作在左、状态提示靠右对齐 */
+.modal-foot.form-actions {
+  justify-content: flex-start;
+}
+.form-actions .form-actions-spacer {
+  flex: 1 1 auto;
+}
+
+/* 只读展示字段：与输入框同高对齐，避免占位错位 */
+.field-readonly .field-value {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--text-2);
+  background: var(--surface-2-alpha);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
 }
 
 .preview-body {
@@ -2725,4 +2874,407 @@ tr:focus-within,
   height: 100%;
   background: var(--accent, #3b9eff);
   transition: width 0.6s ease;
+}
+
+/* ── 监控页 · NVR ── */
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px 16px;
+  align-items: end;
+}
+.grid-4 .field {
+  min-width: 0;
+}
+.grid-4 .span-2 {
+  grid-column: span 2;
+}
+.grid-4 .row {
+  grid-column: 1 / -1;
+}
+@media (max-width: 900px) {
+  .grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.badge.off {
+  background: var(--surface-2-alpha);
+  color: var(--text-3);
+}
+
+.timeline-ruler {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.timeline-cell {
+  flex: 0 0 10px;
+  height: 22px;
+  border-radius: 3px;
+}
+.timeline-cell.on {
+  background: var(--ok);
+}
+.timeline-cell.off {
+  background: var(--surface-2-alpha);
+}
+
+.small {
+  font-size: 12px;
+}
+
+/* ── 监控页 · 摄像头卡片 ── */
+
+.cam-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.cam-page-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.cam-page-title h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.cam-head-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  margin-right: 5px;
+  vertical-align: baseline;
+}
+.cam-head-dot.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+
+.cam-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+@media (max-width: 640px) {
+  .cam-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cam-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease,
+    background 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.cam-card:hover {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  transform: translateY(-2px);
+}
+.cam-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.cam-card.st-err {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--line));
+}
+
+.cam-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background:
+    radial-gradient(120% 90% at 50% 10%, rgba(106, 169, 255, 0.07) 0%, transparent 60%),
+    var(--bg-deep);
+  border: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.cam-thumb-icon {
+  width: 42px;
+  height: 42px;
+  fill: var(--text-3);
+  opacity: 0.55;
+}
+.cam-rec-dot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--err);
+  box-shadow: 0 0 0 3px var(--err-soft);
+  animation: cam-rec-blink 1.6s ease-in-out infinite;
+}
+@keyframes cam-rec-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.cam-thumb-hover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(11, 12, 15, 0.55);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cam-card:hover .cam-thumb-hover,
+.cam-card:focus-visible .cam-thumb-hover {
+  opacity: 1;
+}
+
+.cam-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.cam-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.cam-name-row strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cam-meta {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cam-error {
+  font-size: 11.5px;
+  color: var(--warn);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cam-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 10px;
+}
+.cam-actions button {
+  width: 100%;
+  padding: 5px 0;
+  font-size: 12px;
+  text-align: center;
+  min-width: 0;
+}
+.cam-actions .danger {
+  grid-column: span 1;
+}
+@media (max-width: 360px) {
+  .cam-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cam-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 64px 24px;
+  text-align: center;
+}
+.cam-empty-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: var(--surface-2-alpha);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cam-empty-icon svg {
+  width: 30px;
+  height: 30px;
+  fill: var(--text-3);
+}
+.cam-empty p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+/* ── 监控页 · 录像详情 ── */
+
+.cam-detail {
+  margin-top: 16px;
+  padding: 14px 16px 16px;
+}
+.cam-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.cam-detail-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.cam-detail-count {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.cam-detail-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+.cam-back {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 14px;
+  text-align: center;
+  line-height: 28px;
+}
+
+.clip-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+  transition: background 0.12s ease;
+}
+.clip-row:last-child {
+  border-bottom: 0;
+}
+.clip-row:hover {
+  background: var(--hover);
+}
+.clip-play {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--surface-2-alpha);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
+}
+.clip-play:hover {
+  background: var(--accent-soft);
+}
+.clip-play svg {
+  width: 18px;
+  height: 18px;
+  fill: var(--text);
+  margin-left: 2px;
+}
+.clip-time {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13.5px;
+}
+.clip-motion {
+  margin-left: 6px;
+  font-size: 10.5px;
+  vertical-align: 1px;
+}
+.clip-time .muted {
+  margin-top: 2px;
+}
+.clip-size {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.clip-del {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.clip-row:hover .clip-del {
+  opacity: 1;
+}
+.clip-del svg {
+  width: 15px;
+  height: 15px;
+  fill: var(--text-3);
+}
+.clip-del:hover {
+  background: var(--err-soft);
+}
+.clip-del:hover svg {
+  fill: var(--err);
+}
+
+/* 「加载更早」：列表下方居中的统一落点 */
+.clip-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 12px;
 }

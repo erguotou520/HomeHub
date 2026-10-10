@@ -297,4 +297,103 @@ export interface RuntimeSettings {
     'cooldown-secs': number
     serverchan: { enabled: boolean; 'send-key': string }
   }
+  nvr?: {
+    enabled: boolean
+    'record-dir'?: string | null
+    timezone: string
+    'segment-secs': number
+    'expire-interval-mins': number
+    'retain-days': number
+    'max-gb': number
+    'maintain-interval-secs': number
+    video: {
+      source: string
+      scale: string
+      fps: number
+      crf: number
+      maxrate: string
+      bufsize: string
+      encoder: string
+      preset: string
+      audio: boolean
+    }
+  }
+}
+
+// ─────────────────────────────── NVR ────────────────────────────────────
+
+export interface NvrCamera {
+  id: number
+  name: string
+  label: string | null
+  /** 主码流。**管理端返回的是带凭据的原始地址**（设备面才打码）。 */
+  rtsp_url: string
+  /** 子码流；null = 由主码流把 /stream1 换成 /stream2 推导。 */
+  rtsp_sub_url: string | null
+  enabled: boolean
+  record_stream: number
+  record_audio: boolean
+  /** 实时预览中继拉哪一路：'sub'（默认）| 'main'。 */
+  preview_stream: 'sub' | 'main'
+  status: string
+  restart_count: number
+  last_error: string | null
+  last_segment_at: number | null
+  today_segments: number
+  total_size_bytes: number
+  total_segments: number
+}
+
+export interface NvrSegment {
+  id: number
+  camera_id: number
+  path: string
+  start_time: number
+  end_time: number
+  duration: number
+  size_bytes: number
+  video_codec: string | null
+  width: number | null
+  height: number | null
+  /** 0 = unknown, 1 = still, 2 = active (motion detected) */
+  motion: number
+  /** fraction of frames flagged as scene changes, 0..1 */
+  motion_score: number
+}
+
+export interface NvrSegmentPage {
+  segments: NvrSegment[]
+  next_before: number | null
+  limit: number
+}
+
+export interface NvrTimelineHour {
+  hour_start: number
+  hour_end: number
+  segments: number
+  bytes: number
+}
+
+export interface NvrSettings {
+  enabled: boolean
+  record_dir: string
+  timezone: string
+  segment_secs: number
+  expire_interval_mins: number
+  retain_days: number
+  max_gb: number
+  maintain_interval_secs: number
+  video: {
+    source: string
+    scale: string
+    fps: number
+    crf: number
+    maxrate: string
+    bufsize: string
+    encoder: string
+    preset: string
+    audio: boolean
+  }
+  total_size_bytes: number
+  ffmpeg_available: boolean
 }

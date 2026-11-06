@@ -63,7 +63,7 @@ sealed class Tab(val route: String, val label: String, val icon: ImageVector, va
 private val TABS = listOf(Tab.Album, Tab.Files, Tab.Monitor, Tab.Settings)
 
 @Composable
-fun HomeHubRoot() {
+fun HomeHubRoot(onConnectTunnel: () -> Unit) {
     val navController = rememberNavController()
     var fullscreen by rememberSaveable { mutableStateOf(false) }
 
@@ -175,7 +175,8 @@ fun HomeHubRoot() {
                 composable(Tab.Settings.route) {
                     SettingsScreen(
                         onOpenSetup = { navController.navigate("setup") },
-                        updates = updates
+                        updates = updates,
+                        onConnectTunnel = onConnectTunnel
                     )
                 }
                 composable("setup") {

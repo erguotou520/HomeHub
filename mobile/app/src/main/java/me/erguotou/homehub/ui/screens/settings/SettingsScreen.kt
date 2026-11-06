@@ -52,7 +52,7 @@ import me.erguotou.homehub.wireguard.TunnelManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
+fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel, onConnectTunnel: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { Prefs(context) }
     val repository = remember { Repository(context) }
@@ -116,7 +116,10 @@ fun SettingsScreen(onOpenSetup: () -> Unit, updates: UpdateViewModel) {
                 description = "状态：${tunnelState.name}" + (lastError?.let { " · $it" } ?: "")
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { TunnelManager.connect(context, prefs) }) { Text("连接") }
+                    // 不能直接 TunnelManager.connect：未授权时会抛 VPN_NOT_AUTHORIZED。
+                    // 走 MainActivity.connectTunnel()：先 VpnService.prepare() 弹系统授权，
+                    // 授权成功后自动重连。
+                    Button(onClick = onConnectTunnel) { Text("连接") }
                     OutlinedButton(onClick = { TunnelManager.disconnect(context) }) { Text("断开") }
                     TextButton(onClick = onOpenSetup) { Text("编辑配置") }
                 }

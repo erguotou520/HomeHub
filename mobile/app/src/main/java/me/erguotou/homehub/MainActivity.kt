@@ -125,7 +125,7 @@ class MainActivity : AppCompatActivity() {
 
                 when {
                     showSetup -> SetupScreen(onFinished = { showSetup = false })
-                    gate == AppLock.State.UNLOCKED -> HomeHubRoot()
+                    gate == AppLock.State.UNLOCKED -> HomeHubRoot(onConnectTunnel = { connectTunnel() })
                     // Behind the prompt: wordless, so 已锁定 never flashes.
                     gate == AppLock.State.AUTHENTICATING -> AuthenticatingGate()
                     else -> LockScreen(

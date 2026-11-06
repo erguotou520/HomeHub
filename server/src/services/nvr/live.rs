@@ -1,10 +1,15 @@
 //! On-demand RTSP→HLS live preview (one ffmpeg per viewed camera).
 //!
-//! The admin UI plays these with hls.js. Segments are 2s fMP4 with an IDR
-//! every 2s, and ffmpeg keeps a rolling 6-segment window (`hls_list_size 6`,
-//! ~12s) on disk — it prunes old fragments itself, so the playlist is
+//! The admin UI plays these with hls.js. Segments are 1s fMP4 with an IDR
+//! every 1s, and ffmpeg keeps a rolling 3-segment window (`hls_list_size 3`,
+//! ~3s) on disk — it prunes old fragments itself, so the playlist is
 //! served verbatim. A reaper task stops sessions idle for `IDLE_TTL` and
 //! drops the stream directory.
+//!
+//! **Why so short**: with the old 2s×6 (~12s) window plus player-side
+//! buffering, the preview lagged the PTZ by roughly 20s. That made cloud-tilt
+//! control feel broken — the picture moved long after the button press, and
+//! direction A/B comparisons silently compared stale frames.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +23,8 @@ use super::NvrState;
 use crate::services::nvr::Camera;
 
 const IDLE_TTL: Duration = Duration::from_secs(180);
-const HLS_SECONDS: u32 = 2;
-const LIST_SIZE: u32 = 6; // ~12s rolling window on disk
+const HLS_SECONDS: u32 = 1;
+const LIST_SIZE: u32 = 3; // ~3s rolling window on disk
 const REAP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Target bitrate for the VAAPI live encoder. `h264_vaapi` accepts but
@@ -344,6 +349,14 @@ pub fn build_live_args(
             LIVE_VAAPI_BITRATE.into(),
             "-bufsize".into(),
             LIVE_VAAPI_BUF.into(),
+            // Without this, `-force_key_frames` emits a plain I frame instead
+            // of an IDR, and HLS only cuts at IDR — so every segment fell back
+            // to the camera's own 2 s GOP and `-hls_time 1` was silently
+            // ignored (measured: EXTINF stayed 2.03 s). Most VAAPI encoders
+            // default `forced-idr` to 0, which is why the software x264 path
+            // never showed this.
+            "-forced-idr".into(),
+            "1".into(),
         ]);
     } else if !is_hwaccel(encoder) {
         args.extend(["-preset".into(), "ultrafast".into()]);
@@ -356,7 +369,15 @@ pub fn build_live_args(
         "-hls_list_size".into(),
         LIST_SIZE.to_string(),
         "-hls_flags".into(),
-        "independent_segments+append_list".into(),
+        // `delete_segments` is not implied by `hls_list_size`: without it
+        // ffmpeg keeps every fragment it ever wrote (measured 250 files /
+        // 61 MB after one afternoon) while the playlist only references the
+        // last few — a slow disk leak that also made the player's first
+        // fetch start from a stale sequence.
+        // `append_list` is deliberately gone: `ensure()` deletes the playlist
+        // before every respawn, so there is never a previous manifest to
+        // append to — it only kept stale EXTINF entries around.
+        "independent_segments+delete_segments".into(),
         // This ffmpeg 7.1.5 build rejects `+fmp4` in hls_flags ("Undefined
         // constant") — the documented way to get fMP4 `.m4s` segments is the
         // dedicated segment-type option. Without it the segments are
@@ -398,12 +419,34 @@ mod tests {
         let dir = PathBuf::from("/tmp/live/7");
         let args = build_live_args(&fake_cam(), "h264_nvenc", &dir, "sub");
         let s: Vec<&str> = args.iter().map(|a| a.as_str()).collect();
+        // 分片参数引用常量而不是写死数字：调参时（2s → 1s）写死的断言会
+        // 静默过期，这里就踩过一次。
+        let seg_secs = HLS_SECONDS.to_string();
+        let list = LIST_SIZE.to_string();
         assert!(s.contains(&"-rtsp_transport") && s.contains(&"tcp"));
-        assert!(s.contains(&"-hls_time") && s.contains(&"2"));
-        assert!(s.contains(&"-hls_list_size") && s.contains(&"6"));
+        assert!(s.contains(&"-hls_time") && s.contains(&seg_secs.as_str()));
+        assert!(s.contains(&"-hls_list_size") && s.contains(&list.as_str()));
+        // 不带 `delete_segments` 时 ffmpeg 永不删旧分片，playlist 只引用最后
+        // 几条 —— 实测一个下午就攒出 250 个文件 / 61 MB。
+        assert!(s.iter().any(|a| a.contains("delete_segments")));
         assert!(s.contains(&"-an"));
         assert!(!s.contains(&"-preset")); // nvenc: no preset
         assert!(s.last().unwrap().ends_with("cam.m3u8"));
+    }
+
+    /// VAAPI 的 `forced-idr` 默认是 0：`-force_key_frames` 只会产出普通 I 帧，
+    /// 而 HLS 只在 IDR 处切片，于是 `-hls_time 1` 被静默忽略、分片退回摄像头
+    /// 自己的 2s GOP。这正是实时预览比云台慢十几秒的直接原因。
+    #[test]
+    fn live_args_vaapi_opens_forced_idr() {
+        let dir = PathBuf::from("/tmp/live/7");
+        let args = build_live_args(&fake_cam(), "h264_vaapi", &dir, "sub");
+        let s: Vec<&str> = args.iter().map(|a| a.as_str()).collect();
+        let i = s
+            .iter()
+            .position(|a| *a == "-forced-idr")
+            .expect("vaapi 必须显式打开 forced-idr，否则 hls_time 不生效");
+        assert_eq!(s[i + 1], "1");
     }
 
     #[test]

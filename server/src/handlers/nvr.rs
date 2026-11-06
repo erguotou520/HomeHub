@@ -4,7 +4,9 @@
 //! 管理手机端访问令牌）；手机端用的**只读**接口挂在数据面 `/api/nvr/*` 上，要
 //! `runtime.security.device-token` —— 见 `device_routes()`。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Path, Query, State},
@@ -219,7 +221,10 @@ pub async fn nvr_settings_device(
     nvr_settings(State(state), device_claims()).await
 }
 
-/// PTZ request body. `action` is `move` | `stop`.
+/// PTZ request body. `action` is `move` | `step` | `stop` | `status`.
+///
+/// `move` is continuous (hold-to-move) and needs the follow-up `stop`;
+/// `step` is a single bounded detent (tap-to-nudge) and needs nothing else.
 #[derive(Deserialize)]
 pub struct PtzBody {
     pub action: String,
@@ -232,6 +237,54 @@ pub struct PtzBody {
     /// Zoom: negative = wide, positive = tele.
     #[serde(default)]
     pub z: f64,
+    /// Safety net for `move`, in milliseconds. The camera stops by itself when
+    /// it expires, so a lost `stop` cannot drive it into the mechanical limit.
+    /// Defaults to 1.2 s — long enough for a deliberate hold, short enough
+    /// that a dropped request is not a full swing across the room.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// `step` 的移动速度（0.05–1.0），只影响移过去有多快，不影响位移量。
+    /// 与 `timeout_ms` 分开是因为两者单位与含义都不同，混用一个字段会让
+    /// 接口语义随action 变。
+    #[serde(default)]
+    pub speed: Option<f64>,
+}
+
+/// How long a `move` may run before the camera stops itself if the client's
+/// `stop` never arrives.
+const DEFAULT_PTZ_TIMEOUT_MS: u64 = 1200;
+
+/// How long a logical target stays authoritative without a new tap.
+/// Long enough to cover a burst of taps, short enough that an external app
+/// moving the camera gets picked up within half a minute.
+const PTZ_TARGET_TTL: Duration = Duration::from_secs(30);
+
+struct PtzTarget {
+    x: f64,
+    y: f64,
+    updated: Instant,
+}
+
+/// Per-camera **logical** PTZ target, kept across taps.
+///
+/// This is the fix for "one tap moves a different amount every time".
+/// The old `step` read `GetStatus` on every tap and added the increment to
+/// that reading; while the head is still turning, GetStatus returns an
+/// *intermediate* position, so rapid taps silently lose distance. Here the
+/// target is accumulated in memory instead and sent as an absolute
+/// coordinate, which is deterministic regardless of where the head
+/// physically is at that instant.
+///
+/// Deliberately **not** updated by `status`: the app polls status right after
+/// a tap, often before the head has even started moving, so the device still
+/// reports the old position — syncing then would drag the target backwards
+/// and reintroduce the exact bug. Instead the entry expires after
+/// `PTZ_TARGET_TTL`, and `move`/`stop` invalidate it immediately.
+/// The async mutex also serialises concurrent taps, keeping the accumulation
+/// race-free.
+fn ptz_targets() -> &'static tokio::sync::Mutex<HashMap<String, PtzTarget>> {
+    static TARGETS: OnceLock<tokio::sync::Mutex<HashMap<String, PtzTarget>>> = OnceLock::new();
+    TARGETS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
 
 /// Run a PTZ command on the camera itself.
@@ -269,17 +322,89 @@ pub async fn ptz_device(
         }
     };
 
+    // `step` 的落点。AbsoluteMove 是精确的（实测误差 <0.001），所以这个逻辑
+    // 目标就是云台停稳后的位置 —— 直接回给调用方，比让它再发一次 `status`
+    // 去问设备更准（设备还在转时 GetStatus 报的是中间值，UI 会显示成
+    // "+95%" 这种没到头的数）也更快（省掉一次 90–180ms 的往返）。
+    let mut stepped: Option<(f64, f64)> = None;
     let result = match body.action.as_str() {
-        "move" => nvr::onvif::continuous_move(&ep, &token, body.x, body.y, body.z).await,
-        "stop" => nvr::onvif::stop(&ep, &token).await,
+        "move" => {
+            // ContinuousMove leaves the head wherever it stops, so the
+            // logical target is no longer trustworthy.
+            ptz_targets().lock().await.remove(&cam.name);
+            let ms = body
+                .timeout_ms
+                .unwrap_or(DEFAULT_PTZ_TIMEOUT_MS)
+                .clamp(100, 180_000);
+            // ⚠️ 这台设备的速度轴与位置轴**符号相反**。
+            //
+            // 实测（1.0.18，同一台 TL-IPC44AW）：
+            //   点按「左」→ AbsoluteMove pan +0.2 → 读回 pan 增大 → 画面右移（镜头左转）✅
+            //   长按「左」→ ContinuousMove x=+1   → 读回 pan **减小** → 镜头右转 ❌
+            //   tilt 同理：长按「下」(y=+1) 让 tilt 减小，而点按「下」让 tilt 增大。
+            //
+            // 也就是速度空间是「画面往哪边走」，位置空间是「镜头在哪」，
+            // 两者反向。调用方（App）传的一律是**方向**语义、和 `step` 一致，
+            // 所以在这里翻一次 —— 让设备差异只存在于服务端这一行，App 不必
+            // 为长按和点按各记一套符号。
+            nvr::onvif::continuous_move(
+                &ep,
+                &token,
+                -body.x,
+                -body.y,
+                body.z,
+                ms as f64 / 1000.0,
+            )
+            .await
+        }
+        "step" => {
+            // x/y 是位移增量；累加到逻辑目标后作为**绝对坐标**下发。
+            // 不读实时位置，所以云台还在转时连点也不会吞步。
+            let speed = body.speed.unwrap_or(0.4).clamp(0.05, 1.0);
+            let mut targets = ptz_targets().lock().await;
+            let (base_x, base_y) = match targets.get(&cam.name) {
+                Some(t) if t.updated.elapsed() < PTZ_TARGET_TTL => (t.x, t.y),
+                _ => match nvr::onvif::status(&ep, &token).await {
+                    Ok(Some(s)) => (s.pan, s.tilt),
+                    _ => (0.0, 0.0),
+                },
+            };
+            let tx = (base_x + body.x).clamp(-1.0, 1.0);
+            let ty = (base_y + body.y).clamp(-1.0, 1.0);
+            targets.insert(
+                cam.name.clone(),
+                PtzTarget { x: tx, y: ty, updated: Instant::now() },
+            );
+            drop(targets);
+            stepped = Some((tx, ty));
+            nvr::onvif::absolute_move(&ep, &token, tx, ty, speed).await
+        }
+        "stop" => {
+            ptz_targets().lock().await.remove(&cam.name);
+            nvr::onvif::stop(&ep, &token).await
+        }
+        "status" => {
+            return match nvr::onvif::status(&ep, &token).await {
+                Ok(Some(s)) => Ok(Json(serde_json::json!({
+                    "ok": true, "pan": s.pan, "tilt": s.tilt, "moving": s.moving,
+                }))),
+                // A camera that answers but reports no encoder is not a failure
+                // for a status poll — the caller just gets no numbers.
+                Ok(None) => Ok(Json(serde_json::json!({ "ok": true, "pan": null, "tilt": null, "moving": false }))),
+                Err(e) => Err(AppError::BadRequest(e.to_string())),
+            };
+        }
         other => {
             return Err(AppError::BadRequest(format!(
-                "unknown ptz action '{other}' (expected move|stop)"
+                "unknown ptz action '{other}' (expected move|step|stop|status)"
             )))
         }
     };
     match result {
-        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Ok(()) => Ok(Json(match stepped {
+            Some((px, py)) => serde_json::json!({ "ok": true, "pan": px, "tilt": py }),
+            None => serde_json::json!({ "ok": true }),
+        })),
         Err(e) => {
             // A stale token is the one failure worth retrying once.
             if e.to_string().contains("token") || e.to_string().contains("NotAuthorized") {

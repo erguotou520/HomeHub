@@ -18,6 +18,17 @@
 //!    `ter:ActionNotSupported` — which looks like "the camera has no ONVIF"
 //!    even though auth never even ran.
 //!
+//! 3. **`ContinuousMove` 不带 `Timeout` 时设备按 `PT180S` 兜底**（实测这台是
+//!    `DefaultPTZTimeout=PT180S`）。停止完全依赖客户端补发 `Stop`；那个请求
+//!    一旦迟到或随手势丢失，云台就一直转到机械限位。所以现在每次移动都自带
+//!    `Timeout`，客户端的 `Stop` 只是"提前松手"而不是"唯一的刹车"。
+//!
+//! 4. **`RelativeMove` 这台设备是坏的**：它回一个裸 `HTTP/1.1 500`，body 里
+//!    把请求头原样回显 —— 内嵌 web 服务在这个 action 上就崩了，压根没进
+//!    ONVIF，所以既没有 Fault 可读、也分不清是"不支持"还是"忙"。点按因此
+//!    走 [`step`]：读当前位置 + 步长，再用 `AbsoluteMove` 过去（实测三次
+//!    分别落在 0.900051 / 0.820092 / 0.740133，且设备自己停）。
+//!
 //! `GotoHomePosition` is *not* implemented: the device rejects it with
 //! `ter:ActionNotSupported` (verified), so there is no "return to centre".
 
@@ -269,11 +280,24 @@ async fn soap(client: &reqwest::Client, ep: &Endpoint, service: &str, action: &s
     Ok(text)
 }
 
-fn http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .unwrap_or_default()
+/// A shared `reqwest::Client` for every ONVIF call.
+///
+/// Built once per process on purpose. A fresh client per call means a fresh
+/// TCP handshake each time, and PTZ is the one control where a round-trip is
+/// felt directly — measured 30–60 ms to the camera when the connection is
+/// reused versus a visibly laggy pad when it isn't.
+fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            // Keep the camera's ONVIF port warm between taps; the device
+            // closes idle sockets quickly and re-handshakes are the latency.
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(2)
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 /// Resolve the media profile token used by the PTZ actions (the first
@@ -281,13 +305,30 @@ fn http() -> reqwest::Client {
 /// sub, and PTZ works with either).
 pub async fn profile_token(ep: &Endpoint) -> Result<String> {
     let client = http();
-    let xml = soap(&client, ep, NS_TRT, "GetProfiles", "<trt:GetProfiles/>").await?;
+    let xml = soap(client, ep, NS_TRT, "GetProfiles", "<trt:GetProfiles/>").await?;
     attr_after(&xml, ":Profiles").ok_or_else(|| OnvifError("GetProfiles: no profile token".into()))
 }
 
-/// Continuous pan/tilt/zoom. Callers must follow up with [`stop`] (the UI
-/// stops on finger-up) — the device keeps moving otherwise.
-pub async fn continuous_move(ep: &Endpoint, token: &str, x: f64, y: f64, z: f64) -> Result<()> {
+/// ONVIF durations are `PT<seconds>S`. Fractional seconds are accepted by the
+/// reference device (`PT0.5S` verified) and let the caller ask for a short
+/// safety net instead of the device's 180 s default.
+fn iso_duration(secs: f64) -> String {
+    format!("PT{}S", secs.clamp(0.1, 180.0))
+}
+
+/// Continuous pan/tilt/zoom, always with a `Timeout`.
+///
+/// `timeout_secs` is the safety net: the camera stops on its own when it
+/// expires, so a dropped `Stop` can no longer drive the camera into its
+/// mechanical limit. Callers still send [`stop`] on finger-up to stop early.
+pub async fn continuous_move(
+    ep: &Endpoint,
+    token: &str,
+    x: f64,
+    y: f64,
+    z: f64,
+    timeout_secs: f64,
+) -> Result<()> {
     let client = http();
     let body = format!(
         "<tptz:ContinuousMove>\
@@ -296,13 +337,123 @@ pub async fn continuous_move(ep: &Endpoint, token: &str, x: f64, y: f64, z: f64)
              <tt:PanTilt x=\"{x:.3}\" y=\"{y:.3}\"/>\
              <tt:Zoom x=\"{z:.3}\"/>\
            </tptz:Velocity>\
+           <tptz:Timeout>{timeout}</tptz:Timeout>\
          </tptz:ContinuousMove>",
         x = x.clamp(-1.0, 1.0),
         y = y.clamp(-1.0, 1.0),
         z = z.clamp(-1.0, 1.0),
+        timeout = iso_duration(timeout_secs),
     );
-    soap(&client, ep, NS_TPTZ, "ContinuousMove", &body).await?;
+    soap(client, ep, NS_TPTZ, "ContinuousMove", &body).await?;
     Ok(())
+}
+
+/// One bounded step in the given direction.
+///
+/// **This is not `RelativeMove`.** The reference device
+/// (TP-Link TL-IPC44AW) answers `RelativeMove` with a bare `HTTP/1.1 500` and
+/// a body that echoes the request headers back — its embedded web server
+/// faults on that action before ONVIF proper runs, so there is no SOAP Fault to
+/// read and no way to tell "unsupported" from "busy".
+///
+/// `AbsoluteMove` to *current position + step* gives the same single-detent
+/// feel and is verified working on this device: aiming at 0.90 / 0.82 / 0.74
+/// landed on 0.900051 / 0.820092 / 0.740133 and stopped by itself. It costs
+/// one extra `GetStatus` round-trip (both ~30-60 ms, and the connection is
+/// pooled), which is still cheaper than `ContinuousMove` + `Stop` because a
+/// tap then needs no second request at all.
+/// Move to an **absolute** pan/tilt coordinate.
+///
+/// Deliberately does NOT call `GetStatus` first. While the head is turning,
+/// GetStatus returns an intermediate position; using that as the base for the
+/// next increment makes every tap cover a different distance (and rapid taps
+/// swallow steps). The caller owns the logical target — see `ptz_targets()` in
+/// handlers/nvr.rs — and passes the final coordinate here.
+pub async fn absolute_move(
+    ep: &Endpoint,
+    token: &str,
+    x: f64,
+    y: f64,
+    speed: f64,
+) -> Result<()> {
+    let client = http();
+    let body = format!(
+        "<tptz:AbsoluteMove>\
+           <tptz:ProfileToken>{token}</tptz:ProfileToken>\
+           <tptz:Position>\
+             <tt:PanTilt x=\"{x:.3}\" y=\"{y:.3}\"/>\
+           </tptz:Position>\
+           <tptz:Speed>\
+             <tt:PanTilt x=\"{s:.3}\" y=\"{s:.3}\"/>\
+           </tptz:Speed>\
+         </tptz:AbsoluteMove>",
+        x = clamp_unit(x),
+        y = clamp_unit(y),
+        s = speed.clamp(0.05, 1.0),
+    );
+    soap(client, ep, NS_TPTZ, "AbsoluteMove", &body).await?;
+    Ok(())
+}
+
+/// Keep the target inside the device's `-1..1` travel (both axes, verified in
+/// `GetConfigurations` → `PanTiltLimits`). Stepping past the limit is what
+/// used to drive the camera into its mechanical stop.
+fn clamp_unit(v: f64) -> f64 {
+    v.clamp(-1.0, 1.0)
+}
+
+/// Where the camera is right now, plus whether it is still moving.
+///
+/// Used by the phone to show live position feedback and to confirm that a
+/// `Stop` actually took effect. `Ok(None)` means the device answered but
+/// reported no PTZ status (a camera without an encoder), which is not an
+/// error the caller needs to fail on.
+pub async fn status(ep: &Endpoint, token: &str) -> Result<Option<PtzStatus>> {
+    let client = http();
+    let body = format!(
+        "<tptz:GetStatus><tptz:Token>{token}</tptz:Token></tptz:GetStatus>"
+    );
+    let xml = soap(client, ep, NS_TPTZ, "GetStatus", &body).await?;
+    Ok(parse_status(&xml))
+}
+
+/// Pull pan/tilt/moving out of a `GetStatusResponse`.
+///
+/// Attribute-based rather than positional: the camera serialises
+/// `<tt:PanTilt x="1.000000" y="1.000000"/>` but the attribute order and
+/// numeric formatting are not contractual, and the same element name also
+/// appears under `<tt:MoveStatus>` with no attributes at all. Looking for the
+/// first *valued* `PanTilt` skips the MoveStatus one.
+fn parse_status(xml: &str) -> Option<PtzStatus> {
+    let pos_start = xml.find("<tt:Position>")?;
+    let pos = &xml[pos_start..];
+    let pan = attr_val(pos, "x")?;
+    let tilt = attr_val(pos, "y")?;
+    let moving = xml
+        .split_once("<tt:MoveStatus>")
+        .and_then(|(_, rest)| rest.split_once("<tt:PanTilt>"))
+        .map(|(_, rest)| rest.split('<').next().unwrap_or("").trim() == "MOVING")
+        .unwrap_or(false);
+    Some(PtzStatus {
+        pan: pan.parse().ok()?,
+        tilt: tilt.parse().ok()?,
+        moving,
+    })
+}
+
+/// Value of `name="…"` inside the first tag that carries it, from `from`.
+fn attr_val(from: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let at = from.find(&needle)? + needle.len();
+    let end = from[at..].find('"')?;
+    Some(from[at..at + end].to_string())
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct PtzStatus {
+    pub pan: f64,
+    pub tilt: f64,
+    pub moving: bool,
 }
 
 pub async fn stop(ep: &Endpoint, token: &str) -> Result<()> {
@@ -311,7 +462,7 @@ pub async fn stop(ep: &Endpoint, token: &str) -> Result<()> {
         "<tptz:Stop><tptz:ProfileToken>{token}</tptz:ProfileToken>\
          <tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>"
     );
-    soap(&client, ep, NS_TPTZ, "Stop", &body).await?;
+    soap(client, ep, NS_TPTZ, "Stop", &body).await?;
     Ok(())
 }
 
@@ -481,6 +632,55 @@ mod tests {
     #[test]
     fn fault_of_is_none_for_a_normal_envelope() {
         assert!(fault_of("<s:Envelope><s:Body><trt:GetProfilesResponse/></s:Body></s:Envelope>").is_none());
+    }
+
+    #[test]
+    fn clamp_unit_keeps_the_target_inside_travel() {
+        // Stepping past the limit is exactly what drove the camera into its
+        // mechanical stop, so the clamp is the fix, not a nicety.
+        assert!((clamp_unit(1.0 + 0.08) - 1.0).abs() < 1e-9);
+        assert!((clamp_unit(-1.0 - 0.08) + 1.0).abs() < 1e-9);
+        assert!((clamp_unit(0.5) - 0.5).abs() < 1e-9);
+        // Idempotent at the boundary — stepping when already parked must not
+        // drift past it.
+        assert!((clamp_unit(clamp_unit(1.2)) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn iso_duration_formats_fractional_seconds() {
+        assert_eq!(iso_duration(1.2), "PT1.2S");
+        // ONVIF wants a decimal point even for whole seconds.
+        assert_eq!(iso_duration(2.0), "PT2S");
+        // Clamped into the range the device accepts rather than rejected.
+        assert_eq!(iso_duration(0.0), "PT0.1S");
+        assert_eq!(iso_duration(9_999.0), "PT180S");
+    }
+
+    #[test]
+    fn status_parses_position_and_moving_flag() {
+        // Shape taken verbatim from the reference device's GetStatusResponse.
+        let xml = "<s:Envelope><s:Body><tptz:GetStatusResponse><tptz:PTZStatus>\
+            <tt:Position><tt:PanTilt x=\"0.25\" y=\"-0.5\"></tt:PanTilt></tt:Position>\
+            <tt:MoveStatus><tt:PanTilt>MOVING</tt:PanTilt></tt:MoveStatus>\
+            <tt:UtcTime>2026-10-10T06:29:03Z</tt:UtcTime></tptz:PTZStatus></tptz:GetStatusResponse></s:Body></s:Envelope>";
+        let s = parse_status(xml).expect("should parse");
+        assert!((s.pan - 0.25).abs() < 1e-9);
+        assert!((s.tilt + 0.5).abs() < 1e-9);
+        assert!(s.moving);
+    }
+
+    #[test]
+    fn status_reports_idle() {
+        let xml = "<tptz:PTZStatus><tt:Position><tt:PanTilt x=\"1.000000\" y=\"1.000000\"/></tt:Position>\
+            <tt:MoveStatus><tt:PanTilt>IDLE</tt:PanTilt></tt:MoveStatus></tptz:PTZStatus>";
+        let s = parse_status(xml).expect("should parse");
+        assert_eq!((s.pan, s.tilt), (1.0, 1.0));
+        assert!(!s.moving);
+    }
+
+    #[test]
+    fn status_is_none_when_there_is_no_position() {
+        assert!(parse_status("<s:Envelope><s:Body/></s:Envelope>").is_none());
     }
 
     #[test]

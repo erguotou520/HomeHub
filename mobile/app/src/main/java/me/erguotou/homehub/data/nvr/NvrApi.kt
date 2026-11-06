@@ -144,11 +144,34 @@ interface NvrApi {
         val action: String,
         val x: Double = 0.0,
         val y: Double = 0.0,
-        val z: Double = 0.0
+        val z: Double = 0.0,
+        /**
+         * `move` 的服务端兜底超时（毫秒）。设备侧到期会自己停，所以客户端的
+         * `stop` 只是提前刹车；长按时客户端会定期续发来延长它。
+         */
+        val timeout_ms: Long? = null,
+        /**
+         * `step` 的移动速度（0.05–1.0），只影响移过去有多快，不影响位移量。
+         * 与 `timeout_ms` 分开是因为两者单位和含义都不同。
+         */
+        val speed: Double? = null
     )
 
     /** 成功时服务端只回 `{"ok":true}`。 */
-    data class PtzResult(val ok: Boolean = false)
+    /**
+     * 云台响应。
+     *
+     * `pan` / `tilt` / `moving` 只有 `action=status` 时才有（其余动作服务端只回
+     * `{"ok":true}`），所以都给默认值。`status` 的响应形如
+     * `{"ok":true,"pan":0.27,"tilt":1.0,"moving":false}` —— 而**没有编码器的
+     * 摄像头会把 pan/tilt 回成 JSON null**，这时保持 null，UI 不显示坐标。
+     */
+    data class PtzResult(
+        val ok: Boolean = false,
+        val pan: Double? = null,
+        val tilt: Double? = null,
+        val moving: Boolean = false
+    )
 
     @GET("api/nvr/cameras")
     suspend fun cameras(): CameraList
@@ -228,10 +251,49 @@ class NvrClient(
     @Volatile
     private var deviceHttp: OkHttpClient? = null
 
+    @Volatile
+    private var ptzHttp: OkHttpClient? = null
+
     fun tokenOrNull(): String? = token
 
     /** Bearer-attaching client for raw (non-Retrofit) requests. */
     fun bearerClient(): OkHttpClient = client()
+
+    /**
+     * 云台专用客户端：和视频流**分开限流**。
+     *
+     * 为什么要单独一个：实时预览是 HLS，每个分片 500–700 KB，和控制请求共用
+     * OkHttp 默认的 `Dispatcher`（maxRequests=64 / 每主机 5 条 keep-alive）。
+     * 一边下视频一边点云台，控制请求要排在分片后面 —— 实测 PTZ 被拖到
+     * **140–240ms**，再叠上设备自身 300ms 的移动时间，手感就是「按不动」。
+     *
+     * 这里给它自己的 `Dispatcher`：更大的池子 + 每主机更多并发，且不复用
+     * 视频流那条连接。同一条 WiFi 上带宽有限，但**排队延迟**是可以去掉的。
+     */
+    fun ptzClient(): OkHttpClient {
+        ptzHttp?.let { return it }
+        val dispatcher = okhttp3.Dispatcher().apply {
+            maxRequests = 16
+            maxRequestsPerHost = 16
+        }
+        val built = baseClient.newBuilder()
+            .dispatcher(dispatcher)
+            // 控制请求要「立刻有反馈」，不能等：连接 3s、读写各 5s封顶。
+            .connectTimeout(java.time.Duration.ofSeconds(3))
+            .readTimeout(java.time.Duration.ofSeconds(5))
+            .writeTimeout(java.time.Duration.ofSeconds(5))
+            .addInterceptor { chain ->
+                val b = chain.request().newBuilder()
+                val t = prefs.deviceToken.trim()
+                if (t.isNotEmpty()) b.header(DEVICE_TOKEN_HEADER, t)
+                val jwt = token
+                if (!jwt.isNullOrBlank()) b.header("Authorization", "Bearer $jwt")
+                chain.proceed(b.build())
+            }
+            .build()
+        ptzHttp = built
+        return built
+    }
 
     /**
      * 数据面用的原始客户端：带上 `X-Device-Token`。
@@ -278,8 +340,12 @@ class NvrClient(
         val retrofit = retrofit2.Retrofit.Builder()
             .baseUrl(me.erguotou.homehub.data.HttpClientFactory.withTrailingSlash(prefs.baseUrl()))
             // 数据面（cameras/segments/settings）在服务端配了令牌后会 401，
-            // 所以 REST 也必须走 deviceClient()：它会带上 X-Device-Token。
-            .client(deviceClient())
+            // 所以 REST 也必须走带令牌头的客户端。
+            //
+            // 用ptzClient() 而不是 deviceClient()：这里只有**小请求**
+            // （列表、状态、PTZ），分片下载另走 deviceClient。让控制类请求
+            // 独享一个 Dispatcher，就不会被 HLS 分片挤在队列后面。
+            .client(ptzClient())
             .addConverterFactory(retrofit2.converter.gson.GsonConverterFactory.create())
             .build()
         return retrofit.create(NvrApi::class.java).also { api = it }
@@ -312,8 +378,41 @@ class NvrClient(
     fun deviceToken(): String = prefs.deviceToken.trim()
 
     suspend fun cameras(): NvrApi.CameraList = api().cameras()
-    suspend fun ptz(cam: String, action: String, x: Double = 0.0, y: Double = 0.0, z: Double = 0.0) =
-        api().ptz(cam, NvrApi.PtzBody(action = action, x = x, y = y, z = z))
+    suspend fun ptz(
+        cam: String,
+        action: String,
+        x: Double = 0.0,
+        y: Double = 0.0,
+        z: Double = 0.0,
+        timeoutMs: Long? = null,
+        speed: Double? = null
+    ) = api().ptz(cam, NvrApi.PtzBody(action = action, x = x, y = y, z = z, timeout_ms = timeoutMs, speed = speed))
+
+    /**
+     * 点按一步：一次请求走一格然后设备自己停，不需要再发 `stop`。这是「一点
+     * 一点步进」的来源，也是点按不发 `move` 的原因 —— 早先只用
+     * `move`+`stop` 时，一次点按要两次串行往返，且 `stop` 一旦丢失设备就转到
+     * 机械限位。
+     *
+     * x/y/z 是**位移量**（约 0.08 一格），不是速度。服务端读当前位置后用
+     * `AbsoluteMove` 移过去 —— 这台设备不支持 `RelativeMove`（回裸 500）。
+     */
+    suspend fun ptzStep(cam: String, x: Double, y: Double, z: Double, speed: Double = 0.45): NvrApi.PtzResult =
+        api().ptz(cam, NvrApi.PtzBody(action = "step", x = x, y = y, z = z, speed = speed))
+
+    /**
+     * 读云台当前位置，返回 `(pan, tilt)`；设备没有编码器时返回 null。
+     *
+     * 为什么必须有它：撞到机械限位时设备**既不报错也不动**，HTTP 照样 200 +
+     * `{"ok":true}`。不读位置就无法区分「指令没生效（到头了）」和「指令丢了」，
+     * 用户只能盯着画面猜 —— 猜不到就以为功能坏了。
+     */
+    suspend fun ptzStatus(cam: String): Pair<Double, Double>? {
+        val r = api().ptz(cam, NvrApi.PtzBody(action = "status"))
+        val pan = r.pan ?: return null
+        val tilt = r.tilt ?: return null
+        return pan to tilt
+    }
     suspend fun addCamera(body: NvrApi.CameraBody) = api().addCamera(body)
     suspend fun updateCamera(id: Long, body: NvrApi.CameraBody) = api().updateCamera(id, body)
     suspend fun deleteCamera(id: Long) {

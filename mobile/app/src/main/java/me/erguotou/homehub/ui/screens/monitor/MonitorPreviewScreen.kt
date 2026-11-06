@@ -17,6 +17,7 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -94,10 +95,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
@@ -109,6 +112,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -121,9 +125,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.sign
 import me.erguotou.homehub.data.nvr.NvrApi
 import me.erguotou.homehub.data.nvr.NvrClient
 import okhttp3.OkHttpClient
@@ -223,7 +230,18 @@ fun MonitorPreviewScreen(
     }
 
     // ─────────────────────────── 播放器 ───────────────────────────
-    val player = remember { ExoPlayer.Builder(context).build() }
+    // 实时预览要「跟手」。ExoPlayer 默认最大缓冲 50s，叠加服务端 6×2s 的 HLS
+    // 窗口后，云台转完画面还要约 20s 才动 —— 用户根本建立不了「按键→画面」的因果，
+    // 还会误以为方向反了或没反应。收紧到 1s 起播 / 4s 上限，并贴着 live edge 播。
+    val player = remember {
+        ExoPlayer.Builder(context)
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(1_000, 4_000, 500, 1_000)
+                    .build()
+            )
+            .build()
+    }
     DisposableEffect(Unit) {
         onDispose {
             player.stop()
@@ -271,7 +289,20 @@ fun MonitorPreviewScreen(
         val source = if (isReplay) {
             mp4Factory.createMediaSource(MediaItem.fromUri(url))
         } else {
-            hlsFactory.createMediaSource(MediaItem.fromUri(url))
+            // 贴着直播边缘播（目标落后 1.5s），别默认落后好几个分片。
+            // 允许极轻微加速追赶，免得缓冲慢慢累积、延迟又爬回去。
+            hlsFactory.createMediaSource(
+                MediaItem.Builder()
+                    .setUri(url)
+                    .setLiveConfiguration(
+                        MediaItem.LiveConfiguration.Builder()
+                            .setTargetOffsetMs(1_500)
+                            .setMinPlaybackSpeed(1.0f)
+                            .setMaxPlaybackSpeed(1.15f)
+                            .build()
+                    )
+                    .build()
+            )
         }
         player.setMediaSource(source)
         player.volume = if (muted) 0f else 1f
@@ -355,19 +386,174 @@ fun MonitorPreviewScreen(
     // ─────────────────────────── 云台（走服务端代理） ───────────────────────────
     var ptzBusy by remember { mutableStateOf(false) }
 
-    // PtzPad 的按住回调天然是 Float（0f / ±1f 的方向量），这里收 Float 再转 Double，
+    // PtzPad 的回调天然是 Float（方向量），这里收 Float 再转 Double，
     // 免得每个方向键常量都写 `.toDouble()`。
+    // 点按：只取方向，把幅度换成「一格」的步长。传进来的是长按速度（HOLD_*），
+    // 这里按分量重新缩放，避免调用方各写一套常量。
+
+    /**
+     * 串行化点按请求。
+     *
+     * `step` 在服务端是 `GetStatus`（读当前位置）→ `AbsoluteMove`，两次串行往返；
+     * 云台自己也要 ~0.3s 才走完一格。**连点时前一次还在动**，读回来的
+     * `GetStatus` 是中间位置 → 步长被吞（实测 5 连点只走了一半）。
+     * 所以用 [Mutex] 排队 + `pendingStep` 合并：同方向连点累加步长、
+     * 反方向以最新一次为准，既不丢步也不会打爆设备。
+     */
+    val ptzMutex = remember { Mutex() }
+    var pendingStep by remember { mutableStateOf(Triple(0.0, 0.0, 0.0)) }
+
+    /**
+     * 云台当前位置与是否已贴限位。
+     *
+     * 这台相机的 pan/tilt 行程都很窄（约 ±1，走 0.4 就快到头），撞到机械限位时
+     * 设备**既不报错也不动**，请求照样返回 `ok`。没有这两个状态，用户就只能
+     * 靠「画面有没有动」猜，猜不到就以为功能坏了。
+     */
+    var ptzPos by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    var ptzAtLimit by remember { mutableStateOf(false) }
+
+    /** 拉一次云台位置并更新显示。失败静默 —— 拿不到位置不影响控制本身。 */
+    fun refreshPtzPos(camName: String) {
+        scope.launch(Dispatchers.IO) {
+            runCatching { vm.ptzStatus(camName) }
+                .onSuccess { st ->
+                    withContext(Dispatchers.Main) {
+                        if (st != null) {
+                            ptzPos = st.first to st.second
+                            // 已经贴着限位还往那个方向点 → 直接说明，别让人
+                            // 盯着不动的画面猜。
+                            ptzAtLimit = st.first >= 0.995 || st.first <= -0.995 ||
+                                st.second >= 0.995 || st.second <= -0.995
+                        }
+                    }
+                }
+        }
+    }
+
+    fun ptzStep(x: Float, y: Float, z: Float) {
+        val cam = camera ?: return
+        // ⚠️ 幅度换算必须**保留符号**。原来写成 `if (x != 0f) STEP_PAN_TILT else 0f`，
+        // 把方向整个丢了：按「左」传的是 +0.08（云台反而右转），按「下」也是 +0.08，
+        // 而 tilt 早已停在 +1.0 限位 → clamp 回 1.0 → **点下去完全不动**，
+        // 看起来就是「云台没反应」。中途又改成 abs(x)*STEP —— 一样是反的，
+        // abs 照样抹掉符号。正确写法：符号（方向）× 常量（步长）。
+        val sx = if (x != 0f) x.sign * STEP_PAN_TILT else 0f
+        val sy = if (y != 0f) y.sign * STEP_PAN_TILT else 0f
+        val sz = if (z != 0f) z.sign * STEP_ZOOM else 0f
+        scope.launch(Dispatchers.IO) {
+            ptzMutex.withLock {
+                // 排队期间又点了几下：同向累加，反向以最新一次为准（后点的算数）。
+                val prev = pendingStep
+                val conflict = (sx != 0f && prev.first != 0.0 && prev.first.sign != sx.toDouble().sign) ||
+                    (sy != 0f && prev.second != 0.0 && prev.second.sign != sy.toDouble().sign)
+                val merged =
+                    if (conflict) Triple(sx.toDouble(), sy.toDouble(), sz.toDouble())
+                    else Triple(prev.first + sx, prev.second + sy, prev.third + sz)
+                // 累加后再夹住：连点几十下也不能把云台一把推到限位。
+                val dx = merged.first.coerceIn(-MAX_MERGED_STEP, MAX_MERGED_STEP)
+                val dy = merged.second.coerceIn(-MAX_MERGED_STEP, MAX_MERGED_STEP)
+                val dz = merged.third.coerceIn(-MAX_MERGED_STEP, MAX_MERGED_STEP)
+                pendingStep = Triple(0.0, 0.0, 0.0)
+                if (dx == 0.0 && dy == 0.0 && dz == 0.0) return@withLock
+                runCatching { vm.ptzStep(cam.name, dx, dy, dz, STEP_SPEED.toDouble()) }
+                    .onFailure { e -> withContext(Dispatchers.Main) { ptzError = friendlyMsg(e) } }
+                    .onSuccess { res ->
+                        withContext(Dispatchers.Main) {
+                            ptzError = null
+                            // 服务端回的落点就是云台停稳后的位置（AbsoluteMove
+                            // 实测误差 <0.001）。**不要**在这里再发一次 status：
+                            // 设备这时往往还没开始动，读回来的是旧位置，坐标会
+                            // 停在半路（实测显示 +95% 而实际已经到 100%），
+                            // 限位提示也就跟着判断错。省下的这次往返还让下一次
+                            // 点击更快拿到锁。
+                            val px = res.pan
+                            val py = res.tilt
+                            if (px != null && py != null) {
+                                ptzPos = px to py
+                                ptzAtLimit = px >= 0.995 || px <= -0.995 ||
+                                    py >= 0.995 || py <= -0.995
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    // 长按方向，续期时要用；点按不写它，所以点按不会误触发续期。
+    var lastDir by remember { mutableStateOf(Triple(0f, 0f, 0f)) }
+    var renewJob by remember { mutableStateOf<Job?>(null) }
+    /** 是否正处在连续移动中；只被手势置位、[ptzStop] 与页面退出清零。 */
+    var ptzWasMoving by remember { mutableStateOf(false) }
+
+    /**
+     * 每次 `move` 附带的设备侧兜底超时。长按期间由 [startRenew] 定期续发来
+     * 延长它，所以这个值只决定「客户端突然失联」时云台还能多转多久。
+     */
+    val holdTimeoutMs = 1500L
+
+    /**
+     * 长按续期。设备侧 Timeout 是硬上限，所以每到 2/3 处自动补发一次 `move`
+     * 把它续上；松手时 [ptzStop] 取消这个协程，续期随之停止。
+     */
+    fun startRenew() {
+        renewJob?.cancel()
+        renewJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(holdTimeoutMs * 2 / 3)
+                val cam = camera ?: break
+                runCatching {
+                    vm.ptz(
+                        cam.name, "move",
+                        lastDir.first.toDouble(), lastDir.second.toDouble(), lastDir.third.toDouble(),
+                        holdTimeoutMs
+                    )
+                }
+                .onSuccess { refreshPtzPos(cam.name) }
+            }
+        }
+    }
+
     fun ptzMove(x: Float, y: Float, z: Float) {
         val cam = camera ?: return
+        lastDir = Triple(x, y, z)
+        ptzWasMoving = true
         scope.launch(Dispatchers.IO) {
-            runCatching { vm.ptz(cam.name, "move", x.toDouble(), y.toDouble(), z.toDouble()) }
+            runCatching {
+                vm.ptz(cam.name, "move", x.toDouble(), y.toDouble(), z.toDouble(), holdTimeoutMs)
+            }
                 .onFailure { e -> withContext(Dispatchers.Main) { ptzError = friendlyMsg(e) } }
-                .onSuccess { withContext(Dispatchers.Main) { ptzError = null } }
+                .onSuccess {
+                    withContext(Dispatchers.Main) { ptzError = null }
+                    refreshPtzPos(cam.name)
+                }
         }
+        startRenew()
     }
     fun ptzStop() {
         val cam = camera ?: return
-        scope.launch(Dispatchers.IO) { runCatching { vm.ptz(cam.name, "stop") } }
+        renewJob?.cancel()
+        renewJob = null
+        ptzWasMoving = false
+        scope.launch(Dispatchers.IO) {
+            runCatching { vm.ptz(cam.name, "stop") }
+            // 停机后再读一次位置：长按撞到限位时设备也是静默停止的，
+            // 靠坐标才能确认它到底停在哪。
+            refreshPtzPos(cam.name)
+        }
+    }
+
+    // 兜底：离开这个页面时如果还在转，补一次 stop。设备侧虽有 holdTimeoutMs
+    // 兜底，但那意味着「退出后还会再转一秒」。
+    // 不用 runBlocking —— 那会在主线程阻塞等网络。改用 ViewModel 的 scope：
+    // 它活得比这个页面久，所以页面销毁后这个请求仍然发得出去。
+    DisposableEffect(camera?.name) {
+        onDispose {
+            val cam = camera
+            if (cam != null && ptzWasMoving) {
+                vm.stopPtz(cam.name)
+            }
+        }
     }
 
     // ─────────────────────────── 历史 tab 数据 ───────────────────────────
@@ -650,11 +836,15 @@ fun MonitorPreviewScreen(
                     ) {
                         if (isLiveTab && ptzOpen) {
                             PtzPad(
-                                onMove = { x, y, z -> ptzMove(x, y, z) },
+                                onStep = { x, y, z -> ptzStep(x, y, z) },
+                                onHold = { x, y, z -> ptzMove(x, y, z) },
                                 onStop = { ptzStop() },
                                 onClose = { ptzOpen = false },
                                 busy = ptzBusy,
+                                moving = ptzWasMoving,
                                 error = ptzError,
+                                pos = ptzPos,
+                                atLimit = ptzAtLimit,
                                 onDark = true
                             )
                         } else {
@@ -665,7 +855,13 @@ fun MonitorPreviewScreen(
                                 onMute = { muted = !muted },
                                 paused = paused,
                                 onPlayPause = { paused = !paused },
-                                onPtz = { ptzOpen = true; ptzError = null },
+                                onPtz = {
+                                        ptzOpen = true
+                                        ptzError = null
+                                        // 展开就先回读位置：撞限位时立刻能看出来，
+                                        // 否则用户对着不动的画面会以为按钮坏了。
+                                        camera?.let { refreshPtzPos(it.name) }
+                                    },
                                 onCall = { talkOpen = true },
                                 onSnapshot = { onSnapshot() },
                                 snapshotBusy = snapBusy,
@@ -707,12 +903,16 @@ fun MonitorPreviewScreen(
                 // ── 工具栏 / 云台盘（原地替换，不弹窗；云台只有实时才有） ──
                 if (isLiveTab && ptzOpen) {
                     PtzPad(
-                        onMove = { x, y, z -> ptzMove(x, y, z) },
+                        onStep = { x, y, z -> ptzStep(x, y, z) },
+                        onHold = { x, y, z -> ptzMove(x, y, z) },
                         onStop = { ptzStop() },
                         onClose = { ptzOpen = false },
                         busy = ptzBusy,
+                        moving = ptzWasMoving,
                         error = ptzError,
-                        onDark = false
+                        pos = ptzPos,
+                        atLimit = ptzAtLimit,
+                                onDark = false
                     )
                 } else {
                     ToolBar(
@@ -722,7 +922,13 @@ fun MonitorPreviewScreen(
                         onMute = { muted = !muted },
                         paused = paused,
                         onPlayPause = { paused = !paused },
-                        onPtz = { ptzOpen = true; ptzError = null },
+                        onPtz = {
+                                        ptzOpen = true
+                                        ptzError = null
+                                        // 展开就先回读位置：撞限位时立刻能看出来，
+                                        // 否则用户对着不动的画面会以为按钮坏了。
+                                        camera?.let { refreshPtzPos(it.name) }
+                                    },
                         onCall = { talkOpen = true },
                         onSnapshot = { onSnapshot() },
                         snapshotBusy = snapBusy,
@@ -1326,18 +1532,78 @@ private fun ActionButton(
 // ─────────────────────────── 云台盘（原地替换工具栏） ───────────────────────────
 
 /**
- * 云台方向盘：按住才动（服务端发 ONVIF ContinuousMove，松手发 Stop）。
+ * 手指按到抬起多久算「点按」（走一步）而不是「长按」（连续转）。
+ *
+ * 220ms 是权衡值：比它短会把有意长按误判成点按，比它长点按就会先转起来再停
+ * —— 而那正是「点一下就转到底」的观感来源。
+ */
+private const val TAP_MS = 220L
+
+/**
+ * 一次点按的位移量。设备行程是 -1..1。
+ *
+ * 实测（speed=1.0）：0.08 走完要~1.2s，画面上几乎看不出变化 → 用户以为没反应；
+ * 0.2 只要 ~0.3s，一格就明显了。步长仍远小于行程，连点十几下也不会到限位。
+ */
+private const val STEP_PAN_TILT = 0.2f
+private const val STEP_ZOOM = 0.08f
+
+/**
+ * 点按时 `AbsoluteMove` 的速度。
+ *
+ * 实测 0.45 要 1~2s 才到位，1.0 约 0.3s —— 手感差别很大。点按必须给满速，
+ * 否则「按了没反应」。长按速度另算（见 [HOLD_PAN_TILT]）。
+ */
+private const val STEP_SPEED = 1.0
+
+/**
+ * 连点合并后单次请求允许的最大位移。设备行程 -1..1，0.6 约等于转三分之一，
+ * 够连点三下；同时保证再怎么狂点也不会一把撞到限位。
+ */
+private const val MAX_MERGED_STEP = 0.6
+
+/**
+ * 把 -1..1 的位置转成百分比文本（`-1` → `-100%`，`0` → `0%`）。
+ *
+ * 存在的意义：这台云台撞到限位时设备**不报错也不动**，只有一个办法让人知道
+ * 原因 —— 把坐标直接显示出来。
+ */
+private fun fmtPct(v: Double): String {
+    val p = (v * 100).toInt()
+    return if (p > 0) "+$p%" else "$p%"
+}
+
+/**
+ * 持续移动的速度。长按要明显快于点按，否则手感发黏。
+ *
+ * ONVIF 的 speed 是「占最大速度的比例」，0.5 只有一半速；实测这台设备满速才跟得上
+ * 手指，长按用 1.0。
+ */
+private const val HOLD_PAN_TILT = 1.0f
+private const val HOLD_ZOOM = 0.6f
+
+/**
+ * 云台方向盘。
+ *
+ * 每个方向键都是「点按走一步 / 长按连续转」：见 [HoldPadCell]。方向量分两套
+ * 常量，点按用小的 [STEP_PAN_TILT]（一步一格），长按用大的 [HOLD_PAN_TILT]。
  *
  * 设备**不支持 `GotoHomePosition`**（实测 `ter:ActionNotSupported`），所以没有「回中」，
  * 中间那颗是「停止」。
  */
 @Composable
 private fun PtzPad(
-    onMove: (Float, Float, Float) -> Unit,
+    onStep: (Float, Float, Float) -> Unit,
+    onHold: (Float, Float, Float) -> Unit,
     onStop: () -> Unit,
     onClose: () -> Unit,
     busy: Boolean,
+    moving: Boolean,
     error: String?,
+    /** 云台当前位置（pan, tilt），各在 -1..1；拿不到时为 null。 */
+    pos: Pair<Double, Double>?,
+    /** 是否已贴到机械限位（此时该方向的指令会被设备静默忽略）。 */
+    atLimit: Boolean,
     onDark: Boolean
 ) {
     val fg = if (onDark) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
@@ -1350,8 +1616,39 @@ private fun PtzPad(
             modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("云台控制", style = MaterialTheme.typography.labelMedium, color = fgLabel)
-            Spacer(modifier = Modifier.weight(1f))
+        Text("云台控制", style = MaterialTheme.typography.labelMedium, color = fgLabel)
+        // 长按时给出持续反馈：按钮压深只是瞬时的，这个灯一直亮到松手，
+        // 让人一眼看出「还在转」而不是「已经停了」。
+        if (moving) {
+            Spacer(Modifier.width(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF4ADE80))
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "转动中",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF4ADE80)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        // 实时位置。这台云台的行程很窄（pan/tilt 各约 ±1，走 0.4 就快贴限位），
+        // 撞到限位时设备会**静默忽略**指令 —— 画面纹丝不动，user 完全无法判断
+        // 是没点到、还是已经转到头。把坐标摆出来，撞限位时一眼可见。
+        if (pos != null) {
+            Text(
+                "水平 ${fmtPct(pos.first)}  俯仰 ${fmtPct(pos.second)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = fgLabel,
+                maxLines = 1
+            )
+            Spacer(Modifier.width(6.dp))
+        }
             if (error != null) {
                 Text(
                     error,
@@ -1374,20 +1671,38 @@ private fun PtzPad(
                 Text("收起", style = MaterialTheme.typography.labelSmall, color = fg)
             }
         }
+        // 撞限位时设备静默忽略指令、只回 ok —— 不说清楚，用户只会觉得按钮坏了。
+        if (atLimit) {
+            Text(
+                "已到机械限位，换个方向试试",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFFFB74D),
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
+        // ⚠️ 方向量的符号是**用画面参照物实测**出来的，不是按 ONVIF 规范推的。
+        // 2026-11-04 用画面里的地球仪做标记、并等 HLS 画面追上（约 20s）后对比：
+        //   pan  增大 → 地球仪从画面左边缘移到中间偏右 → 内容右移 = 镜头**左转**
+        //   tilt 增大 → 地球仪上移、顶部被切出画面       → 内容上移 = 镜头**下压**
+        // 所以「左」要给**正** pan，「上」要给**负** tilt。
+        // 早先的注释写反了，原因是没等预览缓冲追上就截图，比对的是转动前的旧帧。
+        // 另一个坑：符号反了时若恰好撞上 ±1 限位，clamp 回原值 → 表现为「点了没反应」。
         PtzRow(fg, onDark) {
-            HoldPadCell(46.dp, Icons.Outlined.ZoomOut, { onMove(0f, 0f, -0.3f) }, onStop, "缩小", fg, onDark)
-            HoldPadCell(46.dp, Icons.Outlined.ArrowUpward, { onMove(0f, -0.5f, 0f) }, onStop, "上", fg, onDark)
-            HoldPadCell(46.dp, Icons.Outlined.ZoomIn, { onMove(0f, 0f, 0.3f) }, onStop, "放大", fg, onDark)
+            HoldPadCell(46.dp, Icons.Outlined.ZoomOut, onStep, onHold, onStop, "缩小", fg, onDark, Triple(0f, 0f, -HOLD_ZOOM))
+            HoldPadCell(46.dp, Icons.Outlined.ArrowUpward, onStep, onHold, onStop, "上", fg, onDark, Triple(0f, -HOLD_PAN_TILT, 0f))
+            HoldPadCell(46.dp, Icons.Outlined.ZoomIn, onStep, onHold, onStop, "放大", fg, onDark, Triple(0f, 0f, HOLD_ZOOM))
         }
         PtzRow(fg, onDark) {
             // 左键必须是回退箭头：和右键共用 ArrowForward 的话，图标方向是反的。
-            HoldPadCell(46.dp, Icons.AutoMirrored.Outlined.ArrowBack, { onMove(-0.5f, 0f, 0f) }, onStop, "左", fg, onDark)
-            HoldPadCell(46.dp, Icons.Outlined.Stop, { onStop() }, {}, "停止", fg, onDark)
-            HoldPadCell(46.dp, Icons.AutoMirrored.Outlined.ArrowForward, { onMove(0.5f, 0f, 0f) }, onStop, "右", fg, onDark)
+            HoldPadCell(46.dp, Icons.AutoMirrored.Outlined.ArrowBack, onStep, onHold, onStop, "左", fg, onDark, Triple(HOLD_PAN_TILT, 0f, 0f))
+            // 停止键没有「按住持续转」的语义：点按和长按都给 onStop，多发一次
+            // 无害（Stop 是幂等的），也省掉为它单开一套回调。
+            HoldPadCell(46.dp, Icons.Outlined.Stop, { _, _, _ -> onStop() }, { _, _, _ -> onStop() }, onStop, "停止", fg, onDark, Triple(0f, 0f, 0f))
+            HoldPadCell(46.dp, Icons.AutoMirrored.Outlined.ArrowForward, onStep, onHold, onStop, "右", fg, onDark, Triple(-HOLD_PAN_TILT, 0f, 0f))
         }
         PtzRow(fg, onDark) {
             Spacer(Modifier.size(46.dp))
-            HoldPadCell(46.dp, Icons.Outlined.ArrowDownward, { onMove(0f, 0.5f, 0f) }, onStop, "下", fg, onDark)
+            HoldPadCell(46.dp, Icons.Outlined.ArrowDownward, onStep, onHold, onStop, "下", fg, onDark, Triple(0f, HOLD_PAN_TILT, 0f))
             Spacer(Modifier.size(46.dp))
         }
         if (busy) {
@@ -1406,41 +1721,98 @@ private fun PtzRow(fg: Color, onDark: Boolean, content: @Composable () -> Unit) 
     ) { content() }
 }
 
-/** 按住才动（ONVIF ContinuousMove + 松手 Stop）。 */
+/**
+ * 一个云台方向键。
+ *
+ * 手势语义分两种，对应两种完全不同的服务端动作：
+ *
+ * - **点按**（[TAP_MS] 内抬手）→ 发 `step`（ONVIF `RelativeMove`）：一次请求
+ *   走一格然后自己停，不需要再发 `stop`。这是绝大多数点击，也正是「一点一点
+ *   步进」的来源。
+ * - **长按**（超过 [TAP_MS]）→ 发 `move`（`ContinuousMove`，自带服务端
+ *   Timeout 兜底），抬手发 `stop`。只有按住才会连续转。
+ *
+ * 早先只有 `move` + `stop` 两个请求，所以一次点按也要两次串行往返；`stop` 一旦
+ * 迟到或随手势丢失，设备就按自身默认超时（实测 `PT180S`）一直转到机械限位。
+ *
+ * 反馈分两路：按下立刻有视觉压深 + 一次轻触觉震动，点按成功再补一次短震动，
+ * 让「按到了」和「云台真的动了」都能被感知，不必盯着画面等。
+ */
 @Composable
 private fun HoldPadCell(
     size: androidx.compose.ui.unit.Dp,
     icon: ImageVector,
-    onHold: () -> Unit,
-    onRelease: () -> Unit,
+    onTap: (Float, Float, Float) -> Unit,
+    onHold: (Float, Float, Float) -> Unit,
+    /** 连续移动后的松手动作（发Stop）。点按不走这里。 */
+    onStop: () -> Unit,
     label: String,
     fg: Color,
-    onDark: Boolean
+    onDark: Boolean,
+    dir: Triple<Float, Float, Float>
 ) {
+    val haptics = LocalHapticFeedback.current
+    // pointerInput 里没法 launch（受限挂起作用域），所以定时器挂在 Composable
+    // 作用域上；每个手势结束都会 cancel 它，不会残留。
+    val scope = rememberCoroutineScope()
+    var pressed by remember { mutableStateOf(false) }
+    // 长按转连续移动时才置 true，点按走 step 不置 —— 决定抬手时发什么。
+    var continuous by remember { mutableStateOf(false) }
+
+    fun buzz(style: HapticFeedbackType) = runCatching { haptics.performHapticFeedback(style) }
+
     Box(
         modifier = Modifier
             .size(size)
             .clip(RoundedCornerShape(12.dp))
             .background(
-                if (onDark) Color.White.copy(alpha = 0.14f)
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                when {
+                    pressed -> MaterialTheme.colorScheme.primary.copy(alpha = if (onDark) 0.38f else 0.22f)
+                    onDark -> Color.White.copy(alpha = 0.14f)
+                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                }
+            )
+            .border(
+                width = if (pressed) 1.5.dp else 0.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = if (onDark) 0.9f else 0.55f),
+                shape = RoundedCornerShape(12.dp)
             )
             .pointerInput(label) {
                 awaitEachGesture {
-                    awaitFirstDown()
-                    onHold()
+                    awaitFirstDown(requireUnconsumed = false)
+                    pressed = true
+                    continuous = false
+                    buzz(HapticFeedbackType.TextHandleMove)
+                    // 另起一个协程看表：手指还按着越过阈值就升级成连续移动；抬手早于阈值
+                    // 就取消它，走下面的点按分支。
+                    // 必须用外部 scope：pointerInput 的接收者
+                    // AwaitPointerEventScope 是「受限挂起」作用域，不能 launch。
+                    val upgrade = scope.launch {
+                        delay(TAP_MS)
+                        continuous = true
+                        onHold(dir.first, dir.second, dir.third)
+                        buzz(HapticFeedbackType.LongPress)
+                    }
                     do {
                         val event = awaitPointerEvent()
-                        if (event.changes.none { it.pressed }) {
-                            onRelease()
-                            break
-                        }
+                        if (event.changes.none { it.pressed }) break
                     } while (true)
+                    upgrade.cancel()
+                    val wasTap = !continuous
+                    pressed = false
+                    if (wasTap) onTap(dir.first, dir.second, dir.third) else onStop()
+                    // 「已生效」这一下也给反馈，不必盯着画面确认。
+                    buzz(HapticFeedbackType.TextHandleMove)
                 }
             },
         contentAlignment = Alignment.Center
     ) {
-        Icon(icon, contentDescription = label, tint = fg, modifier = Modifier.size(22.dp))
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = if (pressed) MaterialTheme.colorScheme.primary else fg,
+            modifier = Modifier.size(22.dp)
+        )
     }
 }
 

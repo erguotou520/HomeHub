@@ -3,6 +3,7 @@ package me.erguotou.homehub.ui.screens.monitor
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -275,8 +276,46 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
      * 异常消息里是摄像头自己回的 ONVIF 故障码（例如 `ter:ActionNotSupported` 表示
      * 这路能力设备没实现，不是网络问题）。
      */
-    suspend fun ptz(camName: String, action: String, x: Double = 0.0, y: Double = 0.0, z: Double = 0.0) {
-        nvr.ptz(camName, action, x, y, z)
+    suspend fun ptz(camName: String, action: String, x: Double = 0.0, y: Double = 0.0, z: Double = 0.0, timeoutMs: Long? = null) {
+        nvr.ptz(camName, action, x, y, z, timeoutMs)
+    }
+
+    /**
+     * 点按一步。只发一个 `step` 请求，设备走一格自己停 —— 不需要配套的 `stop`，
+     * 所以点按不会有「先转起来再停」的过冲。
+     *
+     * 返回的服务端响应里带**本次的落点**（`pan`/`tilt`）：`AbsoluteMove` 是精确
+     * 定位，所以这就是云台停稳后的位置。调用方直接拿它刷新坐标，不用再发一次
+     * `status` —— 少一次往返，也不会因为设备还在转就读到中间值。
+     */
+    suspend fun ptzStep(
+        camName: String,
+        x: Double,
+        y: Double,
+        z: Double,
+        speed: Double
+    ): NvrApi.PtzResult {
+        return nvr.ptzStep(camName, x, y, z, speed)
+    }
+
+    /**
+     * 读云台位置 `(pan, tilt)`；没有编码器时 null。
+     *
+     * 撞机械限位时设备静默忽略指令（仍返回 ok），所以「指令到底有没有生效」
+     * 只能靠回读位置判断。
+     */
+    suspend fun ptzStatus(camName: String): Pair<Double, Double>? =
+        nvr.ptzStatus(camName)
+
+    /**
+     * 页面销毁时的兜底停止。
+     *
+     * 走 [viewModelScope] 而不是页面的 scope：页面一销毁它就没了，而这个
+     * `stop` 恰恰要在这之后才发得出去。设备侧虽有 Timeout 兜底，但那只保证
+     * 「不会转到顶」，不保证「立刻停」。
+     */
+    fun stopPtz(camName: String) {
+        viewModelScope.launch(Dispatchers.IO) { runCatching { nvr.ptz(camName, "stop") } }
     }
 
     /** 数据面用的原始客户端：自动带 `X-Device-Token`，用于直取分片/整段。 */

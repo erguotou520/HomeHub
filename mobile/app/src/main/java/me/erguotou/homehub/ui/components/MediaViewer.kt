@@ -3,6 +3,7 @@ package me.erguotou.homehub.ui.components
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import androidx.compose.animation.core.Animatable
@@ -236,13 +237,25 @@ fun ImagePage(
 
 /**
  * Inline video player (Media3/ExoPlayer). The PlayerView controller offers
- * play/pause, seek bar and time; playback pauses when swiped away and the
- * player is released when the page leaves composition.
+ * play/pause, seek bar, time, a settings gear and — via our own controller
+ * layout — a landscape toggle to the LEFT of that gear; playback pauses when
+ * swiped away and the player is released when the page leaves composition.
+ *
+ * The fullscreen button is Media3's built-in one, not a new view: Media3 keeps
+ * it hidden until a [PlayerView.FullscreenButtonClickListener] is installed,
+ * which is exactly the hook this page uses to lock the Activity into
+ * sensor-landscape. Tapping again hands orientation back to the system. The
+ * lock is released in onDispose so closing the viewer, or paging to a photo,
+ * can never strand the app sideways. MainActivity declares
+ * `configChanges="orientation|screenSize|keyboardHidden"`, so the rotation is
+ * handled in place — the Activity is not recreated and the ExoPlayer (and its
+ * playback position) survives it.
  *
  * There is deliberately NO Compose gesture layer stacked over the player:
  * a full-size `pointerInput` Box beats an `AndroidView` in the hit test, so
  * the interop view underneath never sees a touch and every tap (play, seek
- * bar, settings) gets swallowed. Videos keep the platform's own controls.
+ * bar, settings, landscape) gets swallowed. Videos keep the platform's own
+ * controls.
  */
 @Composable
 fun VideoPage(
@@ -251,7 +264,15 @@ fun VideoPage(
     isCurrentPage: Boolean
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findHostActivity() }
     var playbackError by remember(key) { mutableStateOf<String?>(null) }
+    /**
+     * Only the page that actually locked the orientation may unlock it. The
+     * pager composes neighbouring pages too; if every VideoPage reset the
+     * orientation on dispose, a neighbour being torn down after a rotation
+     * would silently undo the current page's landscape lock.
+     */
+    val landscapeLocked = remember(key) { mutableStateOf(false) }
 
     val player = remember(key) {
         ExoPlayer.Builder(context).build().apply {
@@ -267,7 +288,13 @@ fun VideoPage(
     }
 
     DisposableEffect(key) {
-        onDispose { player.release() }
+        onDispose {
+            player.release()
+            if (landscapeLocked.value) {
+                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                landscapeLocked.value = false
+            }
+        }
     }
 
     // Swipe away pauses; coming back keeps the position (doesn't auto-resume,
@@ -279,7 +306,25 @@ fun VideoPage(
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             factory = { ctx ->
-                LayoutInflater.from(ctx).inflate(R.layout.hh_player_view, null) as PlayerView
+                val view = LayoutInflater.from(ctx)
+                    .inflate(R.layout.hh_player_view, null) as PlayerView
+                // Installing this listener is also what makes Media3's
+                // exo_fullscreen button visible (it starts out GONE).
+                view.setFullscreenButtonClickListener(
+                    PlayerView.FullscreenButtonClickListener { landscape ->
+                        val host = activity ?: return@FullscreenButtonClickListener
+                        host.requestedOrientation = if (landscape) {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        } else {
+                            // Back to the system setting, rather than forcing
+                            // portrait — a tablet or a user with auto-rotate
+                            // off should keep their own preference.
+                            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        }
+                        landscapeLocked.value = landscape
+                    }
+                )
+                view
             },
             update = { view -> view.player = player },
             modifier = Modifier.fillMaxSize()

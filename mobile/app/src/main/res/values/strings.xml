@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">HomeHub</string>
+
+    <!-- Override Media3's controller descriptions. Its built-in fullscreen
+         button is wired to a landscape/portrait toggle in VideoPage, so the
+         stock "Fullscreen"/"Exit fullscreen" wording would be misleading. -->
+    <string name="exo_controls_fullscreen_enter_description">进入横屏</string>
+    <string name="exo_controls_fullscreen_exit_description">退出横屏</string>
+    <string name="exo_controls_settings_description">播放设置</string>
 </resources>

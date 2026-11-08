@@ -6,6 +6,9 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.graphics.BitmapFactory
 import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.PopupWindow
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -75,12 +78,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
@@ -237,16 +245,21 @@ fun ImagePage(
 
 /**
  * Inline video player (Media3/ExoPlayer). The PlayerView controller offers
- * play/pause, seek bar, time, a settings gear and — via our own controller
- * layout — a landscape toggle to the LEFT of that gear; playback pauses when
- * swiped away and the player is released when the page leaves composition.
+ * play/pause, seek bar, time and a settings gear. Playback pauses when swiped
+ * away and the player is released when the page leaves composition.
  *
- * The fullscreen button is Media3's built-in one, not a new view: Media3 keeps
- * it hidden until a [PlayerView.FullscreenButtonClickListener] is installed,
- * which is exactly the hook this page uses to lock the Activity into
- * sensor-landscape. Tapping again hands orientation back to the system. The
- * lock is released in onDispose so closing the viewer, or paging to a photo,
- * can never strand the app sideways. MainActivity declares
+ * The landscape toggle is Media3's built-in fullscreen button (moved to the
+ * left of the gear by our own controller layout), reused rather than reinvented
+ * because Media3 already owns its two-state icon and accessible label.
+ *
+ * What it *does* depends on the clip's shape, taken from
+ * [Player.Listener.onVideoSizeChanged] with the rotation metadata folded in: a
+ * landscape clip is rotated into sensor-landscape, while a portrait clip keeps
+ * its orientation and instead hides the system bars — spinning a portrait clip
+ * sideways would only shrink it into a letterboxed strip.
+ *
+ * The lock is released in onDispose so closing the viewer, or paging to a
+ * photo, can never strand the app sideways. MainActivity declares
  * `configChanges="orientation|screenSize|keyboardHidden"`, so the rotation is
  * handled in place — the Activity is not recreated and the ExoPlayer (and its
  * playback position) survives it.
@@ -267,6 +280,17 @@ fun VideoPage(
     val activity = remember(context) { context.findHostActivity() }
     var playbackError by remember(key) { mutableStateOf<String?>(null) }
     /**
+     * Display aspect ratio (width / height) of the video, or null until the
+     * decoder reports a frame size.
+     *
+     * Rotation metadata is folded in here: a phone clip is often stored as
+     * 1920x1080 with a 90° flag but is a *portrait* video, and trusting
+     * width/height verbatim would present it as landscape.
+     */
+    var videoAspectRatio by remember(key) { mutableStateOf<Float?>(null) }
+    /** Landscape is the only shape a "rotate" button can help with. */
+    val videoIsLandscape = (videoAspectRatio ?: 0f) > 1f
+    /**
      * Only the page that actually locked the orientation may unlock it. The
      * pager composes neighbouring pages too; if every VideoPage reset the
      * orientation on dispose, a neighbour being torn down after a rotation
@@ -282,6 +306,14 @@ fun VideoPage(
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     playbackError = error.errorCodeName
                 }
+
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if (videoSize.width <= 0 || videoSize.height <= 0) return
+                    val quarterTurned = videoSize.unappliedRotationDegrees % 180 != 0
+                    val width = if (quarterTurned) videoSize.height else videoSize.width
+                    val height = if (quarterTurned) videoSize.width else videoSize.height
+                    videoAspectRatio = width * videoSize.pixelWidthHeightRatio / height
+                }
             })
             prepare()
         }
@@ -294,6 +326,16 @@ fun VideoPage(
                 activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 landscapeLocked.value = false
             }
+            setSystemBarsHidden(activity, false)
+        }
+    }
+
+    // A portrait clip must never leave the Activity stranded in landscape —
+    // paging from a landscape video to a portrait one included.
+    LaunchedEffect(videoIsLandscape) {
+        if (!videoIsLandscape && landscapeLocked.value) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            landscapeLocked.value = false
         }
     }
 
@@ -311,19 +353,31 @@ fun VideoPage(
                 // Installing this listener is also what makes Media3's
                 // exo_fullscreen button visible (it starts out GONE).
                 view.setFullscreenButtonClickListener(
-                    PlayerView.FullscreenButtonClickListener { landscape ->
+                    PlayerView.FullscreenButtonClickListener { wantsFullscreen ->
                         val host = activity ?: return@FullscreenButtonClickListener
-                        host.requestedOrientation = if (landscape) {
-                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        } else {
-                            // Back to the system setting, rather than forcing
-                            // portrait — a tablet or a user with auto-rotate
-                            // off should keep their own preference.
-                            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        // Read the ratio now, not through the captured val:
+                        // the factory runs once, before the decoder has
+                        // reported a frame size.
+                        val landscapeClip = (videoAspectRatio ?: 0f) > 1f
+                        if (landscapeClip) {
+                            // A landscape clip gains real estate from rotating.
+                            host.requestedOrientation = if (wantsFullscreen) {
+                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            } else {
+                                // Back to the system setting, rather than
+                                // forcing portrait — a tablet or a user with
+                                // auto-rotate off keeps their own preference.
+                                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                            }
+                            landscapeLocked.value = wantsFullscreen
                         }
-                        landscapeLocked.value = landscape
+                        // A portrait clip must NOT be rotated sideways, but
+                        // the button still means "fill the screen", so it
+                        // hides the system bars instead.
+                        setSystemBarsHidden(host, wantsFullscreen)
                     }
                 )
+                pinSettingsPopupToGear(view)
                 view
             },
             update = { view -> view.player = player },
@@ -340,6 +394,89 @@ fun VideoPage(
             }
         }
     }
+}
+
+/**
+ * Hides or restores the status/navigation bars for the viewer.
+ *
+ * This is what "fullscreen" means for a portrait clip: rotating it would only
+ * add black bars, but giving it the system bar space back does make it bigger.
+ * The bars stay swipe-revealable so the user is never trapped.
+ */
+private fun setSystemBarsHidden(activity: Activity?, hidden: Boolean) {
+    val window = activity?.window ?: return
+    val controller = WindowCompat.getInsetsController(window, window.decorView)
+    controller.systemBarsBehavior =
+        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    if (hidden) {
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+    } else {
+        controller.show(WindowInsetsCompat.Type.systemBars())
+    }
+}
+
+/**
+ * Pins Media3's settings popup to the gear button.
+ *
+ * The stock implementation puts the popup at
+ * `showAsDropDown(anchor, x, -settingsWindow.getHeight() - margin)`, where the
+ * height comes from measuring the *adapter* rather than the window about to be
+ * shown. For the main menu that estimate is far too tall — on a 1080x2354
+ * device the menu sat 332px above the bar instead of just above the gear — and
+ * the speed submenu, anchored on a list row rather than the gear, lands
+ * somewhere else again. The menu therefore both floats away from the button
+ * and jumps when a submenu opens.
+ *
+ * The adapters carry real work (playback speed, audio tracks), so this keeps
+ * them and only re-aims the window: right edge on the gear's right edge, bottom
+ * edge one 8dp gap above the gear's top edge. Every show — including a submenu
+ * swap, which goes through dismiss() + showAsDropDown() — re-attaches the
+ * content view, which is the hook used to re-pin.
+ *
+ * The window is private state of PlayerControlView, so it is read reflectively.
+ * Minification is off and the media3 version is pinned; if this ever stops
+ * matching, the lookup fails quietly and Media3's own positioning stays.
+ */
+private fun pinSettingsPopupToGear(playerView: PlayerView) {
+    val controller = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_controller)
+        as? ViewGroup ?: return
+    val popup = runCatching {
+        PlayerControlView::class.java
+            .getDeclaredField("settingsWindow")
+            .apply { isAccessible = true }
+            .get(controller) as PopupWindow
+    }.getOrNull() ?: return
+    val anchor = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_settings) ?: return
+    val content = popup.contentView ?: return
+
+    val gap = (8 * anchor.resources.displayMetrics.density).toInt()
+    var appliedX = Int.MIN_VALUE
+    var appliedY = Int.MIN_VALUE
+
+    fun pin() {
+        if (!popup.isShowing || popup.width <= 0 || popup.height <= 0) return
+        // Relative to the anchor's bottom-left corner, the same origin
+        // showAsDropDown() uses for its offsets.
+        val x = anchor.width - popup.width
+        val y = -(popup.height + anchor.height + gap)
+        if (x == appliedX && y == appliedY) return
+        appliedX = x
+        appliedY = y
+        popup.update(anchor, x, y, -1, -1)
+    }
+
+    content.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+            appliedX = Int.MIN_VALUE
+            appliedY = Int.MIN_VALUE
+            // The window has no measured size until it has been laid out.
+            v.post { pin() }
+        }
+
+        override fun onViewDetachedFromWindow(v: View) = Unit
+    })
+    // Covers an adapter swap that reuses the already attached window.
+    content.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> pin() }
 }
 
 /**

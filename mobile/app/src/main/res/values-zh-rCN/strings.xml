@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Media3 ships its own values-zh translations, and a locale-qualified library
+  resource outranks an app's default-locale override — the default values
+  version in values/strings.xml is correct on an English device but loses here.
+  So the Chinese wording lives in a Chinese-qualified folder too.
+
+  The built-in fullscreen button is wired to a landscape/portrait toggle in
+  VideoPage, so the stock "全屏"/"设置" wording would misdescribe it.
+-->
+<resources>
+    <string name="exo_controls_fullscreen_enter_description">进入横屏</string>
+    <string name="exo_controls_fullscreen_exit_description">退出横屏</string>
+    <string name="exo_controls_settings_description">播放设置</string>
+</resources>

@@ -58,6 +58,13 @@ class HhPlayerView @JvmOverloads constructor(
     private var hold = Hold.NONE
     private var lastEntered: Boolean? = null
 
+    /**
+     * Set by a recognised double tap, cleared by the next finger-down. Covers
+     * the window where the detector's long-press timer is still armed but the
+     * finger has already left (see [onDoubleTap]).
+     */
+    private var holdSuppressed = false
+
     private val detector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
@@ -66,13 +73,18 @@ class HhPlayerView @JvmOverloads constructor(
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 if (!gestureAllowed(e)) return false
+                // A double tap never also means "hold": the detector arms its
+                // long-press timer right after this callback returns, and the
+                // matching UP is swallowed below, so without this flag the
+                // timer would fire a phantom hold 500ms later.
+                holdSuppressed = true
                 onDoubleTapSeek?.invoke(sideOf(e))
                 startConsuming(e)
                 return true
             }
 
             override fun onLongPress(e: MotionEvent) {
-                if (consuming || !gestureAllowed(e)) return
+                if (consuming || holdSuppressed || !gestureAllowed(e)) return
                 val mode = if (sideOf(e) < 0) Hold.REWIND else Hold.FORWARD
                 hold = mode
                 onHoldChanged?.invoke(mode)
@@ -124,6 +136,11 @@ class HhPlayerView @JvmOverloads constructor(
             return true
         }
 
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            // A new touch re-enables hold; only the double tap that just
+            // finished keeps it off.
+            holdSuppressed = false
+        }
         detector.onTouchEvent(ev)
         // onDoubleTap / onLongPress may have flipped `consuming` from inside
         // the detector; in that case this very event is ours too.
@@ -174,21 +191,28 @@ class HhPlayerView @JvmOverloads constructor(
      * is, a CANCEL clears any child that was mid-press (the controller's
      * buttons), and every following event is swallowed so the second tap of a
      * double tap — or the release of a hold — cannot also toggle the controls.
+     *
+     * The CANCEL also goes to the detector, and that is not cosmetic: a double
+     * tap is recognised on the second DOWN, whose matching UP is then swallowed.
+     * GestureDetector would still be sitting in its double-tap state with the
+     * long-press timer armed, so half a second later it fired a phantom
+     * long press — the seek and the 2x speed at the same time. ACTION_CANCEL is
+     * what resets it (`cancel()` drops both the double-tap flag and the pending
+     * LONG_PRESS message).
      */
     private fun startConsuming(ev: MotionEvent) {
         if (consuming) return
         consuming = true
-        if (downDispatched) {
-            val cancel = MotionEvent.obtain(
-                ev.downTime, ev.eventTime, MotionEvent.ACTION_CANCEL, 0f, 0f, 0
-            )
-            try {
-                super.dispatchTouchEvent(cancel)
-            } finally {
-                cancel.recycle()
-            }
-            downDispatched = false
+        val cancel = MotionEvent.obtain(
+            ev.downTime, ev.eventTime, MotionEvent.ACTION_CANCEL, 0f, 0f, 0
+        )
+        try {
+            detector.onTouchEvent(cancel)
+            if (downDispatched) super.dispatchTouchEvent(cancel)
+        } finally {
+            cancel.recycle()
         }
+        downDispatched = false
     }
 
     private fun endGesture() {

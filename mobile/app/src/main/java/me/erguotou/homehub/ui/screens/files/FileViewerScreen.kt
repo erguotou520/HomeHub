@@ -83,6 +83,8 @@ import me.erguotou.homehub.ui.components.AudioPlaybackMemory
 import me.erguotou.homehub.ui.components.InfoLine
 import me.erguotou.homehub.ui.components.ImagePage
 import me.erguotou.homehub.ui.components.VideoControllerInset
+import me.erguotou.homehub.ui.components.VideoFullscreenEffects
+import me.erguotou.homehub.ui.components.VideoFullscreenState
 import me.erguotou.homehub.ui.components.VideoPage
 import me.erguotou.homehub.ui.components.findHostActivity
 import me.erguotou.homehub.util.FileKind
@@ -194,6 +196,12 @@ fun FileViewerScreen(
      * paused would lose the position and it would replay from 0:00.
      */
     val audioMemory = remember { AudioPlaybackMemory() }
+    /**
+     * The single source of truth for a video being fullscreen. The video page
+     * writes it from the fullscreen button, Back reads it, and the chrome
+     * below hides itself because of it.
+     */
+    val videoFullscreen = remember { VideoFullscreenState() }
     var busy by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
@@ -216,7 +224,13 @@ fun FileViewerScreen(
         }
     }
 
-    BackHandler { onDismiss() }
+    // Back leaves fullscreen first; only a second press closes the viewer.
+    BackHandler {
+        if (videoFullscreen.isFullscreen) videoFullscreen.exit() else onDismiss()
+    }
+    // Orientation and the system bars are window-level, so they are applied
+    // once for the viewer rather than by each video page.
+    VideoFullscreenEffects(videoFullscreen)
 
     val view = LocalView.current
     val darkTheme = isSystemInDarkTheme()
@@ -235,9 +249,10 @@ fun FileViewerScreen(
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
-            // Freeze paging while a seek bar is held: the drag belongs to the
-            // slider, and letting the pager take it flipped to another file.
-            userScrollEnabled = !pageZoomed && !scrubbing
+            // Freeze paging while a seek bar is held or a video is fullscreen:
+            // the gesture belongs elsewhere, and a page flip would strand the
+            // fullscreen session on a clip that is no longer visible.
+            userScrollEnabled = !pageZoomed && !scrubbing && !videoFullscreen.isFullscreen
         ) { page ->
             val item = items[page]
             when (item.kind) {
@@ -250,7 +265,8 @@ fun FileViewerScreen(
                 FileKind.VIDEO -> VideoPage(
                     key = item.entry.path,
                     url = urlFor(item),
-                    isCurrentPage = pagerState.currentPage == page
+                    isCurrentPage = pagerState.currentPage == page,
+                    fullscreen = videoFullscreen
                 )
                 FileKind.AUDIO -> AudioPage(
                     key = item.entry.path,
@@ -278,123 +294,129 @@ fun FileViewerScreen(
         val currentPage = pagerState.currentPage.coerceIn(0, items.size - 1)
         val current = items[currentPage]
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
-                }
-                Text(
-                    current.name,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
-                )
-                Text(
-                    "${currentPage + 1} / ${items.size}",
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                IconButton(onClick = { showInfo = !showInfo }) {
-                    Icon(Icons.Outlined.Info, contentDescription = "信息", tint = Color.White)
-                }
-                Box {
-                    IconButton(onClick = { menu = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
+        // Fullscreen: the viewer's chrome would sit on top of the video.
+        if (!videoFullscreen.isFullscreen) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 4.dp, vertical = 4.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
                     }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("用其他应用打开") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
-                            onClick = { menu = false; onOpenExternal(current) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("下载到本机") },
-                            leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
-                            onClick = { menu = false; onDownload(current) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("分享") },
-                            leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
-                            onClick = { menu = false; onShare(current) }
-                        )
+                    Text(
+                        current.name,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
+                    )
+                    Text(
+                        "${currentPage + 1} / ${items.size}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    IconButton(onClick = { showInfo = !showInfo }) {
+                        Icon(Icons.Outlined.Info, contentDescription = "信息", tint = Color.White)
+                    }
+                    Box {
+                        IconButton(onClick = { menu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
+                        }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("用其他应用打开") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
+                                onClick = { menu = false; onOpenExternal(current) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("下载到本机") },
+                                leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
+                                onClick = { menu = false; onDownload(current) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("分享") },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                onClick = { menu = false; onShare(current) }
+                            )
+                        }
                     }
                 }
-            }
 
-            if (showInfo) {
-                Surface(color = Color.Black.copy(alpha = 0.6f)) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                        InfoLine("名称", current.name)
-                        InfoLine("位置", "${current.dir}/${current.relPath}")
-                        InfoLine("类型", kindLabel(current.kind) + (current.entry.mimeType?.let { " · $it" } ?: ""))
-                        current.entry.size?.let { InfoLine("大小", formatBytes(it)) }
-                        current.entry.modified?.let { InfoLine("修改", formatDateTime(it)) }
-                        if (current.kind == FileKind.OFFICE) {
-                            InfoLine("提示", "内联为纯文本抽取，版式请用其他应用打开")
+                if (showInfo) {
+                    Surface(color = Color.Black.copy(alpha = 0.6f)) {
+                        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                            InfoLine("名称", current.name)
+                            InfoLine("位置", "${current.dir}/${current.relPath}")
+                            InfoLine("类型", kindLabel(current.kind) + (current.entry.mimeType?.let { " · $it" } ?: ""))
+                            current.entry.size?.let { InfoLine("大小", formatBytes(it)) }
+                            current.entry.modified?.let { InfoLine("修改", formatDateTime(it)) }
+                            if (current.kind == FileKind.OFFICE) {
+                                InfoLine("提示", "内联为纯文本抽取，版式请用其他应用打开")
+                            }
                         }
                     }
                 }
             }
         }
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 12.dp)
-        ) {
-            toast?.let {
-                Box(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Surface(color = Color.Black.copy(alpha = 0.7f), shape = MaterialTheme.shapes.small) {
-                        Text(
-                            it,
-                            color = Color.White,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
+        // Fullscreen hides the floating bottom bar with the top one.
+        if (!videoFullscreen.isFullscreen) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 12.dp)
+            ) {
+                toast?.let {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Surface(color = Color.Black.copy(alpha = 0.7f), shape = MaterialTheme.shapes.small) {
+                            Text(
+                                it,
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
                     }
                 }
-            }
 
-            // Image pages keep the album's edit toolbar — the transform
-            // endpoints address any file in a registered directory.
-            if (current.kind == FileKind.IMAGE) {
-                Surface(
-                    color = Color.Black.copy(alpha = 0.45f),
-                    shape = MaterialTheme.shapes.extraLarge,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
+                // Image pages keep the album's edit toolbar — the transform
+                // endpoints address any file in a registered directory.
+                if (current.kind == FileKind.IMAGE) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.45f),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        IconButton(onClick = { onRotate(current, 270) { } }, enabled = !busy) {
-                            Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "左转", tint = Color.White)
-                        }
-                        IconButton(onClick = { onRotate(current, 90) { } }, enabled = !busy) {
-                            Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "右转", tint = Color.White)
-                        }
-                        IconButton(onClick = { onFlip(current, false) { } }, enabled = !busy) {
-                            Icon(Icons.Filled.Flip, contentDescription = "水平翻转", tint = Color.White)
-                        }
-                        IconButton(onClick = { onFlip(current, true) { } }, enabled = !busy) {
-                            Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
-                        }
-                        IconButton(onClick = { onRestore(current) { } }, enabled = !busy) {
-                            Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = { onRotate(current, 270) { } }, enabled = !busy) {
+                                Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "左转", tint = Color.White)
+                            }
+                            IconButton(onClick = { onRotate(current, 90) { } }, enabled = !busy) {
+                                Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "右转", tint = Color.White)
+                            }
+                            IconButton(onClick = { onFlip(current, false) { } }, enabled = !busy) {
+                                Icon(Icons.Filled.Flip, contentDescription = "水平翻转", tint = Color.White)
+                            }
+                            IconButton(onClick = { onFlip(current, true) { } }, enabled = !busy) {
+                                Icon(Icons.Filled.SwapVert, contentDescription = "垂直翻转", tint = Color.White)
+                            }
+                            IconButton(onClick = { onRestore(current) { } }, enabled = !busy) {
+                                Icon(Icons.Filled.Restore, contentDescription = "还原原图", tint = Color.White)
+                            }
                         }
                     }
                 }

@@ -47,6 +47,8 @@ import me.erguotou.homehub.data.PhotoItem
 import me.erguotou.homehub.ui.components.InfoLine
 import me.erguotou.homehub.ui.components.ImagePage
 import me.erguotou.homehub.ui.components.VideoControllerInset
+import me.erguotou.homehub.ui.components.VideoFullscreenEffects
+import me.erguotou.homehub.ui.components.VideoFullscreenState
 import me.erguotou.homehub.ui.components.VideoPage
 import me.erguotou.homehub.ui.components.findHostActivity
 import me.erguotou.homehub.util.formatBytes
@@ -93,6 +95,12 @@ fun PhotoViewerScreen(
     var busy by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     val panels = remember { ViewerPanels() }
+    /**
+     * The single source of truth for a video being fullscreen. The video page
+     * writes it from the fullscreen button, Back reads it, and the chrome
+     * below hides itself because of it.
+     */
+    val videoFullscreen = remember { VideoFullscreenState() }
 
     // Auto-clear the toast like the web lightbox does.
     LaunchedEffect(toast) {
@@ -111,10 +119,18 @@ fun PhotoViewerScreen(
         }
     }
 
-    // Back closes the open panel first, then the viewer — never the activity.
+    // Back closes the open panel first, then leaves fullscreen, then the
+    // viewer — never the activity.
     BackHandler {
-        if (panels.anyOpen) panels.closeAll() else onDismiss()
+        when {
+            panels.anyOpen -> panels.closeAll()
+            videoFullscreen.isFullscreen -> videoFullscreen.exit()
+            else -> onDismiss()
+        }
     }
+    // Orientation and the system bars are window-level, so they are applied
+    // once for the viewer rather than by each video page.
+    VideoFullscreenEffects(videoFullscreen)
 
     val view = LocalView.current
     val darkTheme = isSystemInDarkTheme()
@@ -135,15 +151,18 @@ fun PhotoViewerScreen(
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
-            // Lock swiping while an image is zoomed in, like the system gallery.
-            userScrollEnabled = !pageZoomed
+            // Lock swiping while an image is zoomed in, like the system
+            // gallery, and while a video is fullscreen — a page flip would
+            // strand the session on a clip that is no longer visible.
+            userScrollEnabled = !pageZoomed && !videoFullscreen.isFullscreen
         ) { page ->
             val photo = photos[page]
             if (photo.isVideo) {
                 VideoPage(
                     key = photo.id,
                     url = mediaUrlResolver(photo.id),
-                    isCurrentPage = pagerState.currentPage == page
+                    isCurrentPage = pagerState.currentPage == page,
+                    fullscreen = videoFullscreen
                 )
             } else {
                 ImagePage(
@@ -159,38 +178,42 @@ fun PhotoViewerScreen(
         // page, so its buttons can never be clipped by a page transition.
         val currentPage = pagerState.currentPage
         val currentPhoto = photos[currentPage.coerceIn(0, photos.size - 1)]
-        ViewerOverlay(
-            photo = currentPhoto,
-            page = currentPage,
-            total = photos.size,
-            busy = busy,
-            toast = toast,
-            panels = panels,
-            onClose = onDismiss,
-            onDownload = onDownload,
-            onShare = onShare,
-            onRotate = { angle, done ->
-                runEdit(
-                    { cb -> onRotate(currentPhoto, angle) { ok -> cb(ok); done(ok) } },
-                    "已旋转",
-                    "旋转失败"
-                )
-            },
-            onFlip = { vertical, done ->
-                runEdit(
-                    { cb -> onFlip(currentPhoto, vertical) { ok -> cb(ok); done(ok) } },
-                    if (vertical) "已垂直翻转" else "已水平翻转",
-                    "翻转失败"
-                )
-            },
-            onRestore = { done ->
-                runEdit(
-                    { cb -> onRestore(currentPhoto) { ok -> cb(ok); done(ok) } },
-                    "已还原原图",
-                    "还原失败"
-                )
-            }
-        )
+        // Fullscreen: the counter, info panel and edit toolbar would sit
+        // on top of the video.
+        if (!videoFullscreen.isFullscreen) {
+            ViewerOverlay(
+                photo = currentPhoto,
+                page = currentPage,
+                total = photos.size,
+                busy = busy,
+                toast = toast,
+                panels = panels,
+                onClose = onDismiss,
+                onDownload = onDownload,
+                onShare = onShare,
+                onRotate = { angle, done ->
+                    runEdit(
+                        { cb -> onRotate(currentPhoto, angle) { ok -> cb(ok); done(ok) } },
+                        "已旋转",
+                        "旋转失败"
+                    )
+                },
+                onFlip = { vertical, done ->
+                    runEdit(
+                        { cb -> onFlip(currentPhoto, vertical) { ok -> cb(ok); done(ok) } },
+                        if (vertical) "已垂直翻转" else "已水平翻转",
+                        "翻转失败"
+                    )
+                },
+                onRestore = { done ->
+                    runEdit(
+                        { cb -> onRestore(currentPhoto) { ok -> cb(ok); done(ok) } },
+                        "已还原原图",
+                        "还原失败"
+                    )
+                }
+            )
+        }
     }
 }
 

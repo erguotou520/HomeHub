@@ -10,11 +10,15 @@
   hierarchy, which keeps the player inside the Compose z-order.
 
   controller_layout_id swaps in our arrangement of the stock Media3 controls:
-  the fullscreen button (wired to a landscape toggle in VideoPage) sits to the
-  left of the settings gear, and the gear is the right-most button so its
-  popup lines up with it. See res/layout/hh_player_control_view.xml.
+  the fullscreen button (wired to the viewer's fullscreen state in VideoPage)
+  sits to the left of the settings gear, and the gear is the right-most button
+  so its popup lines up with it. See res/layout/hh_player_control_view.xml.
+
+  HhPlayerView is a thin PlayerView subclass that recognises double-tap /
+  press-and-hold gestures in the video area without swallowing the controller's
+  own touches, and lets Compose own the fullscreen button's state.
 -->
-<androidx.media3.ui.PlayerView
+<me.erguotou.homehub.ui.components.HhPlayerView
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/hh_player"

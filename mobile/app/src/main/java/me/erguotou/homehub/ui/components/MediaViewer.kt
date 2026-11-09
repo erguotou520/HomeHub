@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,6 +35,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -49,11 +51,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,7 +77,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -88,10 +95,13 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import me.erguotou.homehub.R
 import me.erguotou.homehub.util.formatDuration
 
@@ -120,6 +130,121 @@ tailrec fun Context.findHostActivity(): Activity? = when (this) {
     is ContextWrapper -> baseContext.findHostActivity()
     else -> null
 }
+
+/**
+ * The one place that knows whether a video is in fullscreen.
+ *
+ * Previously "fullscreen" was three unrelated facts: Media3's private
+ * `isFullScreen` boolean, the Activity's requested orientation and the
+ * visibility of the system bars. Nothing could hide the viewer's own top bar
+ * (it had no idea a fullscreen existed), Back could not leave fullscreen (it
+ * only knew how to close the viewer), and a neighbouring pager page being
+ * disposed could quietly show the bars again. The viewer chrome, the Back
+ * handler and the video page now all read and write this one state.
+ *
+ * Ownership matters because a HorizontalPager composes neighbouring pages:
+ * each of those has its own [VideoPage] and must not be able to switch the
+ * fullscreen session off just because it was torn down.
+ */
+@Stable
+class VideoFullscreenState {
+    var isFullscreen by mutableStateOf(false)
+        private set
+
+    /** Whether the clip that opened fullscreen gains anything from rotating. */
+    var landscapeClip by mutableStateOf(false)
+        private set
+
+    private var ownerKey: Any? = null
+
+    fun isOwner(key: Any): Boolean = isFullscreen && ownerKey == key
+
+    fun toggle(key: Any, landscape: Boolean) {
+        if (isOwner(key)) {
+            exit()
+        } else {
+            ownerKey = key
+            landscapeClip = landscape
+            isFullscreen = true
+        }
+    }
+
+    /** Back key, or any chrome that wants out. Ignores ownership on purpose. */
+    fun exit() {
+        ownerKey = null
+        isFullscreen = false
+    }
+
+    /** Called on dispose: only the owning page may end the session. */
+    fun release(key: Any) {
+        if (ownerKey == key) exit()
+    }
+}
+
+/**
+ * Applies the window-level half of fullscreen: orientation and system bars.
+ *
+ * This lives at the viewer level, not in [VideoPage], so a pager page being
+ * disposed cannot undo it. Rotation is only requested for landscape clips —
+ * spinning a portrait clip sideways just letterboxes it into a strip. Some
+ * OEMs re-show the bars while the Activity rotates, hence the delayed re-hides
+ * and the orientation-dependent key.
+ */
+@Composable
+fun VideoFullscreenEffects(state: VideoFullscreenState) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findHostActivity() }
+    val orientation = LocalConfiguration.current.orientation
+    val entered = state.isFullscreen
+    val rotate = entered && state.landscapeClip
+
+    DisposableEffect(activity) {
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            setSystemBarsHidden(activity, false)
+        }
+    }
+
+    LaunchedEffect(activity, entered, rotate, orientation) {
+        activity?.requestedOrientation = if (rotate) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            // Back to the system setting, rather than forcing portrait — a
+            // tablet or a user with auto-rotate off keeps their own preference.
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        setSystemBarsHidden(activity, entered)
+        if (entered) {
+            // The rotation triggered above settles a frame or two later and
+            // can bring the bars back; re-apply once it has.
+            delay(200)
+            if (state.isFullscreen) setSystemBarsHidden(activity, true)
+            delay(600)
+            if (state.isFullscreen) setSystemBarsHidden(activity, true)
+        }
+    }
+}
+
+/**
+ * Transient feedback pill shown over the video after a gesture.
+ *
+ * [stamp] makes two identical taps distinct values, so the auto-dismiss effect
+ * restarts instead of being skipped as "same hint as before".
+ */
+private data class GestureHint(val label: String, val detail: String?, val stamp: Long)
+
+/** Height of the viewer's floating top bar: 48dp buttons plus 4dp padding. */
+private val ViewerTopChromeHeight = 56.dp
+
+/** Double tap: Media3 players commonly use 15s, and the user asked for it. */
+private const val SeekStepMs = 15_000L
+
+/**
+ * "2x rewind" is a seek loop, because ExoPlayer has no negative speed: 300ms of
+ * timeline per 150ms of wall clock is the 2x the gesture promises.
+ */
+private const val RewindStepMs = 300L
+private const val RewindTickMs = 150L
 
 /** Touch target height of the audio seek bar (the bar itself is ~4dp). */
 private val SeekTouchHeight = 40.dp
@@ -245,39 +370,33 @@ fun ImagePage(
 
 /**
  * Inline video player (Media3/ExoPlayer). The PlayerView controller offers
- * play/pause, seek bar, time and a settings gear. Playback pauses when swiped
- * away and the player is released when the page leaves composition.
+ * play/pause, seek bar, time, a fullscreen button and a settings gear.
+ * Playback pauses when swiped away and the player is released when the page
+ * leaves composition.
  *
- * The landscape toggle is Media3's built-in fullscreen button (moved to the
- * left of the gear by our own controller layout), reused rather than reinvented
- * because Media3 already owns its two-state icon and accessible label.
+ * Fullscreen is a single state shared with the viewer ([VideoFullscreenState]),
+ * not Media3's private `isFullScreen` flag: the button writes it, the Back key
+ * leaves it, and the surrounding chrome hides itself because of it. The
+ * window-level half (orientation, system bars) is applied by
+ * [VideoFullscreenEffects], which the viewer calls once instead of once per
+ * page — a pager neighbour being torn down must not undo the current page's
+ * fullscreen. Rotation is only requested for landscape clips; spinning a
+ * portrait clip sideways would just letterbox it into a strip.
  *
- * What it *does* depends on the clip's shape, taken from
- * [Player.Listener.onVideoSizeChanged] with the rotation metadata folded in: a
- * landscape clip is rotated into sensor-landscape, while a portrait clip keeps
- * its orientation and instead hides the system bars — spinning a portrait clip
- * sideways would only shrink it into a letterboxed strip.
- *
- * The lock is released in onDispose so closing the viewer, or paging to a
- * photo, can never strand the app sideways. MainActivity declares
- * `configChanges="orientation|screenSize|keyboardHidden"`, so the rotation is
- * handled in place — the Activity is not recreated and the ExoPlayer (and its
- * playback position) survives it.
- *
- * There is deliberately NO Compose gesture layer stacked over the player:
- * a full-size `pointerInput` Box beats an `AndroidView` in the hit test, so
- * the interop view underneath never sees a touch and every tap (play, seek
- * bar, settings, landscape) gets swallowed. Videos keep the platform's own
- * controls.
+ * Gestures live in [HhPlayerView] at the View layer, not in a Compose overlay:
+ * a full-size `pointerInput` Box beats an `AndroidView` in the hit test, so the
+ * interop view underneath would never see a touch and play/pause, the seek bar
+ * and the gear would all go dead. Double tap seeks ±15s by half, press-and-hold
+ * plays at 2x (right half) or rewinds at 2x (left half).
  */
 @Composable
 fun VideoPage(
     key: Any,
     url: String,
-    isCurrentPage: Boolean
+    isCurrentPage: Boolean,
+    fullscreen: VideoFullscreenState
 ) {
     val context = LocalContext.current
-    val activity = remember(context) { context.findHostActivity() }
     var playbackError by remember(key) { mutableStateOf<String?>(null) }
     /**
      * Display aspect ratio (width / height) of the video, or null until the
@@ -288,15 +407,27 @@ fun VideoPage(
      * width/height verbatim would present it as landscape.
      */
     var videoAspectRatio by remember(key) { mutableStateOf<Float?>(null) }
-    /** Landscape is the only shape a "rotate" button can help with. */
+    /** Landscape is the only shape rotating the screen can help. */
     val videoIsLandscape = (videoAspectRatio ?: 0f) > 1f
     /**
-     * Only the page that actually locked the orientation may unlock it. The
-     * pager composes neighbouring pages too; if every VideoPage reset the
-     * orientation on dispose, a neighbour being torn down after a rotation
-     * would silently undo the current page's landscape lock.
+     * The click listener is built in the factory, which runs before the
+     * decoder has reported a frame size — hence the state indirection.
      */
-    val landscapeLocked = remember(key) { mutableStateOf(false) }
+    val landscapeNow = rememberUpdatedState(videoIsLandscape)
+    val isFullscreen = fullscreen.isOwner(key)
+
+    // In portrait the chrome floats over the video, so a gesture starting on
+    // the top bar must stay a tap on that bar.
+    val density = LocalDensity.current
+    val chromeTopPx = with(density) { ViewerTopChromeHeight.roundToPx() } +
+        WindowInsets.statusBars.getTop(density)
+
+    var hold by remember(key) { mutableStateOf(HhPlayerView.Hold.NONE) }
+    var hint by remember(key) { mutableStateOf<GestureHint?>(null) }
+    // Hold state that has to be undone when the finger lifts.
+    var holdApplied by remember(key) { mutableStateOf(false) }
+    var holdSpeed by remember(key) { mutableFloatStateOf(1f) }
+    var holdVolume by remember(key) { mutableFloatStateOf(1f) }
 
     val player = remember(key) {
         ExoPlayer.Builder(context).build().apply {
@@ -322,20 +453,9 @@ fun VideoPage(
     DisposableEffect(key) {
         onDispose {
             player.release()
-            if (landscapeLocked.value) {
-                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                landscapeLocked.value = false
-            }
-            setSystemBarsHidden(activity, false)
-        }
-    }
-
-    // A portrait clip must never leave the Activity stranded in landscape —
-    // paging from a landscape video to a portrait one included.
-    LaunchedEffect(videoIsLandscape) {
-        if (!videoIsLandscape && landscapeLocked.value) {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            landscapeLocked.value = false
+            // The page that owns the session ends it; a pager neighbour being
+            // torn down must leave the current page's fullscreen alone.
+            fullscreen.release(key)
         }
     }
 
@@ -345,44 +465,129 @@ fun VideoPage(
         if (!isCurrentPage && player.isPlaying) player.pause()
     }
 
+    // Press-and-hold. The right half plays at 2x; the left half walks the
+    // timeline backwards, because ExoPlayer has no negative playback speed.
+    // Both are undone the moment `hold` returns to NONE (finger lifted), which
+    // also cancels the rewind loop at its next suspension point.
+    LaunchedEffect(hold) {
+        when (hold) {
+            HhPlayerView.Hold.FORWARD -> {
+                if (!holdApplied) {
+                    holdSpeed = player.playbackParameters.speed
+                    holdApplied = true
+                }
+                player.setPlaybackSpeed(2f)
+                hint = GestureHint("2× 快进", null, System.nanoTime())
+            }
+
+            HhPlayerView.Hold.REWIND -> {
+                if (!holdApplied) {
+                    holdVolume = player.volume
+                    holdApplied = true
+                }
+                // Scrubbing backwards while audio runs forward sounds broken.
+                player.volume = 0f
+                hint = GestureHint("2× 快退", null, System.nanoTime())
+                while (true) {
+                    player.seekTo((player.currentPosition - RewindStepMs).coerceAtLeast(0L))
+                    delay(RewindTickMs)
+                }
+            }
+
+            HhPlayerView.Hold.NONE -> {
+                if (holdApplied) {
+                    player.setPlaybackSpeed(holdSpeed)
+                    player.volume = holdVolume
+                    holdApplied = false
+                }
+                hint = null
+            }
+        }
+    }
+
+    // A double-tap hint is a short toast; a hold hint lives until the finger
+    // lifts, and is cleared above.
+    LaunchedEffect(hint) {
+        if (hint?.detail == null) return@LaunchedEffect
+        delay(1000)
+        hint = null
+    }
+
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             factory = { ctx ->
                 val view = LayoutInflater.from(ctx)
-                    .inflate(R.layout.hh_player_view, null) as PlayerView
+                    .inflate(R.layout.hh_player_view, null) as HhPlayerView
                 // Installing this listener is also what makes Media3's
-                // exo_fullscreen button visible (it starts out GONE).
+                // exo_fullscreen button visible (it starts out GONE). The
+                // click itself is taken over below so the icon can follow our
+                // own state — Media3's internal isFullScreen cannot be set
+                // from outside, which is why Back leaving fullscreen would
+                // otherwise leave a stale icon.
                 view.setFullscreenButtonClickListener(
-                    PlayerView.FullscreenButtonClickListener { wantsFullscreen ->
-                        val host = activity ?: return@FullscreenButtonClickListener
-                        // Read the ratio now, not through the captured val:
-                        // the factory runs once, before the decoder has
-                        // reported a frame size.
-                        val landscapeClip = (videoAspectRatio ?: 0f) > 1f
-                        if (landscapeClip) {
-                            // A landscape clip gains real estate from rotating.
-                            host.requestedOrientation = if (wantsFullscreen) {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            } else {
-                                // Back to the system setting, rather than
-                                // forcing portrait — a tablet or a user with
-                                // auto-rotate off keeps their own preference.
-                                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                            }
-                            landscapeLocked.value = wantsFullscreen
-                        }
-                        // A portrait clip must NOT be rotated sideways, but
-                        // the button still means "fill the screen", so it
-                        // hides the system bars instead.
-                        setSystemBarsHidden(host, wantsFullscreen)
-                    }
+                    PlayerView.FullscreenButtonClickListener { }
                 )
+                view.bindFullscreenButton {
+                    fullscreen.toggle(key, landscapeNow.value)
+                }
+                view.onDoubleTapSeek = { side ->
+                    val duration = player.duration
+                    val target = (player.currentPosition + side * SeekStepMs)
+                        .coerceAtLeast(0L)
+                        .let { if (duration > 0) it.coerceAtMost(duration) else it }
+                    player.seekTo(target)
+                    hint = GestureHint(
+                        label = if (side < 0) "−15 秒" else "+15 秒",
+                        detail = buildString {
+                            append(formatDuration(target).ifEmpty { "0:00" })
+                            if (duration > 0) {
+                                append(" / ").append(formatDuration(duration))
+                            }
+                        },
+                        stamp = System.nanoTime()
+                    )
+                }
+                view.onHoldChanged = { hold = it }
                 pinSettingsPopupToGear(view)
                 view
             },
-            update = { view -> view.player = player },
+            update = { view ->
+                view.player = player
+                view.showFullscreenEntered(isFullscreen)
+                // Fullscreen only takes away the chrome and the system bars;
+                // it does not zoom. RESIZE_MODE_ZOOM would fill a 20:9 screen
+                // with a 16:9 clip by cropping its top and bottom, which is
+                // how "fill the screen" turns into "the top is cut off". The
+                // remaining bars are the aspect-ratio difference itself.
+                view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT)
+                view.gestureTopInsetPx = if (isFullscreen) 0 else chromeTopPx
+            },
             modifier = Modifier.fillMaxSize()
         )
+        hint?.let { h ->
+            Surface(
+                color = Color.Black.copy(alpha = 0.72f),
+                shape = MaterialTheme.shapes.medium
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        h.label,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    h.detail?.let {
+                        Text(
+                            it,
+                            color = Color.White.copy(alpha = 0.75f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        }
         playbackError?.let { err ->
             Surface(color = Color.Black.copy(alpha = 0.7f)) {
                 Text(

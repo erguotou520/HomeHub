@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
@@ -422,6 +423,16 @@ fun VideoPage(
     val chromeTopPx = with(density) { ViewerTopChromeHeight.roundToPx() } +
         WindowInsets.statusBars.getTop(density)
 
+    /**
+     * A landscape screen is the only place where filling is free: the extra
+     * pixels go to the sides, so a picture that is narrower than the screen
+     * (every 16:9 and 2.4:1 source on a 20:9 phone) gets its black side bars
+     * trimmed instead of its content. Filling a portrait screen would crop the
+     * picture top and bottom, which is what "全屏上方显示不全" was.
+     */
+    val landscapeScreen =
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     var hold by remember(key) { mutableStateOf(HhPlayerView.Hold.NONE) }
     var hint by remember(key) { mutableStateOf<GestureHint?>(null) }
     // Hold state that has to be undone when the finger lifts.
@@ -554,12 +565,20 @@ fun VideoPage(
             update = { view ->
                 view.player = player
                 view.showFullscreenEntered(isFullscreen)
-                // Fullscreen only takes away the chrome and the system bars;
-                // it does not zoom. RESIZE_MODE_ZOOM would fill a 20:9 screen
-                // with a 16:9 clip by cropping its top and bottom, which is
-                // how "fill the screen" turns into "the top is cut off". The
-                // remaining bars are the aspect-ratio difference itself.
-                view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT)
+                // Landscape: fill the screen instead of letterboxing it. On a
+                // 20:9 screen a 16:9 clip fitted by height leaves the bars top
+                // and bottom — which the user reads as empty padding above the
+                // picture, especially with our own top bar floating there. The
+                // crop that ZOOM performs lands in those bars first (a 2.4:1
+                // film keeps its picture intact and only loses 50px of its own
+                // black band), so nothing of the picture disappears.
+                view.setResizeMode(
+                    if (landscapeScreen) {
+                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    } else {
+                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                )
                 view.gestureTopInsetPx = if (isFullscreen) 0 else chromeTopPx
             },
             modifier = Modifier.fillMaxSize()

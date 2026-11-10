@@ -145,6 +145,12 @@
       android:clipToPadding="false"
       android:layoutDirection="ltr">
 
+    <!-- Previous/next stay in the layout because Media3 resolves these ids by
+         name, but HhPlayerView hides both with setShowPreviousButton(false)
+         and setShowNextButton(false): with one media item they could only jump
+         to 0:00 / the end. What is left is rewind / play-pause / fast-forward,
+         both skips at 15s (the increment comes from the player). -->
+
     <ImageButton android:id="@id/exo_prev"
         style="@style/ExoStyledControls.Button.Center.Previous"/>
 

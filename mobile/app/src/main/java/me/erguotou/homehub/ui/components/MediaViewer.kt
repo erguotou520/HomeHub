@@ -441,24 +441,33 @@ fun VideoPage(
     var holdVolume by remember(key) { mutableFloatStateOf(1f) }
 
     val player = remember(key) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(url))
-            playWhenReady = false
-            addListener(object : Player.Listener {
-                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    playbackError = error.errorCodeName
-                }
+        // Both skip buttons move by the same amount. The rewind default is 5s
+        // while fast-forward is 15s, so the two arrows in the control bar
+        // disagreed; the controller reads the amount from the player itself
+        // (Player.getSeekBackIncrement) and prints it on the button, so it
+        // shows 15 as soon as the player is bound.
+        ExoPlayer.Builder(context)
+            .setSeekBackIncrementMs(SeekStepMs)
+            .setSeekForwardIncrementMs(SeekStepMs)
+            .build()
+            .apply {
+                setMediaItem(MediaItem.fromUri(url))
+                playWhenReady = false
+                addListener(object : Player.Listener {
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        playbackError = error.errorCodeName
+                    }
 
-                override fun onVideoSizeChanged(videoSize: VideoSize) {
-                    if (videoSize.width <= 0 || videoSize.height <= 0) return
-                    val quarterTurned = videoSize.unappliedRotationDegrees % 180 != 0
-                    val width = if (quarterTurned) videoSize.height else videoSize.width
-                    val height = if (quarterTurned) videoSize.width else videoSize.height
-                    videoAspectRatio = width * videoSize.pixelWidthHeightRatio / height
-                }
-            })
-            prepare()
-        }
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.width <= 0 || videoSize.height <= 0) return
+                        val quarterTurned = videoSize.unappliedRotationDegrees % 180 != 0
+                        val width = if (quarterTurned) videoSize.height else videoSize.width
+                        val height = if (quarterTurned) videoSize.width else videoSize.height
+                        videoAspectRatio = width * videoSize.pixelWidthHeightRatio / height
+                    }
+                })
+                prepare()
+            }
     }
 
     DisposableEffect(key) {

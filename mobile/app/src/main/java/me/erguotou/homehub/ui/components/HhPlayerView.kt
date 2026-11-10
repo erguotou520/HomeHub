@@ -7,6 +7,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.ImageView
 import androidx.core.content.ContextCompat
+import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.R as Media3R
 import me.erguotou.homehub.R
@@ -57,6 +58,19 @@ class HhPlayerView @JvmOverloads constructor(
     private var downDispatched = false
     private var hold = Hold.NONE
     private var lastEntered: Boolean? = null
+
+    init {
+        // The stock controller has five centre buttons: previous, rewind,
+        // play/pause, fast-forward, next. With a single media item the two
+        // edge buttons can only jump to 0:00 / the end, which the ±15s
+        // gestures already cover, and they read as "previous/next track" in a
+        // viewer that has no track to go to. Media3 keeps the flag in its
+        // layout manager, so the buttons stay hidden through every redraw.
+        findViewById<PlayerControlView>(Media3R.id.exo_controller)?.apply {
+            setShowPreviousButton(false)
+            setShowNextButton(false)
+        }
+    }
 
     /**
      * Set by a recognised double tap, cleared by the next finger-down. Covers

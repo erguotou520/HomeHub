@@ -241,11 +241,20 @@ private val ViewerTopChromeHeight = 56.dp
 private const val SeekStepMs = 15_000L
 
 /**
- * "2x rewind" is a seek loop, because ExoPlayer has no negative speed: 300ms of
- * timeline per 150ms of wall clock is the 2x the gesture promises.
+ * Press-and-hold speed, the same on both halves: the right half plays at it,
+ * the left half rewinds at it. One number keeps the two from drifting apart.
  */
-private const val RewindStepMs = 300L
-private const val RewindTickMs = 150L
+private const val HoldSpeed = 2f
+
+/**
+ * "2x rewind" is a seek loop, because ExoPlayer has no negative speed.
+ *
+ * The target comes from elapsed wall clock, not from a step per tick: a seek
+ * on a 1080p file takes longer than one tick, so "300ms of timeline per 150ms
+ * tick" measured ~1.3x in practice. [RewindTickMs] therefore only paces how
+ * often the picture is moved, not how fast the timeline runs.
+ */
+private const val RewindTickMs = 100L
 
 /** Touch target height of the audio seek bar (the bar itself is ~4dp). */
 private val SeekTouchHeight = 40.dp
@@ -439,6 +448,8 @@ fun VideoPage(
     var holdApplied by remember(key) { mutableStateOf(false) }
     var holdSpeed by remember(key) { mutableFloatStateOf(1f) }
     var holdVolume by remember(key) { mutableFloatStateOf(1f) }
+    /** Whether the rewind gesture interrupted playback and has to resume it. */
+    var holdWasPlaying by remember(key) { mutableStateOf(false) }
 
     val player = remember(key) {
         // Both skip buttons move by the same amount. The rewind default is 5s
@@ -485,10 +496,11 @@ fun VideoPage(
         if (!isCurrentPage && player.isPlaying) player.pause()
     }
 
-    // Press-and-hold. The right half plays at 2x; the left half walks the
-    // timeline backwards, because ExoPlayer has no negative playback speed.
-    // Both are undone the moment `hold` returns to NONE (finger lifted), which
-    // also cancels the rewind loop at its next suspension point.
+    // Press-and-hold. The right half plays at 2x. The left half has to fake
+    // it — ExoPlayer has no negative speed — so it pauses and walks the
+    // timeline backwards 2x as fast as wall clock. Both are undone the moment
+    // `hold` returns to NONE (finger lifted), which also cancels the rewind
+    // loop at its next suspension point.
     LaunchedEffect(hold) {
         when (hold) {
             HhPlayerView.Hold.FORWARD -> {
@@ -496,20 +508,34 @@ fun VideoPage(
                     holdSpeed = player.playbackParameters.speed
                     holdApplied = true
                 }
-                player.setPlaybackSpeed(2f)
+                player.setPlaybackSpeed(HoldSpeed)
                 hint = GestureHint("2× 快进", null, System.nanoTime())
             }
 
             HhPlayerView.Hold.REWIND -> {
                 if (!holdApplied) {
                     holdVolume = player.volume
+                    holdWasPlaying = player.isPlaying
                     holdApplied = true
                 }
-                // Scrubbing backwards while audio runs forward sounds broken.
+                // Scrubbing backwards while audio runs forward sounds broken,
+                // and a player that keeps advancing eats half of the rewind:
+                // 2x back minus 1x forward is 1x net. Pausing first makes the
+                // gesture mean what the hint says.
                 player.volume = 0f
+                player.pause()
                 hint = GestureHint("2× 快退", null, System.nanoTime())
+                // A local, wall-clock driven cursor rather than a re-read of
+                // player.currentPosition: seekTo is asynchronous, so for a
+                // frame or two the player still reports the pre-seek position
+                // and the next iteration would land on the same target.
+                val startNanos = System.nanoTime()
+                val startPosition = player.currentPosition
                 while (true) {
-                    player.seekTo((player.currentPosition - RewindStepMs).coerceAtLeast(0L))
+                    val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
+                    val target = (startPosition - (elapsedMs * HoldSpeed).toLong())
+                        .coerceAtLeast(0L)
+                    player.seekTo(target)
                     delay(RewindTickMs)
                 }
             }
@@ -518,6 +544,8 @@ fun VideoPage(
                 if (holdApplied) {
                     player.setPlaybackSpeed(holdSpeed)
                     player.volume = holdVolume
+                    // Only resume what the gesture interrupted.
+                    if (holdWasPlaying) player.play()
                     holdApplied = false
                 }
                 hint = null
@@ -595,7 +623,14 @@ fun VideoPage(
         hint?.let { h ->
             Surface(
                 color = Color.Black.copy(alpha = 0.72f),
-                shape = MaterialTheme.shapes.medium
+                shape = MaterialTheme.shapes.medium,
+                // Bottom-centre, not centre: a pill sitting mid-picture covers
+                // the play/pause cluster and whatever the frame is showing
+                // there (subtitles in particular). Held just above the control
+                // bar it still reads as an overlay on the video.
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 24.dp, end = 24.dp, bottom = 88.dp)
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,

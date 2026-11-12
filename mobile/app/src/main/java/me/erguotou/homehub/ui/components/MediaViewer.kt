@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
-import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
@@ -89,6 +88,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -104,6 +106,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.erguotou.homehub.R
+import me.erguotou.homehub.data.PlaybackPositions
 import me.erguotou.homehub.util.formatDuration
 
 /**
@@ -239,6 +242,19 @@ private val ViewerTopChromeHeight = 56.dp
 
 /** Double tap: Media3 players commonly use 15s, and the user asked for it. */
 private const val SeekStepMs = 15_000L
+
+/**
+ * How often a playing video checkpoints its position to disk. Short enough
+ * that a kill costs almost nothing, long enough to keep the disk quiet.
+ */
+private const val PositionSaveMs = 5_000L
+
+/**
+ * A stored position this close to the end counts as "already finished" when
+ * the file is re-opened (the file may have been re-encoded under the same
+ * URL, leaving the old offset past the end).
+ */
+private const val EndOfFileMs = 2_000L
 
 /**
  * Press-and-hold speed, the same on both halves: the right half plays at it,
@@ -432,15 +448,8 @@ fun VideoPage(
     val chromeTopPx = with(density) { ViewerTopChromeHeight.roundToPx() } +
         WindowInsets.statusBars.getTop(density)
 
-    /**
-     * A landscape screen is the only place where filling is free: the extra
-     * pixels go to the sides, so a picture that is narrower than the screen
-     * (every 16:9 and 2.4:1 source on a 20:9 phone) gets its black side bars
-     * trimmed instead of its content. Filling a portrait screen would crop the
-     * picture top and bottom, which is what "全屏上方显示不全" was.
-     */
-    val landscapeScreen =
-        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    /** Where this file got to last time, if it was left mid-way. */
+    val savedPosition = remember(key) { PlaybackPositions.get(context, url) }
 
     var hold by remember(key) { mutableStateOf(HhPlayerView.Hold.NONE) }
     var hint by remember(key) { mutableStateOf<GestureHint?>(null) }
@@ -452,6 +461,9 @@ fun VideoPage(
     var holdWasPlaying by remember(key) { mutableStateOf(false) }
 
     val player = remember(key) {
+        // Whether the resumed position has been sanity-checked against the
+        // real duration yet (see STATE_READY below).
+        var restoredChecked = false
         // Both skip buttons move by the same amount. The rewind default is 5s
         // while fast-forward is 15s, so the two arrows in the control bar
         // disagreed; the controller reads the amount from the player itself
@@ -463,10 +475,33 @@ fun VideoPage(
             .build()
             .apply {
                 setMediaItem(MediaItem.fromUri(url))
+                // Before prepare(): the player then opens the file at this
+                // offset, so the first frame is already the right one instead
+                // of 0:00 jumping a second later.
+                savedPosition?.let { seekTo(it) }
                 playWhenReady = false
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         playbackError = error.errorCodeName
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        when {
+                            // A stored position from a file that has since been
+                            // re-encoded (or trimmed) can sit past the end; it
+                            // would look like "instantly finished", so clamp it
+                            // back to the start instead.
+                            playbackState == Player.STATE_READY && !restoredChecked -> {
+                                restoredChecked = true
+                                if (duration > 0 && currentPosition >= duration - EndOfFileMs) {
+                                    seekTo(0L)
+                                }
+                            }
+
+                            // Watched to the end: the next visit starts over.
+                            playbackState == Player.STATE_ENDED ->
+                                PlaybackPositions.clear(context, url)
+                        }
                     }
 
                     override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -481,13 +516,47 @@ fun VideoPage(
             }
     }
 
+    /**
+     * Write the current position to disk. Called on a timer while the page is
+     * alive, when the window goes to the background, and when the page is torn
+     * down (swiped away or the viewer closed). A finished video keeps nothing:
+     * [PlaybackPositions] would only resume the last second.
+     */
+    fun rememberPosition() {
+        if (player.playbackState == Player.STATE_IDLE) return
+        if (player.playbackState == Player.STATE_ENDED) return
+        val position = player.currentPosition
+        if (position > 0L) PlaybackPositions.save(context, url, position)
+    }
+
     DisposableEffect(key) {
         onDispose {
+            rememberPosition()
             player.release()
             // The page that owns the session ends it; a pager neighbour being
             // torn down must leave the current page's fullscreen alone.
             fullscreen.release(key)
         }
+    }
+
+    // Periodic checkpoint: five seconds is short enough that a kill or a
+    // crash costs almost nothing, long enough to keep the disk quiet.
+    LaunchedEffect(player) {
+        while (true) {
+            delay(PositionSaveMs)
+            rememberPosition()
+        }
+    }
+
+    // 返回 / 切到桌面 / 锁屏: the page may never be disposed before the
+    // process is killed, so this is the last chance to record the position.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) rememberPosition()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
     }
 
     // Swipe away pauses; coming back keeps the position (doesn't auto-resume,
@@ -566,6 +635,12 @@ fun VideoPage(
             factory = { ctx ->
                 val view = LayoutInflater.from(ctx)
                     .inflate(R.layout.hh_player_view, null) as HhPlayerView
+                // Contain, always. Filling the screen (ZOOM) did trim the
+                // black bars of a 2.4:1 film, but it also cropped an ordinary
+                // 16:9 clip by ~9% top and bottom, which reads as "the bottom
+                // of the picture is cut off". Whatever space is left over is
+                // filled with black behind the video.
+                view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT)
                 // Installing this listener is also what makes Media3's
                 // exo_fullscreen button visible (it starts out GONE). The
                 // click itself is taken over below so the icon can follow our
@@ -602,20 +677,6 @@ fun VideoPage(
             update = { view ->
                 view.player = player
                 view.showFullscreenEntered(isFullscreen)
-                // Landscape: fill the screen instead of letterboxing it. On a
-                // 20:9 screen a 16:9 clip fitted by height leaves the bars top
-                // and bottom — which the user reads as empty padding above the
-                // picture, especially with our own top bar floating there. The
-                // crop that ZOOM performs lands in those bars first (a 2.4:1
-                // film keeps its picture intact and only loses 50px of its own
-                // black band), so nothing of the picture disappears.
-                view.setResizeMode(
-                    if (landscapeScreen) {
-                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    } else {
-                        AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    }
-                )
                 view.gestureTopInsetPx = if (isFullscreen) 0 else chromeTopPx
             },
             modifier = Modifier.fillMaxSize()

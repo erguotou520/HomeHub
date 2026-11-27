@@ -1,9 +1,17 @@
 package me.erguotou.homehub.data
 
+import com.wireguard.android.backend.Tunnel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import me.erguotou.homehub.wireguard.TunnelManager
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.io.IOException
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -23,12 +31,59 @@ import javax.net.ssl.X509TrustManager
  */
 object HttpClientFactory {
 
+    /** Upper bound for a cold-start retry: never hang forever on a bad tunnel. */
+    private const val TUNNEL_WAIT_MS = 15_000L
+
     fun create(prefs: Prefs, verbose: Boolean = false): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(120, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.MILLISECONDS)
+
+        // Cold start: the tunnel is brought up asynchronously in MainActivity,
+        // while AlbumViewModel (and the other screens) fire their first request
+        // as soon as the UI is composed. A socket created before the VPN exists
+        // does not get adopted by the tunnel, so that request stays dead even
+        // after WireGuard reports UP. Retry idempotent reads once the tunnel is
+        // up. Non-GET/HEAD calls are left alone (uploads/mutations must not be
+        // replayed), and without WireGuard configured the behaviour is unchanged.
+        builder.addInterceptor(object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
+                val request = chain.request()
+                val idempotent = request.method == "GET" || request.method == "HEAD"
+                if (!idempotent || !prefs.isWireGuardConfigured()) {
+                    return chain.proceed(request)
+                }
+
+                val upBeforeAttempt = TunnelManager.isConnected
+                return try {
+                    chain.proceed(request)
+                } catch (e: IOException) {
+                    // A genuine server failure while the tunnel was already up
+                    // is not a startup race — don't paper over it with a retry.
+                    if (upBeforeAttempt) throw e
+                    val cameUp = runBlocking {
+                        withTimeoutOrNull(TUNNEL_WAIT_MS) {
+                            TunnelManager.state.first { it == Tunnel.State.UP }
+                            // UP means the interface exists; the first handshake
+                            // may still be in flight, so give it a beat.
+                            delay(150)
+                            true
+                        }
+                    }
+                    if (cameUp != true) throw e
+                    // First retry creates a fresh socket on the tunnel. If the
+                    // initial handshake is still settling, give it one more beat.
+                    return try {
+                        chain.proceed(request)
+                    } catch (second: IOException) {
+                        Thread.sleep(300)
+                        chain.proceed(request)
+                    }
+                }
+            }
+        })
 
         if (prefs.trustCustomCert && prefs.serverCertPem.isNotBlank()) {
             val (socketFactory, trustManager) = trustCustomCertificate(prefs.serverCertPem)

@@ -110,3 +110,8 @@ runtime:
     retention-days: 90
     batch-size: 256
     flush-interval-secs: 5
+
+  # NVR 录像整体落到独立挂载卷，避免写满服务器系统盘 /data。
+  # 空值 = ${data-dir}/recordings（容器部署下即 /data/recordings）。
+  nvr:
+    record-dir: /mnt/nvr/recordings

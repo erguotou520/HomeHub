@@ -48,7 +48,11 @@ pub async fn move_to_trash(
     if let Some(parent) = src.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    tokio::fs::rename(&src, &target)
+    // The NAS directories are CIFS mounts while the trash lives on the local
+    // data disk: `rename` across filesystems fails with EXDEV. Fall back to a
+    // verified copy + delete, and only unlink the source once the copy is
+    // complete so a failed delete never leaves two copies behind.
+    move_path(&src, &target)
         .await
         .with_context(|| format!("move {} -> {}", src.display(), target.display()))?;
 
@@ -128,7 +132,9 @@ pub async fn restore(
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::rename(Path::new(&entry.trash_path), &dest).await?;
+    move_path(Path::new(&entry.trash_path), &dest)
+        .await
+        .with_context(|| format!("restore {} -> {}", entry.trash_path, dest.display()))?;
 
     sqlx::query("DELETE FROM trash_entries WHERE id = ?")
         .bind(id)
@@ -204,6 +210,86 @@ pub async fn usage(db: &Db) -> Result<(i64, i64)> {
     Ok(row)
 }
 
+/// Move a path to another filesystem. `rename` cannot cross a CIFS mount and
+/// the local data disk (EXDEV), so fall back to copy + delete. The source is
+/// removed only after the whole tree has been copied; if the removal fails,
+/// the copy is rolled back so a failed delete never leaves two copies.
+async fn move_path(src: &Path, dst: &Path) -> Result<()> {
+    if tokio::fs::rename(src, dst).await.is_ok() {
+        return Ok(());
+    }
+
+    let copied = if src.is_dir() {
+        copy_tree(src, dst).await
+    } else {
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::copy(src, dst)
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from)
+    };
+    if let Err(e) = copied {
+        return Err(e).with_context(|| {
+            format!(
+                "copy fallback failed after rename {} -> {}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+
+    let removed = if src.is_dir() {
+        tokio::fs::remove_dir_all(src).await
+    } else {
+        tokio::fs::remove_file(src).await
+    };
+    if let Err(e) = removed {
+        let _ = if dst.is_dir() {
+            tokio::fs::remove_dir_all(dst).await
+        } else {
+            tokio::fs::remove_file(dst).await
+        };
+        return Err(e).with_context(|| {
+            format!(
+                "remove source {} failed after copying to {}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Recursive copy that preserves directory permissions and symlinks.
+async fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(dst).await?;
+    for entry in walkdir::WalkDir::new(src).min_depth(1) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src)?;
+        let to = dst.join(rel);
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            tokio::fs::create_dir_all(&to).await?;
+            #[cfg(unix)]
+            {
+                let permissions = entry.metadata()?.permissions();
+                tokio::fs::set_permissions(&to, permissions).await?;
+            }
+        } else if file_type.is_file() {
+            tokio::fs::copy(entry.path(), &to).await?;
+        } else if file_type.is_symlink() {
+            #[cfg(unix)]
+            {
+                let target = std::fs::read_link(entry.path())?;
+                std::os::unix::fs::symlink(target, &to)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn dir_size(path: &Path) -> u64 {
     walkdir::WalkDir::new(path)
         .into_iter()
@@ -212,4 +298,48 @@ fn dir_size(path: &Path) -> u64 {
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A missing destination parent forces `rename` to fail, exercising the
+    /// same fallback path a CIFS -> local-disk EXDEV error takes.
+    #[tokio::test]
+    async fn move_path_falls_back_for_a_file() {
+        let base = std::env::temp_dir().join(format!("hh-trash-file-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        let src = base.join("src.txt");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        tokio::fs::write(&src, "hello").await.unwrap();
+        let dst = base.join("missing").join("trash").join("src.txt");
+
+        move_path(&src, &dst).await.unwrap();
+
+        assert!(!src.exists());
+        assert_eq!(tokio::fs::read_to_string(&dst).await.unwrap(), "hello");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn move_path_falls_back_for_a_directory_tree() {
+        let base = std::env::temp_dir().join(format!("hh-trash-dir-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        let src = base.join("src");
+        tokio::fs::create_dir_all(src.join("nested")).await.unwrap();
+        tokio::fs::write(src.join("nested").join("a.txt"), "data").await.unwrap();
+        let dst = base.join("missing").join("trash").join("src");
+
+        move_path(&src, &dst).await.unwrap();
+
+        assert!(!src.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(dst.join("nested").join("a.txt"))
+                .await
+                .unwrap(),
+            "data"
+        );
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
 }

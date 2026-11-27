@@ -156,7 +156,13 @@
 
     <include layout="@layout/exo_player_control_rewind_button" />
 
+    <!-- Bigger play/pause: the stock Center style uses 52dp. The horizontal
+         margins push the rewind/fast-forward buttons a little further away. -->
     <ImageButton android:id="@id/exo_play_pause"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
         style="@style/ExoStyledControls.Button.Center.PlayPause"/>
 
     <include layout="@layout/exo_player_control_ffwd_button" />

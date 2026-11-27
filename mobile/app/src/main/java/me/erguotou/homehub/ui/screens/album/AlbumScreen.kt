@@ -84,6 +84,7 @@ import me.erguotou.homehub.ui.components.PhotoTile
 import me.erguotou.homehub.ui.components.SectionHeader
 import me.erguotou.homehub.ui.components.rememberPhotoDownloader
 import me.erguotou.homehub.ui.components.rememberPhotoSharer
+import me.erguotou.homehub.work.DeleteTargetResolver
 import me.erguotou.homehub.work.UploadWorker
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -409,12 +410,18 @@ fun AlbumScreen(
                 TextButton(onClick = {
                     val dir = uploadDir
                     if (dir != null) {
+                        // 解析要在前台做（临时读授权仍有效）；删除由 MainActivity
+                        // 拿这些 MediaStore URI 弹系统确认框完成。
+                        val targets = pendingUploadUris.map { uri ->
+                            DeleteTargetResolver.resolve(context, uri).orEmpty()
+                        }
                         UploadWorker.enqueue(
                             context,
                             dir,
                             uploadPath.trim().trim('/'),
                             pendingUploadUris,
-                            uploadDeleteLocal
+                            uploadDeleteLocal,
+                            targets
                         )
                         vm.refresh()
                     }

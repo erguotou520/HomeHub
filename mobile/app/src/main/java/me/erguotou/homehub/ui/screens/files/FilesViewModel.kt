@@ -21,6 +21,7 @@ import me.erguotou.homehub.data.Repository
 import me.erguotou.homehub.util.FileKind
 import me.erguotou.homehub.util.FileKinds
 import me.erguotou.homehub.util.TempFiles
+import me.erguotou.homehub.work.DeleteTargetResolver
 import me.erguotou.homehub.work.UploadWorker
 
 /** The viewer (or the system hand-off) a file should be opened with. */
@@ -535,12 +536,16 @@ class FilesViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun upload(dir: String, path: String, uris: List<Uri>, deleteLocal: Boolean) {
         if (dir.isBlank() || uris.isEmpty()) return
+        // 解析必须在前台做（URI 的临时读授权还在）；真正的删除由 MainActivity
+        // 拿这些 MediaStore URI 弹系统确认框完成。
+        val targets = uris.map { uri -> DeleteTargetResolver.resolve(getApplication(), uri).orEmpty() }
         UploadWorker.enqueue(
             getApplication(),
             dir,
             path.trim().trim('/'),
             uris,
-            deleteLocal
+            deleteLocal,
+            targets
         )
     }
 

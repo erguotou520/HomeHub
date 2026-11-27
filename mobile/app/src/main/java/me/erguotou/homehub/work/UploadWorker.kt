@@ -23,6 +23,10 @@ import me.erguotou.homehub.data.Repository
  * Files are read in chunks and sent one chunk at a time so an interrupted
  * upload can resume from the last acknowledged chunk. The server appends
  * chunks to `<name>.part` and renames on the final chunk.
+ *
+ * 删除本地文件不在这里做：后台 Worker 拿不到删除授权（ACTION_GET_CONTENT 只给临时读
+ * 权限）。上传成功时把 [DeleteTargetResolver] 解析出的 MediaStore URI 放进输出，
+ * 由 MainActivity 弹系统确认框、让系统代为删除。
  */
 class UploadWorker(appContext: Context, params: WorkerParameters) :
     CoroutineWorker(appContext, params) {
@@ -35,15 +39,19 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
         val path = inputData.getString(KEY_PATH).orEmpty()
         val uris = inputData.getStringArray(KEY_URIS)?.map { Uri.parse(it) }.orEmpty()
         val deleteLocal = inputData.getBoolean(KEY_DELETE_LOCAL, false)
+        val deleteTargets = inputData.getStringArray(KEY_DELETE_TARGETS).orEmpty()
 
         if (dir.isBlank() || uris.isEmpty()) return@withContext Result.failure()
 
         var uploaded = 0
         var duplicates = 0
         var failures = 0
+        val pendingDelete = mutableListOf<String>()
 
         uris.forEachIndexed { index, uri ->
-            if (isStopped) return@withContext Result.success(workDataOf(uploaded, duplicates, failures))
+            if (isStopped) {
+                return@withContext Result.success(workDataOf(uploaded, duplicates, failures, pendingDelete))
+            }
 
             setForeground(createForegroundInfo(index + 1, uris.size))
             setProgressAsync(
@@ -64,7 +72,9 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
             var offset = repository.uploadOffset(dir, path, fileName).getOrNull() ?: 0L
             var lastError: Throwable? = null
             while (offset < bytes.size) {
-                if (isStopped) return@withContext Result.success(workDataOf(uploaded, duplicates, failures))
+                if (isStopped) {
+                    return@withContext Result.success(workDataOf(uploaded, duplicates, failures, pendingDelete))
+                }
                 val end = minOf(offset + CHUNK_SIZE, bytes.size.toLong()).toInt()
                 val chunk = bytes.copyOfRange(offset.toInt(), end)
                 val result = repository.uploadChunk(
@@ -90,31 +100,51 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
                 val outcome = response.getOrNull()?.uploaded?.firstOrNull()
                 when {
                     outcome?.skipped == true -> {
-                        // Server discarded the duplicate upload; keep the local file.
+                        // Server already holds an identical file; the local copy is redundant.
                         duplicates++
+                        uploaded++
+                        queueForDeletion(index, deleteTargets, deleteLocal, pendingDelete)
                     }
                     outcome?.duplicateOf != null -> {
                         duplicates++
                         uploaded++
-                        if (deleteLocal) deleteLocal(uri)
+                        queueForDeletion(index, deleteTargets, deleteLocal, pendingDelete)
                     }
                     outcome != null -> {
                         uploaded++
-                        if (deleteLocal) deleteLocal(uri)
+                        queueForDeletion(index, deleteTargets, deleteLocal, pendingDelete)
                     }
                     else -> failures++
                 }
             }
         }
 
-        notifyDone(uploaded, duplicates, failures)
-        Result.success(workDataOf(uploaded, duplicates, failures))
+        notifyDone(uploaded, duplicates, failures, pendingDelete.size)
+        Result.success(workDataOf(uploaded, duplicates, failures, pendingDelete))
     }
 
-    private fun workDataOf(uploaded: Int, duplicates: Int, failures: Int) = Data.Builder()
+    /** 记录一个待系统确认删除的目标；无可删除 URI 的条目就跳过。 */
+    private fun queueForDeletion(
+        index: Int,
+        deleteTargets: Array<out String>,
+        deleteLocal: Boolean,
+        pendingDelete: MutableList<String>
+    ) {
+        if (!deleteLocal) return
+        val target = deleteTargets.getOrNull(index).orEmpty()
+        if (target.isNotBlank()) pendingDelete += target
+    }
+
+    private fun workDataOf(
+        uploaded: Int,
+        duplicates: Int,
+        failures: Int,
+        pendingDelete: List<String>
+    ) = Data.Builder()
         .putInt(KEY_RESULT_UPLOADED, uploaded)
         .putInt(KEY_RESULT_DUPLICATES, duplicates)
         .putInt(KEY_RESULT_FAILURES, failures)
+        .putStringArray(KEY_PENDING_DELETE, pendingDelete.toTypedArray())
         .build()
 
     private fun fileNameOf(uri: Uri): String {
@@ -135,16 +165,6 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
         applicationContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
     } catch (e: Exception) {
         null
-    }
-
-    private fun deleteLocal(uri: Uri) {
-        try {
-            if (uri.scheme == "content") {
-                applicationContext.contentResolver.delete(uri, null, null)
-            }
-        } catch (e: Exception) {
-            // Best effort only: the user may not have granted the delete.
-        }
     }
 
     private fun createForegroundInfo(current: Int, total: Int): ForegroundInfo {
@@ -171,11 +191,12 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
         }
     }
 
-    private fun notifyDone(uploaded: Int, duplicates: Int, failures: Int) {
+    private fun notifyDone(uploaded: Int, duplicates: Int, failures: Int, pendingDelete: Int) {
         ensureChannel()
         val text = "完成 $uploaded 项" +
             (if (duplicates > 0) " · 重复 $duplicates 项" else "") +
-            (if (failures > 0) " · 失败 $failures 项" else "")
+            (if (failures > 0) " · 失败 $failures 项" else "") +
+            (if (pendingDelete > 0) " · 待确认删除 $pendingDelete 项" else "")
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_upload)
             .setContentTitle("上传结束")
@@ -203,27 +224,39 @@ class UploadWorker(appContext: Context, params: WorkerParameters) :
         private const val CHANNEL_ID = "homehub_upload"
         private const val NOTIFICATION_ID = 2001
 
+        const val TAG_UPLOAD = "upload"
         const val KEY_DIR = "dir"
         const val KEY_PATH = "path"
         const val KEY_URIS = "uris"
         const val KEY_DELETE_LOCAL = "delete_local"
+        const val KEY_DELETE_TARGETS = "delete_targets"
         const val KEY_PROGRESS_INDEX = "progress_index"
         const val KEY_PROGRESS_TOTAL = "progress_total"
         const val KEY_RESULT_UPLOADED = "uploaded"
         const val KEY_RESULT_DUPLICATES = "duplicates"
         const val KEY_RESULT_FAILURES = "failures"
+        /** 上传成功、待 MainActivity 弹系统确认框删除的 MediaStore URI。 */
+        const val KEY_PENDING_DELETE = "pending_delete"
 
-        fun enqueue(context: Context, dir: String, path: String, uris: List<Uri>, deleteLocal: Boolean) {
+        fun enqueue(
+            context: Context,
+            dir: String,
+            path: String,
+            uris: List<Uri>,
+            deleteLocal: Boolean,
+            deleteTargets: List<String>
+        ) {
             if (uris.isEmpty()) return
             val data = Data.Builder()
                 .putString(KEY_DIR, dir)
                 .putString(KEY_PATH, path)
                 .putStringArray(KEY_URIS, uris.map { it.toString() }.toTypedArray())
                 .putBoolean(KEY_DELETE_LOCAL, deleteLocal)
+                .putStringArray(KEY_DELETE_TARGETS, deleteTargets.toTypedArray())
                 .build()
             val request = androidx.work.OneTimeWorkRequestBuilder<UploadWorker>()
                 .setInputData(data)
-                .addTag("upload")
+                .addTag(TAG_UPLOAD)
                 .build()
             WorkManager.getInstance(context).enqueue(request)
         }

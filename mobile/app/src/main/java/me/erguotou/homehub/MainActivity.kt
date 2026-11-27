@@ -3,12 +3,16 @@ package me.erguotou.homehub
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +48,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import me.erguotou.homehub.data.Prefs
 import me.erguotou.homehub.security.AppLock
 import me.erguotou.homehub.security.GatePolicy
@@ -51,6 +57,7 @@ import me.erguotou.homehub.ui.HomeHubRoot
 import me.erguotou.homehub.ui.screens.setup.SetupScreen
 import me.erguotou.homehub.ui.theme.HomeHubTheme
 import me.erguotou.homehub.wireguard.TunnelManager
+import me.erguotou.homehub.work.UploadWorker
 
 class MainActivity : AppCompatActivity() {
 
@@ -58,6 +65,21 @@ class MainActivity : AppCompatActivity() {
 
     /** Set when the app leaves the foreground, cleared when it comes back. */
     private var backgroundedAt = 0L
+
+    /**
+     * 上传完成后请求系统删除本地副本。系统弹确认框并由系统执行删除——
+     * 我们不需要（也拿不到）对 ACTION_GET_CONTENT URI 的删除授权。
+     */
+    private val deleteLocalLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            Toast.makeText(this, "已删除本地副本", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 已经处理过删除确认的 work id，避免配置变化/重新进入时重复弹框。 */
+    private val handledDeleteWorks = mutableSetOf<String>()
 
     /** VPN permission is requested once; the result re-triggers connect(). */
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -101,6 +123,7 @@ class MainActivity : AppCompatActivity() {
         requestNotificationPermission()
         if (prefs.isWireGuardConfigured()) connectTunnel()
 
+        observeUploadDeletions()
         observeForegroundRelock()
 
         setContent {
@@ -140,6 +163,36 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 上传 Worker 成功后会把待删的 MediaStore URI 放进输出。这里观察已完成的上传，
+     * 用系统的删除确认框让用户决定——只有用户点了「删除」，系统才会真正删掉文件。
+     */
+    private fun observeUploadDeletions() {
+        WorkManager.getInstance(this)
+            .getWorkInfosByTagLiveData(UploadWorker.TAG_UPLOAD)
+            .observe(this) { infos ->
+                infos.forEach { info ->
+                    if (info.state != WorkInfo.State.SUCCEEDED) return@forEach
+                    val targets = info.outputData.getStringArray(UploadWorker.KEY_PENDING_DELETE)
+                    if (targets.isNullOrEmpty()) return@forEach
+                    if (!handledDeleteWorks.add(info.id.toString())) return@forEach
+
+                    val uris = targets.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }
+                    if (uris.isEmpty()) return@forEach
+                    try {
+                        // 系统弹确认框、系统执行删除；我们只需要提供 MediaStore URI。
+                        val request = MediaStore.createDeleteRequest(contentResolver, uris)
+                        deleteLocalLauncher.launch(
+                            IntentSenderRequest.Builder(request.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        // 文件可能已被用户删掉，或 URI 失效——不该让上传结果把 App 带崩。
+                        android.util.Log.w("HomeHubDelete", "无法发起删除确认", e)
+                    }
+                }
+            }
     }
 
     /**
